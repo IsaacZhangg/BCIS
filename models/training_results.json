@@ -1,0 +1,20 @@
+{
+  "n_subjects": 10,
+  "per_subject_scores": {
+    "subject0001": 0.9928571428571429,
+    "subject0002": 0.8714285714285713,
+    "subject0004": 0.8857142857142856,
+    "subject0005": 0.9142857142857143,
+    "subject0006": 0.9071428571428571,
+    "subject0007": 0.9428571428571428,
+    "subject0008": 0.8714285714285713,
+    "subject0009": 0.8928571428571427,
+    "subject0010": 0.8642857142857144,
+    "subject0011": 0.8928571428571429
+  },
+  "mean_accuracy": 0.9035714285714285,
+  "std_accuracy": 0.03714972463984528,
+  "target_met": true,
+  "model_path": "/Users/isaaczhang/Documents/BCIS Spring 2026/models/theta_classifier_model.joblib",
+  "scaler_path": "/Users/isaaczhang/Documents/BCIS Spring 2026/models/theta_classifier_scaler.joblib"
+}
