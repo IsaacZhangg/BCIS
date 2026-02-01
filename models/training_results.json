@@ -15,6 +15,6 @@
   "mean_accuracy": 0.9035714285714285,
   "std_accuracy": 0.03714972463984528,
   "target_met": true,
-  "model_path": "/Users/isaaczhang/Documents/BCIS Spring 2026/models/theta_classifier_model.joblib",
-  "scaler_path": "/Users/isaaczhang/Documents/BCIS Spring 2026/models/theta_classifier_scaler.joblib"
+  "model_path": "models/theta_classifier_model.joblib",
+  "scaler_path": "models/theta_classifier_scaler.joblib"
 }

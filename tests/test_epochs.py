@@ -49,7 +49,7 @@ def test_extract_labeled_epochs_separates_classes():
         (4000, 1, 1),  # other phase - should be ignored
     ]
 
-    focused, not_focused = extract_labeled_epochs(signal, events, sfreq)
+    focused, not_focused = extract_labeled_epochs(signal, events, sfreq, baseline_phase=5)
 
     assert len(focused) == 2
     assert len(not_focused) == 2

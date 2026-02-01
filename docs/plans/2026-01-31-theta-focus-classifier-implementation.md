@@ -17,15 +17,15 @@
 **Step 1: Create project structure**
 
 ```bash
-mkdir -p "/Users/isaaczhang/Documents/BCIS Spring 2026/src"
-mkdir -p "/Users/isaaczhang/Documents/BCIS Spring 2026/models"
-mkdir -p "/Users/isaaczhang/Documents/BCIS Spring 2026/tests"
+mkdir -p "./src"
+mkdir -p "./models"
+mkdir -p "./tests"
 ```
 
 **Step 2: Initialize uv and install dependencies**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv init --name theta-focus-classifier
 uv add numpy pandas scipy mne scikit-learn joblib
 uv add --dev pytest ruff
@@ -64,7 +64,7 @@ from src.data_loader import load_recording, get_complete_recordings
 
 def test_load_recording_returns_data_and_events():
     """Test that load_recording returns EEG data and event markers."""
-    data_dir = Path("/Users/isaaczhang/Documents/BCIS Spring 2026/unicorn-data")
+    data_dir = Path("./unicorn-data")
     csv_path = data_dir / "subject0001/session000/recording_2025-11-12-21.33.31.csv"
 
     data, events, sfreq = load_recording(csv_path)
@@ -84,7 +84,7 @@ def test_load_recording_returns_data_and_events():
 
 def test_get_complete_recordings_finds_all_subjects():
     """Test that we find all complete recordings (100 imagery trials)."""
-    data_dir = Path("/Users/isaaczhang/Documents/BCIS Spring 2026/unicorn-data")
+    data_dir = Path("./unicorn-data")
 
     recordings = get_complete_recordings(data_dir)
 
@@ -96,7 +96,7 @@ def test_get_complete_recordings_finds_all_subjects():
 **Step 2: Run test to verify it fails**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_data_loader.py -v
 ```
 
@@ -182,7 +182,7 @@ def get_complete_recordings(data_dir: Path) -> list[Path]:
 **Step 4: Run test to verify it passes**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_data_loader.py -v
 ```
 
@@ -259,7 +259,7 @@ def test_preprocess_eeg_full_pipeline():
 **Step 2: Run test to verify it fails**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_preprocess.py -v
 ```
 
@@ -346,7 +346,7 @@ def preprocess_eeg(data: np.ndarray, sfreq: float) -> np.ndarray:
 **Step 4: Run test to verify it passes**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_preprocess.py -v
 ```
 
@@ -425,7 +425,7 @@ def test_extract_labeled_epochs_separates_classes():
 **Step 2: Run test to verify it fails**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_epochs.py -v
 ```
 
@@ -515,7 +515,7 @@ def extract_labeled_epochs(
 **Step 4: Run test to verify it passes**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_epochs.py -v
 ```
 
@@ -596,7 +596,7 @@ def test_extract_features_log_transform():
 **Step 2: Run test to verify it fails**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_features.py -v
 ```
 
@@ -679,7 +679,7 @@ def extract_features(
 **Step 4: Run test to verify it passes**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_features.py -v
 ```
 
@@ -761,7 +761,7 @@ def test_train_final_model_returns_model():
 **Step 2: Run test to verify it fails**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_train.py -v
 ```
 
@@ -856,7 +856,7 @@ def train_final_model(
 **Step 4: Run test to verify it passes**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/test_train.py -v
 ```
 
@@ -1015,8 +1015,8 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
 
 if __name__ == "__main__":
-    data_dir = Path("/Users/isaaczhang/Documents/BCIS Spring 2026/unicorn-data")
-    output_dir = Path("/Users/isaaczhang/Documents/BCIS Spring 2026/models")
+    data_dir = Path("./unicorn-data")
+    output_dir = Path("./models")
 
     results = run_pipeline(data_dir, output_dir)
 ```
@@ -1024,7 +1024,7 @@ if __name__ == "__main__":
 **Step 2: Run the full pipeline**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run python -m src.pipeline
 ```
 
@@ -1037,7 +1037,7 @@ Expected: Pipeline runs and outputs accuracy results
 **Step 1: Run full test suite**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run pytest tests/ -v
 ```
 
@@ -1046,7 +1046,7 @@ Expected: All tests pass
 **Step 2: Run linting**
 
 ```bash
-cd "/Users/isaaczhang/Documents/BCIS Spring 2026"
+cd "."
 uv run ruff check src/ tests/
 ```
 

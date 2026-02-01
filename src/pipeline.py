@@ -172,7 +172,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
 
 if __name__ == "__main__":
-    data_dir = Path("/Users/isaaczhang/Documents/BCIS Spring 2026/unicorn-data")
-    output_dir = Path("/Users/isaaczhang/Documents/BCIS Spring 2026/models")
+    data_dir = Path("unicorn-data")
+    output_dir = Path("models")
 
     results = run_pipeline(data_dir, output_dir)
