@@ -8,9 +8,9 @@ import numpy as np
 
 from src.data_loader import load_recording, get_complete_recordings, CHANNELS
 from src.preprocess import preprocess_eeg
-from src.epochs import extract_labeled_epochs, extract_motor_imagery_epochs, extract_erd_epochs
-from src.features import extract_multichannel_features, extract_erd_features, CSP
-from src.train import train_loso_cv, train_within_subject_cv, train_within_subject_cv_riemannian, train_final_model
+from src.epochs import extract_erd_epochs
+from src.features import extract_erd_features
+from src.train import train_within_subject_cv_riemannian, train_final_model
 
 
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:

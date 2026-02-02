@@ -84,55 +84,6 @@ def extract_labeled_epochs(
     return focused, baseline
 
 
-def extract_motor_imagery_epochs(
-    signal: np.ndarray,
-    events: list[tuple[int, int, int]],
-    sfreq: float,
-    duration: float = 2.0,
-    offset: float = 0.0,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """
-    Extract motor imagery epochs separated by movement type (left vs right hand).
-
-    Movement 1 = one hand, Movement 2 = other hand
-
-    Args:
-        signal: 1D preprocessed signal array
-        events: List of (sample_idx, phase, movement) tuples
-        sfreq: Sampling frequency in Hz
-        duration: Epoch duration in seconds
-        offset: Time offset from event start in seconds
-
-    Returns:
-        Tuple of (movement1_epochs, movement2_epochs)
-    """
-    n_samples = int(duration * sfreq)
-    offset_samples = int(offset * sfreq)
-    movement1 = []
-    movement2 = []
-
-    for sample_idx, phase, movement in events:
-        # Only use imagery phase (phase 3)
-        if phase != 3:
-            continue
-
-        # Apply offset
-        start_idx = sample_idx + offset_samples
-
-        # Check if epoch would extend past end of signal
-        if start_idx + n_samples > len(signal):
-            continue
-
-        epoch = signal[start_idx : start_idx + n_samples]
-
-        if movement == 1:
-            movement1.append(epoch)
-        elif movement == 2:
-            movement2.append(epoch)
-
-    return movement1, movement2
-
-
 def extract_erd_epochs(
     signal: np.ndarray,
     events: list[tuple[int, int, int]],

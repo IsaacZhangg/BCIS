@@ -4,21 +4,13 @@ import numpy as np
 from sklearn.ensemble import (
     RandomForestClassifier,
     GradientBoostingClassifier,
-    VotingClassifier,
-    AdaBoostClassifier,
     ExtraTreesClassifier,
-    BaggingClassifier,
-    StackingClassifier,
 )
-from sklearn.model_selection import StratifiedKFold, GridSearchCV
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classif
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.neural_network import MLPClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest, f_classif
 
 # Riemannian geometry classifiers
 from pyriemann.estimation import Covariances
@@ -77,97 +69,6 @@ def train_loso_cv(
         # Evaluate
         accuracy = model.score(X_test_scaled, y_test)
         scores.append(accuracy)
-
-    mean_acc = np.mean(scores)
-    std_acc = np.std(scores)
-
-    return scores, mean_acc, std_acc
-
-
-def train_within_subject_cv(
-    X_by_subject: list[np.ndarray],
-    y_by_subject: list[np.ndarray],
-    n_folds: int = 10,
-) -> tuple[list[float], float, float]:
-    """
-    Train with within-subject cross-validation.
-
-    For each subject, use stratified k-fold CV to evaluate classification
-    accuracy. This mirrors real BCI calibration where models are trained
-    per-subject.
-
-    Args:
-        X_by_subject: List of feature arrays, one per subject
-        y_by_subject: List of label arrays, one per subject
-        n_folds: Number of CV folds per subject
-
-    Returns:
-        Tuple of (per_subject_scores, mean_accuracy, std_accuracy)
-    """
-    n_subjects = len(X_by_subject)
-    scores = []
-
-    for subj_idx in range(n_subjects):
-        X = X_by_subject[subj_idx]
-        y = y_by_subject[subj_idx]
-
-        # Use fewer folds if not enough samples
-        n_samples = len(y)
-        actual_folds = min(n_folds, n_samples // 2)
-        if actual_folds < 2:
-            # Not enough samples for CV, use leave-one-out
-            actual_folds = n_samples
-
-        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
-        fold_scores = []
-
-        for train_idx, test_idx in skf.split(X, y):
-            X_train, X_test = X[train_idx], X[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
-
-            # Standardize features
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
-
-            # Feature selection - keep top features based on training data
-            n_features = X_train_scaled.shape[1]
-            k_features = min(35, n_features)
-            selector = SelectKBest(f_classif, k=k_features)
-            X_train_selected = selector.fit_transform(X_train_scaled, y_train)
-            X_test_selected = selector.transform(X_test_scaled)
-
-            # Voting ensemble with diverse, well-regularized classifiers
-            rf = RandomForestClassifier(
-                n_estimators=300, max_depth=4, min_samples_leaf=3,
-                max_features='sqrt', class_weight='balanced',
-                random_state=42, n_jobs=-1
-            )
-            et = ExtraTreesClassifier(
-                n_estimators=300, max_depth=4, min_samples_leaf=3,
-                max_features='sqrt', class_weight='balanced',
-                random_state=42, n_jobs=-1
-            )
-            gb = GradientBoostingClassifier(
-                n_estimators=100, max_depth=2, learning_rate=0.05,
-                min_samples_leaf=5, subsample=0.8, random_state=42
-            )
-            svm = SVC(kernel='rbf', C=1.0, gamma='scale', probability=True,
-                     class_weight='balanced', random_state=42)
-            lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
-
-            model = VotingClassifier(
-                estimators=[('rf', rf), ('et', et), ('gb', gb), ('svm', svm), ('lda', lda)],
-                voting='soft',
-            )
-            model.fit(X_train_selected, y_train)
-
-            accuracy = model.score(X_test_selected, y_test)
-
-            fold_scores.append(accuracy)
-
-        subj_score = np.mean(fold_scores)
-        scores.append(subj_score)
 
     mean_acc = np.mean(scores)
     std_acc = np.std(scores)
