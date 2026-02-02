@@ -962,8 +962,6 @@ def train_left_right_within_subject(
                     continue
 
             # 29. Band power features per channel
-            from scipy.signal import welch as scipy_welch
-
             def extract_band_power_features(data, sfreq, bands):
                 # data: (n_trials, n_channels, n_samples)
                 n_trials, n_channels, _ = data.shape
