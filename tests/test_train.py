@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from src.train import train_loso_cv, train_final_model, train_left_right_loso
+from src.train import train_loso_cv, train_final_model, train_left_right_within_subject
 
 
 def test_train_loso_cv_returns_scores():
@@ -60,13 +60,13 @@ def test_train_final_model_returns_model():
     assert accuracy > 0.9
 
 
-def test_train_left_right_loso_returns_scores():
-    """Test LOSO CV returns per-subject scores."""
+def test_train_left_right_within_subject_returns_scores():
+    """Test within-subject CV returns per-subject scores."""
     n_subjects = 3
-    n_epochs_per_subject = 20
+    n_epochs_per_subject = 40  # Need more for 10-fold CV
     n_features = 10
     n_channels = 8
-    n_samples = 375
+    n_samples = 625  # 2.5 seconds at 250Hz
 
     X_by_subject = []
     y_by_subject = []
@@ -74,11 +74,13 @@ def test_train_left_right_loso_returns_scores():
     for _ in range(n_subjects):
         X_feat = np.random.randn(n_epochs_per_subject, n_features)
         X_mc = np.random.randn(n_epochs_per_subject, n_channels, n_samples)
-        y = np.array([0] * 10 + [1] * 10)
+        y = np.array([0] * 20 + [1] * 20)
         X_by_subject.append((X_feat, X_mc))
         y_by_subject.append(y)
 
-    scores, mean_acc, std_acc = train_left_right_loso(X_by_subject, y_by_subject)
+    scores, mean_acc, std_acc = train_left_right_within_subject(
+        X_by_subject, y_by_subject, n_folds=5  # Use fewer folds for speed
+    )
 
     assert len(scores) == n_subjects
     assert 0 <= mean_acc <= 1

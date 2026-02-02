@@ -10,7 +10,7 @@ from src.data_loader import load_recording, get_complete_recordings, CHANNELS
 from src.preprocess import preprocess_eeg
 from src.epochs import extract_left_right_epochs
 from src.features import extract_lateralization_features
-from src.train import train_left_right_loso, train_final_model
+from src.train import train_left_right_within_subject, train_final_model
 
 
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
@@ -58,8 +58,9 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         for ch_name, signal in processed_channels.items():
             left_pairs, right_pairs = extract_left_right_epochs(
                 signal, events, sfreq,
-                task_duration=1.5,
+                task_duration=1.8,
                 baseline_duration=1.0,
+                skip_duration=0.5,
             )
             left_pairs_by_channel[ch_name] = left_pairs
             right_pairs_by_channel[ch_name] = right_pairs
@@ -100,12 +101,12 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     if len(X_by_subject) == 0:
         raise ValueError("No valid subjects found")
 
-    # Step 3: Leave-One-Subject-Out Cross-validation
-    print("\n[3/5] Running Leave-One-Subject-Out cross-validation...")
-    print("(Testing cross-subject generalization)")
-    scores, mean_acc, std_acc = train_left_right_loso(X_by_subject, y_by_subject)
+    # Step 3: Within-Subject Cross-validation
+    print("\n[3/5] Running within-subject cross-validation...")
+    print("(10-fold CV per subject with optimized ensemble)")
+    scores, mean_acc, std_acc = train_left_right_within_subject(X_by_subject, y_by_subject)
 
-    print("\nPer-subject accuracy (LOSO CV):")
+    print("\nPer-subject accuracy (Within-Subject 10-fold CV):")
     for sid, score in zip(subject_ids, scores):
         status = "PASS" if score >= 0.9 else "FAIL"
         print(f"  {sid}: {score:.1%} [{status}]")
