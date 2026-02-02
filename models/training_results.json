@@ -1,0 +1,22 @@
+{
+  "n_subjects": 10,
+  "per_subject_scores": {
+    "subject0001": 0.78,
+    "subject0002": 0.745,
+    "subject0004": 0.69,
+    "subject0005": 0.7749999999999999,
+    "subject0006": 0.7,
+    "subject0007": 0.8150000000000001,
+    "subject0008": 0.875,
+    "subject0009": 0.74,
+    "subject0010": 0.8700000000000001,
+    "subject0011": 0.7299999999999999
+  },
+  "mean_accuracy": 0.7719999999999999,
+  "std_accuracy": 0.06128621378417829,
+  "target_met": false,
+  "model_path": "models/engagement_classifier_model.joblib",
+  "scaler_path": "models/engagement_classifier_scaler.joblib",
+  "realtime_model_path": "models/engagement_realtime_model.joblib",
+  "realtime_scaler_path": "models/engagement_realtime_scaler.joblib"
+}
