@@ -7,8 +7,8 @@ import joblib
 import numpy as np
 
 from src.data_loader import load_recording, get_complete_recordings, CHANNELS
-from src.preprocess import preprocess_eeg, preprocess_eeg_multichannel
-from src.epochs import extract_erd_epochs, extract_augmented_epochs
+from src.preprocess import preprocess_eeg_multichannel
+from src.epochs import extract_augmented_epochs
 from src.features import extract_erd_features, extract_realtime_features
 from src.train import train_within_subject_cv_riemannian, train_final_model
 

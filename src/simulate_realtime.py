@@ -11,7 +11,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.data_loader import load_recording, CHANNELS, SFREQ
+from src.data_loader import load_recording, CHANNELS
 from src.preprocess import preprocess_eeg
 from src.features import extract_realtime_features
 

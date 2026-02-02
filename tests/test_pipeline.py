@@ -1,6 +1,5 @@
 """Tests for pipeline configuration."""
 
-import pytest
 from unittest.mock import patch, MagicMock
 import numpy as np
 from pathlib import Path

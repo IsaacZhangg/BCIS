@@ -1,8 +1,6 @@
 """Tests for real-time simulation."""
 
 import numpy as np
-import pytest
-from pathlib import Path
 
 
 def test_compute_engagement_score_range():
@@ -26,11 +24,11 @@ def test_check_alert_consecutive_windows():
 
     # Not enough consecutive low scores
     history = [80, 75, 25, 70]  # Only one below threshold
-    assert check_alert(history, threshold=30, consecutive=3) == False
+    assert not check_alert(history, threshold=30, consecutive=3)
 
     # Enough consecutive low scores
     history = [80, 25, 20, 15]  # Three consecutive below threshold
-    assert check_alert(history, threshold=30, consecutive=3) == True
+    assert check_alert(history, threshold=30, consecutive=3)
 
 
 def test_sliding_window_extraction():

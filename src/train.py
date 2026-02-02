@@ -5,19 +5,12 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     GradientBoostingClassifier,
     ExtraTreesClassifier,
-    VotingClassifier,
-    StackingClassifier,
-    AdaBoostClassifier,
-    BaggingClassifier,
 )
 from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
-from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.feature_selection import SelectKBest, f_classif
 import warnings
 
 # Riemannian geometry classifiers
