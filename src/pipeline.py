@@ -25,7 +25,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         Dictionary with results
     """
     print("=" * 60)
-    print("Theta Focus Classifier - Training Pipeline")
+    print("Engagement Classifier - Training Pipeline")
     print("=" * 60)
 
     # Step 1: Find complete recordings
@@ -52,60 +52,60 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             processed_channels[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
 
         # Extract ERD epochs (baseline + task pairs) for each channel
-        focused_pairs_by_channel = {}
-        rest_pairs_by_channel = {}
+        engaged_pairs_by_channel = {}
+        disengaged_pairs_by_channel = {}
 
         for ch_name, signal in processed_channels.items():
-            # Compare phase 3 vs phase 4 (different imagery task types)
-            focused_pairs, rest_pairs = extract_erd_epochs(
+            # Compare phase 3 (engaged/imagery) vs phase 5 (disengaged/rest)
+            engaged_pairs, disengaged_pairs = extract_erd_epochs(
                 signal, events, sfreq,
                 task_duration=1.5,
                 baseline_duration=1.0,
                 class1_phase=3,
-                class2_phase=4,
+                class2_phase=5,
             )
-            focused_pairs_by_channel[ch_name] = focused_pairs
-            rest_pairs_by_channel[ch_name] = rest_pairs
+            engaged_pairs_by_channel[ch_name] = engaged_pairs
+            disengaged_pairs_by_channel[ch_name] = disengaged_pairs
 
         # Check counts
-        n_focused = len(focused_pairs_by_channel[CHANNELS[0]])
-        n_rest = len(rest_pairs_by_channel[CHANNELS[0]])
+        n_engaged = len(engaged_pairs_by_channel[CHANNELS[0]])
+        n_disengaged = len(disengaged_pairs_by_channel[CHANNELS[0]])
 
         # Balance classes
-        if n_rest > n_focused:
+        if n_disengaged > n_engaged:
             np.random.seed(42)
-            indices = np.random.choice(n_rest, n_focused, replace=False)
+            indices = np.random.choice(n_disengaged, n_engaged, replace=False)
             for ch_name in CHANNELS:
-                rest_pairs_by_channel[ch_name] = [rest_pairs_by_channel[ch_name][i] for i in indices]
-            n_rest = n_focused
+                disengaged_pairs_by_channel[ch_name] = [disengaged_pairs_by_channel[ch_name][i] for i in indices]
+            n_disengaged = n_engaged
 
-        print(f"    Focused epochs: {n_focused}, Not-focused epochs: {n_rest}")
+        print(f"    Engaged epochs: {n_engaged}, Disengaged epochs: {n_disengaged}")
 
         # Extract ERD features
-        focused_features = extract_erd_features(focused_pairs_by_channel, sfreq)
-        rest_features = extract_erd_features(rest_pairs_by_channel, sfreq)
+        engaged_features = extract_erd_features(engaged_pairs_by_channel, sfreq)
+        disengaged_features = extract_erd_features(disengaged_pairs_by_channel, sfreq)
 
         # Also create multichannel arrays for Riemannian classification
         # Shape: (n_trials, n_channels, n_samples)
         n_channels = len(CHANNELS)
-        n_focused = len(focused_pairs_by_channel[CHANNELS[0]])
-        n_rest = len(rest_pairs_by_channel[CHANNELS[0]])
-        n_samples = focused_pairs_by_channel[CHANNELS[0]][0][1].shape[0]
+        n_engaged = len(engaged_pairs_by_channel[CHANNELS[0]])
+        n_disengaged = len(disengaged_pairs_by_channel[CHANNELS[0]])
+        n_samples = engaged_pairs_by_channel[CHANNELS[0]][0][1].shape[0]
 
-        focused_multichannel = np.zeros((n_focused, n_channels, n_samples))
-        rest_multichannel = np.zeros((n_rest, n_channels, n_samples))
+        engaged_multichannel = np.zeros((n_engaged, n_channels, n_samples))
+        disengaged_multichannel = np.zeros((n_disengaged, n_channels, n_samples))
 
         for ch_idx, ch_name in enumerate(CHANNELS):
-            for trial_idx in range(n_focused):
-                focused_multichannel[trial_idx, ch_idx, :] = focused_pairs_by_channel[ch_name][trial_idx][1]
-            for trial_idx in range(n_rest):
-                rest_multichannel[trial_idx, ch_idx, :] = rest_pairs_by_channel[ch_name][trial_idx][1]
+            for trial_idx in range(n_engaged):
+                engaged_multichannel[trial_idx, ch_idx, :] = engaged_pairs_by_channel[ch_name][trial_idx][1]
+            for trial_idx in range(n_disengaged):
+                disengaged_multichannel[trial_idx, ch_idx, :] = disengaged_pairs_by_channel[ch_name][trial_idx][1]
 
-        X_multichannel = np.vstack([focused_multichannel, rest_multichannel])
+        X_multichannel = np.vstack([engaged_multichannel, disengaged_multichannel])
 
         # Combine ERD features
-        X = np.vstack([focused_features, rest_features])
-        y = np.array([1] * len(focused_features) + [0] * len(rest_features))
+        X = np.vstack([engaged_features, disengaged_features])
+        y = np.array([1] * len(engaged_features) + [0] * len(disengaged_features))
 
         X_by_subject.append((X, X_multichannel))  # tuple of (features, multichannel)
         y_by_subject.append(y)
@@ -138,8 +138,8 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("\n[5/5] Saving model...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model_path = output_dir / "theta_classifier_model.joblib"
-    scaler_path = output_dir / "theta_classifier_scaler.joblib"
+    model_path = output_dir / "engagement_classifier_model.joblib"
+    scaler_path = output_dir / "engagement_classifier_scaler.joblib"
 
     joblib.dump(final_model, model_path)
     joblib.dump(scaler, scaler_path)
