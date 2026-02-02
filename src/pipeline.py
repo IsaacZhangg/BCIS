@@ -1,4 +1,4 @@
-"""Main pipeline: load data, preprocess, extract features, train, evaluate."""
+"""Main pipeline: load data, preprocess, extract features, train left/right classifier."""
 
 import json
 from pathlib import Path
@@ -8,14 +8,14 @@ import numpy as np
 
 from src.data_loader import load_recording, get_complete_recordings, CHANNELS
 from src.preprocess import preprocess_eeg
-from src.epochs import extract_erd_epochs
-from src.features import extract_erd_features
-from src.train import train_within_subject_cv_riemannian, train_final_model
+from src.epochs import extract_left_right_epochs
+from src.features import extract_lateralization_features
+from src.train import train_left_right_loso, train_final_model
 
 
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     """
-    Run the full training pipeline.
+    Run the full training pipeline for left/right motor imagery classification.
 
     Args:
         data_dir: Path to unicorn-data directory
@@ -25,7 +25,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         Dictionary with results
     """
     print("=" * 60)
-    print("Theta Focus Classifier - Training Pipeline")
+    print("Left/Right Motor Imagery Classifier - Training Pipeline")
     print("=" * 60)
 
     # Step 1: Find complete recordings
@@ -51,72 +51,61 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         for ch_idx, ch_name in enumerate(CHANNELS):
             processed_channels[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
 
-        # Extract ERD epochs (baseline + task pairs) for each channel
-        focused_pairs_by_channel = {}
-        rest_pairs_by_channel = {}
+        # Extract left/right epochs from phase 3
+        left_pairs_by_channel = {}
+        right_pairs_by_channel = {}
 
         for ch_name, signal in processed_channels.items():
-            # Compare phase 3 vs phase 4 (different imagery task types)
-            focused_pairs, rest_pairs = extract_erd_epochs(
+            left_pairs, right_pairs = extract_left_right_epochs(
                 signal, events, sfreq,
                 task_duration=1.5,
                 baseline_duration=1.0,
-                class1_phase=3,
-                class2_phase=4,
             )
-            focused_pairs_by_channel[ch_name] = focused_pairs
-            rest_pairs_by_channel[ch_name] = rest_pairs
+            left_pairs_by_channel[ch_name] = left_pairs
+            right_pairs_by_channel[ch_name] = right_pairs
 
-        # Check counts
-        n_focused = len(focused_pairs_by_channel[CHANNELS[0]])
-        n_rest = len(rest_pairs_by_channel[CHANNELS[0]])
+        n_left = len(left_pairs_by_channel[CHANNELS[0]])
+        n_right = len(right_pairs_by_channel[CHANNELS[0]])
+        print(f"    Left epochs: {n_left}, Right epochs: {n_right}")
 
-        # Balance classes
-        if n_rest > n_focused:
-            np.random.seed(42)
-            indices = np.random.choice(n_rest, n_focused, replace=False)
-            for ch_name in CHANNELS:
-                rest_pairs_by_channel[ch_name] = [rest_pairs_by_channel[ch_name][i] for i in indices]
-            n_rest = n_focused
+        if n_left == 0 or n_right == 0:
+            print(f"    Skipping {subject_id} - no epochs")
+            continue
 
-        print(f"    Focused epochs: {n_focused}, Not-focused epochs: {n_rest}")
+        # Extract lateralization features
+        left_features = extract_lateralization_features(left_pairs_by_channel, sfreq)
+        right_features = extract_lateralization_features(right_pairs_by_channel, sfreq)
 
-        # Extract ERD features
-        focused_features = extract_erd_features(focused_pairs_by_channel, sfreq)
-        rest_features = extract_erd_features(rest_pairs_by_channel, sfreq)
-
-        # Also create multichannel arrays for Riemannian classification
-        # Shape: (n_trials, n_channels, n_samples)
+        # Create multichannel arrays for CSP/Riemannian
         n_channels = len(CHANNELS)
-        n_focused = len(focused_pairs_by_channel[CHANNELS[0]])
-        n_rest = len(rest_pairs_by_channel[CHANNELS[0]])
-        n_samples = focused_pairs_by_channel[CHANNELS[0]][0][1].shape[0]
+        n_samples = left_pairs_by_channel[CHANNELS[0]][0][1].shape[0]
 
-        focused_multichannel = np.zeros((n_focused, n_channels, n_samples))
-        rest_multichannel = np.zeros((n_rest, n_channels, n_samples))
+        left_multichannel = np.zeros((n_left, n_channels, n_samples))
+        right_multichannel = np.zeros((n_right, n_channels, n_samples))
 
         for ch_idx, ch_name in enumerate(CHANNELS):
-            for trial_idx in range(n_focused):
-                focused_multichannel[trial_idx, ch_idx, :] = focused_pairs_by_channel[ch_name][trial_idx][1]
-            for trial_idx in range(n_rest):
-                rest_multichannel[trial_idx, ch_idx, :] = rest_pairs_by_channel[ch_name][trial_idx][1]
+            for trial_idx in range(n_left):
+                left_multichannel[trial_idx, ch_idx, :] = left_pairs_by_channel[ch_name][trial_idx][1]
+            for trial_idx in range(n_right):
+                right_multichannel[trial_idx, ch_idx, :] = right_pairs_by_channel[ch_name][trial_idx][1]
 
-        X_multichannel = np.vstack([focused_multichannel, rest_multichannel])
+        X_multichannel = np.vstack([left_multichannel, right_multichannel])
+        X_features = np.vstack([left_features, right_features])
+        y = np.array([0] * n_left + [1] * n_right)  # 0=left, 1=right
 
-        # Combine ERD features
-        X = np.vstack([focused_features, rest_features])
-        y = np.array([1] * len(focused_features) + [0] * len(rest_features))
-
-        X_by_subject.append((X, X_multichannel))  # tuple of (features, multichannel)
+        X_by_subject.append((X_features, X_multichannel))
         y_by_subject.append(y)
         subject_ids.append(subject_id)
 
-    # Step 3: Within-subject Cross-validation (realistic BCI evaluation)
-    print("\n[3/5] Running within-subject cross-validation...")
-    print("(Using Riemannian geometry + feature ensemble)")
-    scores, mean_acc, std_acc = train_within_subject_cv_riemannian(X_by_subject, y_by_subject)
+    if len(X_by_subject) == 0:
+        raise ValueError("No valid subjects found")
 
-    print("\nPer-subject accuracy (within-subject CV):")
+    # Step 3: Leave-One-Subject-Out Cross-validation
+    print("\n[3/5] Running Leave-One-Subject-Out cross-validation...")
+    print("(Testing cross-subject generalization)")
+    scores, mean_acc, std_acc = train_left_right_loso(X_by_subject, y_by_subject)
+
+    print("\nPer-subject accuracy (LOSO CV):")
     for sid, score in zip(subject_ids, scores):
         status = "PASS" if score >= 0.9 else "FAIL"
         print(f"  {sid}: {score:.1%} [{status}]")
@@ -129,17 +118,17 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     # Step 5: Train final model on all data
     print("\n[4/5] Training final model on all data...")
-    X_all = np.vstack([x[0] for x in X_by_subject])  # Just features for final model
+    X_all_features = np.vstack([x[0] for x in X_by_subject])
     y_all = np.concatenate(y_by_subject)
 
-    final_model, scaler = train_final_model(X_all, y_all)
+    final_model, scaler = train_final_model(X_all_features, y_all)
 
     # Step 6: Save model and scaler
     print("\n[5/5] Saving model...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model_path = output_dir / "theta_classifier_model.joblib"
-    scaler_path = output_dir / "theta_classifier_scaler.joblib"
+    model_path = output_dir / "left_right_classifier_model.joblib"
+    scaler_path = output_dir / "left_right_classifier_scaler.joblib"
 
     joblib.dump(final_model, model_path)
     joblib.dump(scaler, scaler_path)
@@ -149,7 +138,8 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     # Save results as JSON
     results = {
-        "n_subjects": len(recordings),
+        "task": "left_right_motor_imagery",
+        "n_subjects": len(subject_ids),
         "per_subject_scores": dict(zip(subject_ids, [float(s) for s in scores])),
         "mean_accuracy": float(mean_acc),
         "std_accuracy": float(std_acc),
