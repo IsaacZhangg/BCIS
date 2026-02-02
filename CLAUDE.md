@@ -75,8 +75,12 @@ unicorn-data/subject*/session*/*.csv
 | Random Forest | Traditional ML |
 | Extra Trees | Traditional ML |
 | Gradient Boosting | Traditional ML |
-| SVM (RBF kernel) | Traditional ML |
+| SVM (RBF kernel, multiple C values) | Traditional ML |
 | LDA | Traditional ML |
+
+**Covariance Estimators:** LWF, OAS, SCM (for Riemannian methods)
+
+**Feature Selection:** SelectKBest with F-statistic at k=30%, 50%, 70%, 90%
 
 ## Data Format Reference
 
@@ -167,9 +171,14 @@ trial = stim // 100
 
 | Band | Frequency | Project Use |
 |------|-----------|-------------|
+| Delta | 1-4 Hz | Low-frequency activity |
 | Theta | 4-8 Hz | Focus indicator |
-| Alpha/Mu | 8-13 Hz | **ERD primary** |
-| Beta | 13-30 Hz | **ERD secondary** |
+| Low Alpha | 8-10 Hz | ERD component |
+| High Alpha | 10-13 Hz | ERD component |
+| Mu | 8-12 Hz | **Motor imagery primary** |
+| Low Beta | 13-20 Hz | ERD secondary |
+| High Beta | 20-30 Hz | ERD secondary |
+| Gamma | 30-40 Hz | High-frequency activity |
 
 ### Event-Related Desynchronization (ERD)
 

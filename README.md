@@ -60,18 +60,27 @@ The pipeline uses a "best-of-many" approach, evaluating multiple methods per fol
 ```
 .
 ├── src/
+│   ├── __init__.py       # Package init
 │   ├── data_loader.py    # Load Unicorn EEG recordings
 │   ├── preprocess.py     # Bandpass + notch filtering
 │   ├── epochs.py         # Extract epochs from continuous EEG
-│   ├── features.py       # Feature extraction (ERD, CSP, Hjorth)
+│   ├── features.py       # Feature extraction (ERD, Hjorth, envelope)
 │   ├── train.py          # Training with cross-validation
 │   └── pipeline.py       # Main pipeline orchestration
 ├── models/
 │   ├── theta_classifier_model.joblib
 │   ├── theta_classifier_scaler.joblib
 │   └── training_results.json
+├── tests/
+│   ├── test_data_loader.py
+│   ├── test_epochs.py
+│   ├── test_features.py
+│   ├── test_preprocess.py
+│   └── test_train.py
+├── docs/
+│   └── plans/            # Design and implementation docs
 ├── unicorn-data/         # EEG recordings (not in repo)
-└── tests/
+└── pyproject.toml
 ```
 
 ## Usage
@@ -87,8 +96,10 @@ uv run python -m src.pipeline
 ## Dependencies
 
 - numpy, scipy - Signal processing
+- mne - EEG filtering and preprocessing
 - scikit-learn - Machine learning
 - pyriemann - Riemannian geometry for EEG
+- pandas - Data loading
 - joblib - Model serialization
 
 ## Hardware
