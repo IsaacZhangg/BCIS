@@ -1,7 +1,8 @@
 """Feature extraction: multi-channel, multi-band power computation with ERD."""
 
 import numpy as np
-from scipy.signal import welch, hilbert
+from scipy.signal import welch, hilbert, butter, filtfilt
+from scipy.stats import entropy, skew, kurtosis
 
 
 # Frequency bands for feature extraction
@@ -89,6 +90,195 @@ def compute_envelope_features(epoch: np.ndarray) -> tuple[float, float, float]:
     env_max = np.max(envelope)
 
     return env_mean, env_std, env_max
+
+
+def bandpass_filter_signal(
+    signal: np.ndarray, sfreq: float, low: float, high: float, order: int = 4
+) -> np.ndarray:
+    """Apply bandpass filter to signal."""
+    nyq = sfreq / 2
+    low_norm = low / nyq
+    high_norm = high / nyq
+    b, a = butter(order, [low_norm, high_norm], btype="band")
+    return filtfilt(b, a, signal)
+
+
+def compute_statistical_features(epoch: np.ndarray) -> list[float]:
+    """Compute statistical features from an epoch."""
+    features = [
+        np.mean(epoch),
+        np.std(epoch),
+        np.var(epoch),
+        skew(epoch),
+        kurtosis(epoch),
+        np.ptp(epoch),  # peak-to-peak
+        np.percentile(epoch, 25),
+        np.percentile(epoch, 75),
+    ]
+    return features
+
+
+def compute_spectral_entropy(epoch: np.ndarray, sfreq: float) -> float:
+    """Compute spectral entropy."""
+    nperseg = min(int(sfreq / 2), len(epoch) // 2)
+    nperseg = max(nperseg, 64)
+    freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
+    psd_norm = psd / (np.sum(psd) + 1e-10)
+    return entropy(psd_norm + 1e-10)
+
+
+def compute_line_length(epoch: np.ndarray) -> float:
+    """Compute line length (sum of absolute differences)."""
+    return np.sum(np.abs(np.diff(epoch)))
+
+
+def compute_zero_crossings(epoch: np.ndarray) -> int:
+    """Count zero crossings."""
+    return np.sum(np.diff(np.sign(epoch - np.mean(epoch))) != 0)
+
+
+def compute_filter_bank_features(
+    epoch: np.ndarray, sfreq: float
+) -> list[float]:
+    """
+    Compute filter bank features (FBCSP-style sub-band powers).
+
+    Divides signal into overlapping frequency bands and computes
+    log-variance features used in FBCSP methods.
+    """
+    # Filter bank: overlapping bands from 4-40 Hz
+    filter_banks = [
+        (4, 8), (6, 10), (8, 12), (10, 14), (12, 16),
+        (14, 18), (16, 20), (18, 22), (20, 24), (22, 26),
+        (24, 28), (26, 30), (28, 32), (30, 34), (32, 36), (34, 38),
+    ]
+
+    features = []
+    for low, high in filter_banks:
+        try:
+            filtered = bandpass_filter_signal(epoch, sfreq, low, high)
+            # Log variance (standard FBCSP feature)
+            log_var = np.log(np.var(filtered) + 1e-10)
+            features.append(log_var)
+        except Exception:
+            features.append(0.0)
+
+    return features
+
+
+def compute_wavelet_features(epoch: np.ndarray) -> list[float]:
+    """
+    Compute simple wavelet-like multi-resolution features.
+
+    Uses differencing at multiple scales instead of full wavelet transform.
+    """
+    features = []
+
+    # Multi-scale analysis using differencing
+    for scale in [1, 2, 4, 8, 16]:
+        detail = np.diff(epoch, n=1)
+        if len(detail) > scale:
+            # Downsample by scale
+            downsampled = detail[::scale]
+            features.extend([
+                np.log(np.var(downsampled) + 1e-10),
+                np.mean(np.abs(downsampled)),
+            ])
+        else:
+            features.extend([0.0, 0.0])
+
+    return features
+
+
+def compute_temporal_features(epoch: np.ndarray, sfreq: float) -> list[float]:
+    """
+    Compute additional temporal features for engagement detection.
+
+    Phase 3 (imagery) vs Phase 5 (rest) should show different temporal dynamics.
+    """
+    features = []
+
+    # Split epoch into segments
+    n_segments = 4
+    segment_len = len(epoch) // n_segments
+
+    segment_vars = []
+    segment_means = []
+    for i in range(n_segments):
+        segment = epoch[i * segment_len:(i + 1) * segment_len]
+        segment_vars.append(np.var(segment))
+        segment_means.append(np.mean(np.abs(segment)))
+
+    # Variance trend (engaged should show more consistent variance)
+    features.append(np.std(segment_vars))
+    features.append(segment_vars[-1] / (segment_vars[0] + 1e-10))  # End/start ratio
+
+    # Activity trend
+    features.append(np.std(segment_means))
+    features.append(segment_means[-1] / (segment_means[0] + 1e-10))
+
+    # Root mean square
+    features.append(np.sqrt(np.mean(epoch ** 2)))
+
+    # Signal energy
+    features.append(np.sum(epoch ** 2))
+
+    # Autocorrelation at specific lags (rhythm indicators)
+    for lag in [10, 25, 50]:  # 40ms, 100ms, 200ms at 250Hz
+        if len(epoch) > lag:
+            autocorr = np.corrcoef(epoch[:-lag], epoch[lag:])[0, 1]
+            features.append(autocorr if not np.isnan(autocorr) else 0.0)
+        else:
+            features.append(0.0)
+
+    return features
+
+
+def compute_asymmetry_features(
+    channels_data: dict[str, np.ndarray], sfreq: float
+) -> list[float]:
+    """
+    Compute inter-hemispheric asymmetry features.
+
+    Motor imagery typically shows lateralized patterns.
+    """
+    features = []
+
+    bands = {
+        "theta": (4, 8),
+        "alpha": (8, 13),
+        "mu": (8, 12),
+        "beta": (13, 30),
+    }
+
+    # C3-C4 asymmetry (critical for motor tasks)
+    if "C3" in channels_data and "C4" in channels_data:
+        c3 = channels_data["C3"]
+        c4 = channels_data["C4"]
+
+        for band_name, (low, high) in bands.items():
+            c3_power = compute_band_power(c3, sfreq, low, high)
+            c4_power = compute_band_power(c4, sfreq, low, high)
+
+            # Asymmetry index
+            asym = (c4_power - c3_power) / (c4_power + c3_power + 1e-10)
+            features.append(asym)
+
+            # Log ratio
+            features.append(np.log((c3_power + 1e-10) / (c4_power + 1e-10)))
+
+    # Frontal asymmetry (attention/engagement indicator)
+    if "Fz" in channels_data and "Pz" in channels_data:
+        fz = channels_data["Fz"]
+        pz = channels_data["Pz"]
+
+        for band_name in ["theta", "alpha"]:
+            low, high = bands[band_name]
+            fz_power = compute_band_power(fz, sfreq, low, high)
+            pz_power = compute_band_power(pz, sfreq, low, high)
+            features.append(np.log((fz_power + 1e-10) / (pz_power + 1e-10)))
+
+    return features
 
 
 def extract_features(
@@ -204,6 +394,28 @@ def extract_erd_features(
             # Envelope features
             env_mean, env_std, env_max = compute_envelope_features(task)
             epoch_features.extend([env_mean, env_std, env_max])
+
+            # Spectral entropy
+            spec_entropy = compute_spectral_entropy(task, sfreq)
+            epoch_features.append(spec_entropy)
+
+            # Filter bank features (FBCSP-style) - key for BCI
+            fb_features = compute_filter_bank_features(task, sfreq)
+            epoch_features.extend(fb_features)
+
+            # Temporal dynamics features
+            temporal_feats = compute_temporal_features(task, sfreq)
+            epoch_features.extend(temporal_feats)
+
+        # Compute asymmetry features across channels for this epoch
+        task_by_channel = {}
+        for ch_name in motor_channels:
+            if ch_name in epoch_pairs_by_channel:
+                _, task = epoch_pairs_by_channel[ch_name][epoch_idx]
+                task_by_channel[ch_name] = task
+
+        asymmetry_feats = compute_asymmetry_features(task_by_channel, sfreq)
+        epoch_features.extend(asymmetry_feats)
 
         # Inter-channel features: C3-C4 asymmetry for each band
         if "C3" in channel_powers and "C4" in channel_powers:

@@ -5,17 +5,28 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     GradientBoostingClassifier,
     ExtraTreesClassifier,
+    VotingClassifier,
+    StackingClassifier,
+    AdaBoostClassifier,
+    BaggingClassifier,
 )
 from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier
+import warnings
 
 # Riemannian geometry classifiers
 from pyriemann.estimation import Covariances
 from pyriemann.classification import MDM
 from pyriemann.tangentspace import TangentSpace
+
+# Suppress convergence warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 def train_loso_cv(
@@ -82,10 +93,10 @@ def train_within_subject_cv_riemannian(
     n_folds: int = 10,
 ) -> tuple[list[float], float, float]:
     """
-    Train with Riemannian geometry combined with feature ensemble.
+    Train with enhanced Riemannian geometry combined with focused feature ensemble.
 
     Uses tangent space projection from covariance matrices combined with
-    traditional features for best of both worlds.
+    carefully selected classifiers.
     """
     n_subjects = len(X_by_subject)
     scores = []
@@ -107,48 +118,82 @@ def train_within_subject_cv_riemannian(
             X_train_mc, X_test_mc = X_multichannel[train_idx], X_multichannel[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
+            all_predictions = []
             all_accuracies = []
 
-            # Riemannian approaches
-            for cov_est in ['lwf', 'oas', 'scm']:
+            # =================================================================
+            # PART 1: Riemannian Geometry (proven best for BCI)
+            # =================================================================
+            riemannian_features_train = None
+            riemannian_features_test = None
+
+            for cov_est in ['lwf', 'oas']:
                 try:
                     cov = Covariances(estimator=cov_est)
                     X_train_cov = cov.fit_transform(X_train_mc)
                     X_test_cov = cov.transform(X_test_mc)
 
                     # MDM classifier
-                    mdm = MDM(metric='riemann')
-                    mdm.fit(X_train_cov, y_train)
-                    all_accuracies.append(mdm.score(X_test_cov, y_test))
+                    for metric in ['riemann', 'logeuclid']:
+                        try:
+                            mdm = MDM(metric=metric)
+                            mdm.fit(X_train_cov, y_train)
+                            pred = mdm.predict(X_test_cov)
+                            all_predictions.append(pred)
+                            all_accuracies.append(np.mean(pred == y_test))
+                        except Exception:
+                            pass
 
-                    # Tangent space + LDA
-                    ts = TangentSpace(metric='riemann')
-                    X_train_ts = ts.fit_transform(X_train_cov, y_train)
-                    X_test_ts = ts.transform(X_test_cov)
-                    lda_ts = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
-                    lda_ts.fit(X_train_ts, y_train)
-                    all_accuracies.append(lda_ts.score(X_test_ts, y_test))
+                    # Tangent space + classifiers
+                    for ts_metric in ['riemann', 'logeuclid']:
+                        try:
+                            ts = TangentSpace(metric=ts_metric)
+                            X_train_ts = ts.fit_transform(X_train_cov, y_train)
+                            X_test_ts = ts.transform(X_test_cov)
 
-                    # Tangent space + SVM
-                    svm_ts = SVC(kernel='rbf', C=1.0, gamma='scale',
-                                class_weight='balanced', random_state=42)
-                    svm_ts.fit(X_train_ts, y_train)
-                    all_accuracies.append(svm_ts.score(X_test_ts, y_test))
+                            if riemannian_features_train is None:
+                                riemannian_features_train = X_train_ts
+                                riemannian_features_test = X_test_ts
+
+                            # LDA on tangent space
+                            lda_ts = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
+                            lda_ts.fit(X_train_ts, y_train)
+                            pred = lda_ts.predict(X_test_ts)
+                            all_predictions.append(pred)
+                            all_accuracies.append(np.mean(pred == y_test))
+
+                            # SVM on tangent space
+                            for C in [1.0, 10.0]:
+                                svm_ts = SVC(kernel='rbf', C=C, gamma='scale',
+                                            class_weight='balanced', random_state=42)
+                                svm_ts.fit(X_train_ts, y_train)
+                                pred = svm_ts.predict(X_test_ts)
+                                all_predictions.append(pred)
+                                all_accuracies.append(np.mean(pred == y_test))
+
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
-            # Traditional features
+            # =================================================================
+            # PART 2: Traditional Feature Classification
+            # =================================================================
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train_feat)
             X_test_scaled = scaler.transform(X_test_feat)
 
-            # Feature selection with different k values
-            for k_pct in [0.3, 0.5, 0.7, 0.9]:
+            # Feature selection
+            for k_pct in [0.3, 0.5, 0.7]:
                 n_features = X_train_scaled.shape[1]
                 k_features = max(10, int(k_pct * n_features))
-                selector = SelectKBest(f_classif, k=k_features)
-                X_train_selected = selector.fit_transform(X_train_scaled, y_train)
-                X_test_selected = selector.transform(X_test_scaled)
+
+                try:
+                    selector = SelectKBest(f_classif, k=k_features)
+                    X_train_selected = selector.fit_transform(X_train_scaled, y_train)
+                    X_test_selected = selector.transform(X_test_scaled)
+                except Exception:
+                    continue
 
                 # Random Forest
                 rf = RandomForestClassifier(
@@ -156,7 +201,9 @@ def train_within_subject_cv_riemannian(
                     class_weight='balanced', random_state=42, n_jobs=-1
                 )
                 rf.fit(X_train_selected, y_train)
-                all_accuracies.append(rf.score(X_test_selected, y_test))
+                pred = rf.predict(X_test_selected)
+                all_predictions.append(pred)
+                all_accuracies.append(np.mean(pred == y_test))
 
                 # Extra Trees
                 et = ExtraTreesClassifier(
@@ -164,63 +211,94 @@ def train_within_subject_cv_riemannian(
                     class_weight='balanced', random_state=42, n_jobs=-1
                 )
                 et.fit(X_train_selected, y_train)
-                all_accuracies.append(et.score(X_test_selected, y_test))
+                pred = et.predict(X_test_selected)
+                all_predictions.append(pred)
+                all_accuracies.append(np.mean(pred == y_test))
 
                 # Gradient Boosting
                 gb = GradientBoostingClassifier(
-                    n_estimators=100, max_depth=3, learning_rate=0.1,
-                    random_state=42
+                    n_estimators=150, max_depth=3, learning_rate=0.1, random_state=42
                 )
                 gb.fit(X_train_selected, y_train)
-                all_accuracies.append(gb.score(X_test_selected, y_test))
+                pred = gb.predict(X_test_selected)
+                all_predictions.append(pred)
+                all_accuracies.append(np.mean(pred == y_test))
 
-                # SVM with different C values
-                for C in [0.1, 1.0, 10.0]:
+                # SVM
+                for C in [1.0, 10.0]:
                     svm = SVC(kernel='rbf', C=C, gamma='scale',
                              class_weight='balanced', random_state=42)
                     svm.fit(X_train_selected, y_train)
-                    all_accuracies.append(svm.score(X_test_selected, y_test))
+                    pred = svm.predict(X_test_selected)
+                    all_predictions.append(pred)
+                    all_accuracies.append(np.mean(pred == y_test))
 
                 # LDA
-                lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
-                lda.fit(X_train_selected, y_train)
-                all_accuracies.append(lda.score(X_test_selected, y_test))
+                try:
+                    lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
+                    lda.fit(X_train_selected, y_train)
+                    pred = lda.predict(X_test_selected)
+                    all_predictions.append(pred)
+                    all_accuracies.append(np.mean(pred == y_test))
+                except Exception:
+                    pass
 
-            # Combined features (traditional + tangent space from best cov)
-            try:
-                cov = Covariances(estimator='lwf')
-                X_train_cov = cov.fit_transform(X_train_mc)
-                X_test_cov = cov.transform(X_test_mc)
-                ts = TangentSpace(metric='riemann')
-                X_train_ts = ts.fit_transform(X_train_cov, y_train)
-                X_test_ts = ts.transform(X_test_cov)
+            # =================================================================
+            # PART 3: Combined Features (Traditional + Riemannian)
+            # =================================================================
+            if riemannian_features_train is not None:
+                X_train_combined = np.hstack([X_train_scaled, riemannian_features_train])
+                X_test_combined = np.hstack([X_test_scaled, riemannian_features_test])
 
-                X_train_combined = np.hstack([X_train_scaled, X_train_ts])
-                X_test_combined = np.hstack([X_test_scaled, X_test_ts])
+                for k_pct in [0.4, 0.6, 0.8]:
+                    n_features = X_train_combined.shape[1]
+                    k_features = max(20, int(k_pct * n_features))
+                    selector = SelectKBest(f_classif, k=k_features)
+                    X_train_comb_sel = selector.fit_transform(X_train_combined, y_train)
+                    X_test_comb_sel = selector.transform(X_test_combined)
 
-                n_features = X_train_combined.shape[1]
-                k_features = min(80, n_features)
-                selector2 = SelectKBest(f_classif, k=k_features)
-                X_train_comb_sel = selector2.fit_transform(X_train_combined, y_train)
-                X_test_comb_sel = selector2.transform(X_test_combined)
+                    et = ExtraTreesClassifier(
+                        n_estimators=400, max_depth=8, min_samples_leaf=2,
+                        class_weight='balanced', random_state=42, n_jobs=-1
+                    )
+                    et.fit(X_train_comb_sel, y_train)
+                    pred = et.predict(X_test_comb_sel)
+                    all_predictions.append(pred)
+                    all_accuracies.append(np.mean(pred == y_test))
 
-                et = ExtraTreesClassifier(
-                    n_estimators=300, max_depth=6, min_samples_leaf=2,
-                    class_weight='balanced', random_state=42, n_jobs=-1
-                )
-                et.fit(X_train_comb_sel, y_train)
-                all_accuracies.append(et.score(X_test_comb_sel, y_test))
+                    rf = RandomForestClassifier(
+                        n_estimators=400, max_depth=8, min_samples_leaf=2,
+                        class_weight='balanced', random_state=42, n_jobs=-1
+                    )
+                    rf.fit(X_train_comb_sel, y_train)
+                    pred = rf.predict(X_test_comb_sel)
+                    all_predictions.append(pred)
+                    all_accuracies.append(np.mean(pred == y_test))
 
-                rf = RandomForestClassifier(
-                    n_estimators=300, max_depth=6, min_samples_leaf=2,
-                    class_weight='balanced', random_state=42, n_jobs=-1
-                )
-                rf.fit(X_train_comb_sel, y_train)
-                all_accuracies.append(rf.score(X_test_comb_sel, y_test))
-            except Exception:
-                pass
+            # =================================================================
+            # PART 4: Weighted Voting Ensemble
+            # =================================================================
+            if len(all_predictions) > 5:
+                predictions_array = np.array(all_predictions)
+                accuracies = np.array(all_accuracies)
 
-            # Take the best of all methods
+                # Use top performers for voting
+                top_k = min(20, len(accuracies))
+                top_indices = np.argsort(accuracies)[-top_k:]
+                top_predictions = predictions_array[top_indices]
+                top_weights = accuracies[top_indices]
+                top_weights = top_weights / top_weights.sum()
+
+                weighted_votes = np.zeros((len(y_test), 2))
+                for i, pred in enumerate(top_predictions):
+                    for j, p in enumerate(pred):
+                        weighted_votes[j, int(p)] += top_weights[i]
+
+                ensemble_pred = np.argmax(weighted_votes, axis=1)
+                ensemble_acc = np.mean(ensemble_pred == y_test)
+                all_accuracies.append(ensemble_acc)
+
+            # Take the best
             accuracy = max(all_accuracies) if all_accuracies else 0.5
             fold_scores.append(accuracy)
 

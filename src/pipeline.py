@@ -7,8 +7,8 @@ import joblib
 import numpy as np
 
 from src.data_loader import load_recording, get_complete_recordings, CHANNELS
-from src.preprocess import preprocess_eeg
-from src.epochs import extract_erd_epochs
+from src.preprocess import preprocess_eeg, preprocess_eeg_multichannel
+from src.epochs import extract_erd_epochs, extract_augmented_epochs
 from src.features import extract_erd_features, extract_realtime_features
 from src.train import train_within_subject_cv_riemannian, train_final_model
 
@@ -47,24 +47,28 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         # Load recording
         data, events, sfreq = load_recording(rec_path)
 
-        # Process ALL channels
+        # Process ALL channels with CAR spatial filtering
+        data_multichannel = preprocess_eeg_multichannel(data, sfreq, CHANNELS, spatial_filter="car")
+
         processed_channels = {}
         for ch_idx, ch_name in enumerate(CHANNELS):
-            processed_channels[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
+            processed_channels[ch_name] = data_multichannel[ch_idx]
 
         # Cache for realtime model training
         processed_data_cache[rec_path] = (processed_channels, events, sfreq)
 
         # Extract ERD epochs (baseline + task pairs) for each channel
+        # Use augmented epochs to increase training data
         engaged_pairs_by_channel = {}
         disengaged_pairs_by_channel = {}
 
         for ch_name, signal in processed_channels.items():
             # Compare phase 3 (engaged/imagery) vs phase 5 (disengaged/rest)
-            engaged_pairs, disengaged_pairs = extract_erd_epochs(
+            # Use augmented epochs with 2 overlapping windows per trial
+            engaged_pairs, disengaged_pairs = extract_augmented_epochs(
                 signal, events, sfreq,
-                task_duration=1.5,
-                baseline_duration=1.0,
+                window_duration=2.0,
+                n_windows=2,
                 class1_phase=3,
                 class2_phase=5,
             )
