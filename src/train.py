@@ -289,7 +289,7 @@ def train_left_right_within_subject(
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy)
     """
-    from sklearn.ensemble import BaggingClassifier, AdaBoostClassifier, VotingClassifier
+    from sklearn.ensemble import BaggingClassifier, AdaBoostClassifier
     from pyriemann.classification import FgMDM
 
     # Include more granular bands especially in beta range where subject0006 shows strong signal
@@ -1199,7 +1199,7 @@ def train_left_right_within_subject(
                             svm = SVC(kernel='rbf', C=C, gamma=gamma, probability=True, random_state=42)
                             svm.fit(X_train_fbcsp, y_train)
                             all_probs.append(svm.predict_proba(X_test_fbcsp)[:, 1])
-                        except:
+                        except (ValueError, np.linalg.LinAlgError, RuntimeError):
                             continue
 
                 # Polynomial SVM
@@ -1208,7 +1208,7 @@ def train_left_right_within_subject(
                         svm = SVC(kernel='poly', degree=degree, C=1.0, probability=True, random_state=42)
                         svm.fit(X_train_fbcsp, y_train)
                         all_probs.append(svm.predict_proba(X_test_fbcsp)[:, 1])
-                    except:
+                    except (ValueError, np.linalg.LinAlgError, RuntimeError):
                         continue
 
             # 41. Neural network (simple MLP)
@@ -1219,7 +1219,7 @@ def train_left_right_within_subject(
                         mlp = MLPClassifier(hidden_layer_sizes=hidden, max_iter=500, random_state=42, early_stopping=True)
                         mlp.fit(X_train_fbcsp, y_train)
                         all_probs.append(mlp.predict_proba(X_test_fbcsp)[:, 1])
-                    except:
+                    except (ValueError, np.linalg.LinAlgError, RuntimeError):
                         continue
 
             # 42. k-NN
@@ -1230,7 +1230,7 @@ def train_left_right_within_subject(
                         knn = KNeighborsClassifier(n_neighbors=k, weights='distance')
                         knn.fit(X_train_fbcsp, y_train)
                         all_probs.append(knn.predict_proba(X_test_fbcsp)[:, 1])
-                    except:
+                    except (ValueError, np.linalg.LinAlgError, RuntimeError):
                         continue
 
             # 43. Very low regularization CSP (may help for clean subjects)
@@ -1247,7 +1247,7 @@ def train_left_right_within_subject(
                         lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
                         lda.fit(X_train_csp, y_train)
                         all_probs.append(lda.predict_proba(X_test_csp)[:, 1])
-                    except:
+                    except (ValueError, np.linalg.LinAlgError, RuntimeError):
                         continue
 
             # 44. Different trial lengths as features
@@ -1272,7 +1272,7 @@ def train_left_right_within_subject(
                             lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
                             lda.fit(X_train_csp, y_train)
                             all_probs.append(lda.predict_proba(X_test_csp)[:, 1])
-                        except:
+                        except (ValueError, np.linalg.LinAlgError, RuntimeError):
                             continue
 
             if all_probs:
@@ -1304,23 +1304,11 @@ def train_left_right_within_subject(
                             lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
                             lda.fit(X_train_csp, y_inner_train)
                             inner_probs.append(lda.predict_proba(X_val_csp)[:, 1])
-                        except:
+                        except (ValueError, np.linalg.LinAlgError, RuntimeError):
                             continue
 
                     if inner_probs:
                         inner_probs_list.append((np.array(inner_probs).T, inner_y))
-
-                # Train meta-learner if we have stacking data
-                meta_weight = 0.0
-                if inner_probs_list:
-                    X_stack = np.vstack([ip[0] for ip in inner_probs_list])
-                    y_stack = np.concatenate([ip[1] for ip in inner_probs_list])
-
-                    if len(X_stack) > 10:
-                        from sklearn.linear_model import LogisticRegression
-                        meta_lr = LogisticRegression(random_state=42, max_iter=1000)
-                        meta_lr.fit(X_stack, y_stack)
-                        meta_weight = np.mean(meta_lr.predict(X_stack) == y_stack) - 0.5
 
                 # Multiple ensemble strategies
                 avg_prob = np.mean(all_probs, axis=0)
@@ -1344,10 +1332,6 @@ def train_left_right_within_subject(
                 top_k = max(3, len(all_probs) // 5)
                 top_indices = np.argsort(individual_accs)[-top_k:]
                 top_k_prob = np.mean(all_probs[top_indices], axis=0)
-
-                # Stacking: use probabilities as features for final classifier
-                prob_features_train = all_probs.T  # shape (n_test, n_models)
-                # Can't do proper stacking in test fold, but we can try voting threshold tuning
 
                 # Calculate accuracies with different thresholds
                 accs = []
