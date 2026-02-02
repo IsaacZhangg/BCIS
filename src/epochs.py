@@ -152,9 +152,13 @@ def extract_left_right_epochs(
     sfreq: float,
     task_duration: float = 1.5,
     baseline_duration: float = 1.0,
+    phase: int = 3,
+    left_movement: int = 1,
+    right_movement: int = 2,
+    skip_duration: float = 0.5,
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[tuple[np.ndarray, np.ndarray]]]:
     """
-    Extract left (movement=1) and right (movement=2) motor imagery epochs from phase 3.
+    Extract left and right motor imagery epochs from specified phase.
 
     Args:
         signal: 1D preprocessed signal array
@@ -162,19 +166,24 @@ def extract_left_right_epochs(
         sfreq: Sampling frequency in Hz
         task_duration: Duration of task epoch in seconds
         baseline_duration: Duration of baseline epoch in seconds
+        phase: Phase number to extract epochs from (default 3)
+        left_movement: Movement code for left class (default 1)
+        right_movement: Movement code for right class (default 2)
+        skip_duration: Time to skip after event start before task epoch (default 0.5s)
 
     Returns:
         Tuple of (left_pairs, right_pairs) where each pair is (baseline, task)
     """
     task_samples = int(task_duration * sfreq)
     baseline_samples = int(baseline_duration * sfreq)
+    skip_samples = int(skip_duration * sfreq)
 
     left_pairs = []
     right_pairs = []
 
-    for sample_idx, phase, movement in events:
-        # Only phase 3 (imagery-perform)
-        if phase != 3:
+    for sample_idx, event_phase, movement in events:
+        # Only extract from specified phase
+        if event_phase != phase:
             continue
 
         # Extract baseline from immediately before event
@@ -185,17 +194,17 @@ def extract_left_right_epochs(
 
         baseline = signal[baseline_start:baseline_end]
 
-        # Extract task epoch (skip first 0.5s to capture developed ERD)
-        task_start = sample_idx + int(0.5 * sfreq)
+        # Extract task epoch (skip initial period to capture developed response)
+        task_start = sample_idx + skip_samples
         task_end = task_start + task_samples
         if task_end > len(signal):
             continue
 
         task = signal[task_start:task_end]
 
-        if movement == 1:
+        if movement == left_movement:
             left_pairs.append((baseline, task))
-        elif movement == 2:
+        elif movement == right_movement:
             right_pairs.append((baseline, task))
 
     return left_pairs, right_pairs

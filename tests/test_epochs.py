@@ -97,3 +97,50 @@ def test_extract_left_right_epochs_correct_durations():
     baseline, task = left_pairs[0]
     assert baseline.shape == (250,)
     assert task.shape == (375,)
+
+
+def test_extract_left_right_epochs_skips_baseline_before_signal_start():
+    """Test that events where baseline would start before signal start are skipped."""
+    sfreq = 250.0
+    signal = np.random.randn(20000)
+
+    # Event at sample 100 with baseline_duration=1.0s (250 samples)
+    # Baseline would need to start at sample -150, so should be skipped
+    events = [
+        (100, 3, 1),    # baseline would start at -150, skipped
+        (2000, 3, 1),   # valid left
+    ]
+
+    left_pairs, right_pairs = extract_left_right_epochs(
+        signal, events, sfreq,
+        baseline_duration=1.0
+    )
+
+    # Only second event should produce an epoch
+    assert len(left_pairs) == 1
+    assert len(right_pairs) == 0
+
+
+def test_extract_left_right_epochs_skips_task_past_signal_end():
+    """Test that events where task would extend past signal end are skipped."""
+    sfreq = 250.0
+    signal = np.random.randn(5000)  # 20 seconds of data
+
+    # With task_duration=1.5s and skip_duration=0.5s:
+    # Task needs 375 + 125 = 500 samples after event
+    # Event at 4600: task_end = 4600 + 125 + 375 = 5100 > 5000, skipped
+    events = [
+        (2000, 3, 2),   # valid right
+        (4600, 3, 2),   # task would extend past signal end, skipped
+    ]
+
+    left_pairs, right_pairs = extract_left_right_epochs(
+        signal, events, sfreq,
+        task_duration=1.5,
+        baseline_duration=1.0,
+        skip_duration=0.5
+    )
+
+    # Only first event should produce an epoch
+    assert len(left_pairs) == 0
+    assert len(right_pairs) == 1
