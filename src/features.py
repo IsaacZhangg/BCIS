@@ -282,7 +282,20 @@ def extract_lateralization_features(
 
     Returns:
         Feature array of shape (n_epochs, n_features)
+
+    Raises:
+        ValueError: If required channels (C3, C4, Cz, Fz) are missing from input
     """
+    # Validate required channels exist
+    required_channels = {"C3", "C4", "Cz", "Fz"}
+    available_channels = set(epoch_pairs_by_channel.keys())
+    missing_channels = required_channels - available_channels
+    if missing_channels:
+        raise ValueError(
+            f"Missing required channels for lateralization features: {sorted(missing_channels)}. "
+            f"Required: {sorted(required_channels)}, Available: {sorted(available_channels)}"
+        )
+
     # Key frequency bands for motor imagery
     bands = {
         "mu": (8, 12),
@@ -334,6 +347,10 @@ def extract_lateralization_features(
             epoch_features.append(c4_erd)
 
         # SECONDARY: Cz features (supplementary motor area)
+        # Note: Cz uses only mu and beta bands (not all 4 bands like C3/C4) because:
+        # - Cz sits over the supplementary motor area, not primary motor cortex
+        # - Mu (8-12Hz) captures motor planning activity
+        # - Beta (13-30Hz, combined) is sufficient for SMA; splitting into low/high adds noise
         cz_baseline, cz_task = epoch_pairs_by_channel["Cz"][epoch_idx]
         for band_name, (low, high) in [("mu", (8, 12)), ("beta", (13, 30))]:
             cz_baseline_power = compute_band_power(cz_baseline, sfreq, low, high)
@@ -343,6 +360,10 @@ def extract_lateralization_features(
             epoch_features.append(np.log(cz_task_power + 1e-10))
 
         # TERTIARY: Fz theta (attention/effort marker)
+        # Note: Fz uses only theta band (4-8Hz) because:
+        # - Frontal theta is a well-established marker of cognitive effort and attention
+        # - Motor imagery requires attention, and frontal theta increases with task demands
+        # - Mu/beta bands at Fz don't reflect motor-specific activity (Fz is frontal, not motor)
         fz_baseline, fz_task = epoch_pairs_by_channel["Fz"][epoch_idx]
         fz_theta_baseline = compute_band_power(fz_baseline, sfreq, 4, 8)
         fz_theta_task = compute_band_power(fz_task, sfreq, 4, 8)

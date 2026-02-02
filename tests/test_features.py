@@ -99,3 +99,64 @@ def test_extract_lateralization_features_correct_shape():
     # Should be (n_epochs, n_features)
     assert features.shape[0] == n_epochs
     assert features.shape[1] > 0
+
+
+def test_compute_lateralization_index_equal_power():
+    """Test that lateralization index is ~0 when C3 and C4 have equal power."""
+    sfreq = 250.0
+    t = np.arange(0, 1.5, 1 / sfreq)
+
+    # C3 and C4 have identical signals (equal power)
+    c3_signal = np.sin(2 * np.pi * 10 * t)
+    c4_signal = np.sin(2 * np.pi * 10 * t)
+
+    lat_idx = compute_lateralization_index(c3_signal, c4_signal, sfreq, 8, 12)
+
+    # Lateralization index should be approximately 0 when power is equal
+    assert abs(lat_idx) < 0.01
+
+
+def test_extract_lateralization_features_expected_count():
+    """Test that lateralization features returns the expected number of features."""
+    sfreq = 250.0
+    n_epochs = 3
+    n_samples_baseline = 250
+    n_samples_task = 375
+
+    # Create fake epoch pairs for each channel
+    epoch_pairs_by_channel = {}
+    for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]:
+        pairs = []
+        for _ in range(n_epochs):
+            baseline = np.random.randn(n_samples_baseline)
+            task = np.random.randn(n_samples_task)
+            pairs.append((baseline, task))
+        epoch_pairs_by_channel[ch] = pairs
+
+    features = extract_lateralization_features(epoch_pairs_by_channel, sfreq)
+
+    # Expected feature count breakdown:
+    # - 4 bands x 7 features per band = 28 (lateralization features for C3/C4)
+    # - 2 bands x 2 features per band = 4 (Cz features: mu and beta)
+    # - 1 feature (Fz theta ratio)
+    # - 2 channels x 3 Hjorth params = 6 (C3 and C4 time-domain features)
+    # Total = 28 + 4 + 1 + 6 = 39
+    expected_feature_count = 39
+    assert features.shape == (n_epochs, expected_feature_count)
+
+
+def test_extract_lateralization_features_missing_channels():
+    """Test that missing required channels raises a clear error."""
+    sfreq = 250.0
+    n_epochs = 2
+
+    # Missing C4 and Fz channels
+    epoch_pairs_by_channel = {}
+    for ch in ["C3", "Cz"]:  # Missing C4 and Fz
+        pairs = [(np.random.randn(250), np.random.randn(375)) for _ in range(n_epochs)]
+        epoch_pairs_by_channel[ch] = pairs
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Missing required channels"):
+        extract_lateralization_features(epoch_pairs_by_channel, sfreq)
