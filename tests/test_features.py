@@ -2,7 +2,12 @@
 
 import numpy as np
 
-from src.features import compute_theta_power, extract_features
+from src.features import (
+    compute_theta_power,
+    extract_features,
+    extract_lateralization_features,
+    compute_lateralization_index,
+)
 
 
 def test_compute_theta_power_detects_theta():
@@ -55,3 +60,42 @@ def test_extract_features_log_transform():
     # Log-transformed values should be in reasonable range (not huge like raw power)
     assert np.all(features < 100)
     assert np.all(features > -100)
+
+
+def test_compute_lateralization_index_detects_asymmetry():
+    """Test that lateralization index detects left/right power difference."""
+    sfreq = 250.0
+    t = np.arange(0, 1.5, 1 / sfreq)
+
+    # C3 has strong 10Hz (mu), C4 has weak signal
+    c3_signal = np.sin(2 * np.pi * 10 * t) * 2
+    c4_signal = np.sin(2 * np.pi * 10 * t) * 0.5
+
+    # Lateralization index: (C4 - C3) / (C4 + C3)
+    # Should be negative when C3 > C4 (right hand imagery pattern)
+    lat_idx = compute_lateralization_index(c3_signal, c4_signal, sfreq, 8, 12)
+    assert lat_idx < 0
+
+
+def test_extract_lateralization_features_correct_shape():
+    """Test that lateralization features have correct shape."""
+    sfreq = 250.0
+    n_epochs = 5
+    n_samples_baseline = 250
+    n_samples_task = 375
+
+    # Create fake epoch pairs for each channel
+    epoch_pairs_by_channel = {}
+    for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]:
+        pairs = []
+        for _ in range(n_epochs):
+            baseline = np.random.randn(n_samples_baseline)
+            task = np.random.randn(n_samples_task)
+            pairs.append((baseline, task))
+        epoch_pairs_by_channel[ch] = pairs
+
+    features = extract_lateralization_features(epoch_pairs_by_channel, sfreq)
+
+    # Should be (n_epochs, n_features)
+    assert features.shape[0] == n_epochs
+    assert features.shape[1] > 0
