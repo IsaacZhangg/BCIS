@@ -7,6 +7,7 @@ from src.features import (
     extract_features,
     extract_lateralization_features,
     compute_lateralization_index,
+    extract_csp_features,
 )
 
 
@@ -160,3 +161,21 @@ def test_extract_lateralization_features_missing_channels():
 
     with pytest.raises(ValueError, match="Missing required channels"):
         extract_lateralization_features(epoch_pairs_by_channel, sfreq)
+
+
+def test_extract_csp_features_correct_shape():
+    """Test CSP feature extraction returns correct shape."""
+    sfreq = 250.0
+    n_epochs = 20
+    n_channels = 8
+    n_samples = 375
+
+    # Multichannel data: (n_epochs, n_channels, n_samples)
+    X = np.random.randn(n_epochs, n_channels, n_samples)
+    y = np.array([0] * 10 + [1] * 10)  # Binary labels
+
+    features, csp_model = extract_csp_features(X, y, sfreq, n_components=4)
+
+    # Should return (n_epochs, n_components) features
+    assert features.shape == (n_epochs, 4)
+    assert csp_model is not None

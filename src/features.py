@@ -2,6 +2,7 @@
 
 import numpy as np
 from scipy.signal import welch, hilbert
+from mne.decoding import CSP
 
 
 # Frequency bands for feature extraction
@@ -377,3 +378,49 @@ def extract_lateralization_features(
         all_features.append(epoch_features)
 
     return np.array(all_features)
+
+
+def extract_csp_features(
+    X: np.ndarray,
+    y: np.ndarray,
+    sfreq: float,
+    n_components: int = 4,
+    freq_band: tuple[float, float] = (8, 30),
+) -> tuple[np.ndarray, CSP]:
+    """
+    Extract CSP (Common Spatial Pattern) features for motor imagery.
+
+    CSP finds spatial filters that maximize variance difference between classes,
+    making it ideal for left/right motor imagery where the difference is in
+    spatial distribution of mu/beta desynchronization.
+
+    Args:
+        X: Multichannel EEG data of shape (n_epochs, n_channels, n_samples)
+        y: Labels of shape (n_epochs,)
+        sfreq: Sampling frequency in Hz
+        n_components: Number of CSP components (filters) to use
+        freq_band: Frequency band to filter before CSP (default mu+beta)
+
+    Returns:
+        Tuple of (features array of shape (n_epochs, n_components), fitted CSP model)
+    """
+    import mne
+
+    # Bandpass filter to mu+beta range before CSP
+    X_filtered = mne.filter.filter_data(
+        X, sfreq,
+        l_freq=freq_band[0],
+        h_freq=freq_band[1],
+        verbose=False
+    )
+
+    # Fit CSP - finds spatial filters maximizing class separability
+    csp = CSP(
+        n_components=n_components,
+        reg="ledoit_wolf",  # Regularization for robust covariance estimation
+        log=True,           # Log-transform variance features
+        norm_trace=True,    # Normalize for scale invariance
+    )
+    features = csp.fit_transform(X_filtered, y)
+
+    return features, csp
