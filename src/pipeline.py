@@ -134,6 +134,50 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     final_model, scaler = train_final_model(X_all, y_all)
 
+    # Also train realtime model using only realtime-compatible features
+    print("\n[4b/5] Training realtime model...")
+    from src.features import extract_realtime_features
+
+    # Extract realtime features from all subjects
+    X_realtime_all = []
+    for rec_idx, rec_path in enumerate(recordings):
+        data, events, sfreq = load_recording(rec_path)
+
+        # Preprocess all channels
+        processed = {}
+        for ch_idx, ch_name in enumerate(CHANNELS):
+            processed[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
+
+        # Get phase 3 and phase 5 event indices
+        for sample_idx, phase, movement in events:
+            if phase not in [3, 5]:
+                continue
+
+            # Extract 5-second window (1250 samples at 250 Hz)
+            window_samples = int(5.0 * sfreq)
+            if sample_idx + window_samples > len(processed[CHANNELS[0]]):
+                continue
+
+            window = {ch: processed[ch][sample_idx:sample_idx + window_samples]
+                     for ch in CHANNELS}
+
+            features = extract_realtime_features(window, sfreq)
+            X_realtime_all.append((features, 1 if phase == 3 else 0))
+
+    if X_realtime_all:
+        X_rt = np.array([x[0] for x in X_realtime_all])
+        y_rt = np.array([x[1] for x in X_realtime_all])
+
+        realtime_model, realtime_scaler = train_final_model(X_rt, y_rt)
+
+        realtime_model_path = output_dir / "engagement_realtime_model.joblib"
+        realtime_scaler_path = output_dir / "engagement_realtime_scaler.joblib"
+
+        joblib.dump(realtime_model, realtime_model_path)
+        joblib.dump(realtime_scaler, realtime_scaler_path)
+
+        print(f"Realtime model saved to: {realtime_model_path}")
+
     # Step 6: Save model and scaler
     print("\n[5/5] Saving model...")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +200,8 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         "target_met": bool(target_met),
         "model_path": str(model_path),
         "scaler_path": str(scaler_path),
+        "realtime_model_path": str(output_dir / "engagement_realtime_model.joblib"),
+        "realtime_scaler_path": str(output_dir / "engagement_realtime_scaler.joblib"),
     }
 
     results_path = output_dir / "training_results.json"
