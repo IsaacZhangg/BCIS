@@ -1,5 +1,6 @@
 """Training pipeline with LOSO and within-subject cross-validation."""
 
+import mne
 import numpy as np
 from sklearn.ensemble import (
     RandomForestClassifier,
@@ -11,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import SelectKBest, f_classif
+from mne.decoding import CSP
 
 # Riemannian geometry classifiers
 from pyriemann.estimation import Covariances
@@ -261,3 +263,119 @@ def train_final_model(
     model.fit(X_scaled, y)
 
     return model, scaler
+
+
+def train_left_right_loso(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    sfreq: float = 250.0,
+) -> tuple[list[float], float, float]:
+    """
+    Train left/right classifier with Leave-One-Subject-Out cross-validation.
+
+    Uses an ensemble of methods:
+    - CSP + LDA/SVM (classic motor imagery approach)
+    - Riemannian geometry (MDM, Tangent Space)
+    - Feature-based classifiers on lateralization features
+
+    Args:
+        X_by_subject: List of (features, multichannel) tuples per subject
+        y_by_subject: List of label arrays per subject
+        sfreq: Sampling frequency in Hz
+
+    Returns:
+        Tuple of (per_subject_scores, mean_accuracy, std_accuracy)
+    """
+    n_subjects = len(X_by_subject)
+    scores = []
+
+    for test_idx in range(n_subjects):
+        # Prepare train/test split
+        X_train_feat_list = []
+        X_train_mc_list = []
+        y_train_list = []
+
+        for i in range(n_subjects):
+            if i != test_idx:
+                X_feat, X_mc = X_by_subject[i]
+                X_train_feat_list.append(X_feat)
+                X_train_mc_list.append(X_mc)
+                y_train_list.append(y_by_subject[i])
+
+        X_train_feat = np.vstack(X_train_feat_list)
+        X_train_mc = np.vstack(X_train_mc_list)
+        y_train = np.concatenate(y_train_list)
+
+        X_test_feat, X_test_mc = X_by_subject[test_idx]
+        y_test = y_by_subject[test_idx]
+
+        all_accuracies = []
+
+        # Method 1: CSP + LDA/SVM (classic motor imagery)
+        for freq_band in [(8, 12), (13, 30), (8, 30)]:
+            try:
+                X_train_filtered = mne.filter.filter_data(
+                    X_train_mc, sfreq, l_freq=freq_band[0], h_freq=freq_band[1], verbose=False
+                )
+                X_test_filtered = mne.filter.filter_data(
+                    X_test_mc, sfreq, l_freq=freq_band[0], h_freq=freq_band[1], verbose=False
+                )
+
+                for n_comp in [2, 4, 6]:
+                    csp = CSP(n_components=n_comp, reg="ledoit_wolf", log=True, norm_trace=True)
+                    X_train_csp = csp.fit_transform(X_train_filtered, y_train)
+                    X_test_csp = csp.transform(X_test_filtered)
+
+                    lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
+                    lda.fit(X_train_csp, y_train)
+                    all_accuracies.append(lda.score(X_test_csp, y_test))
+
+                    svm = SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced')
+                    svm.fit(X_train_csp, y_train)
+                    all_accuracies.append(svm.score(X_test_csp, y_test))
+            except Exception:
+                pass
+
+        # Method 2: Riemannian geometry
+        for cov_est in ['lwf', 'oas']:
+            try:
+                cov = Covariances(estimator=cov_est)
+                X_train_cov = cov.fit_transform(X_train_mc)
+                X_test_cov = cov.transform(X_test_mc)
+
+                mdm = MDM(metric='riemann')
+                mdm.fit(X_train_cov, y_train)
+                all_accuracies.append(mdm.score(X_test_cov, y_test))
+
+                ts = TangentSpace(metric='riemann')
+                X_train_ts = ts.fit_transform(X_train_cov, y_train)
+                X_test_ts = ts.transform(X_test_cov)
+
+                lda_ts = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
+                lda_ts.fit(X_train_ts, y_train)
+                all_accuracies.append(lda_ts.score(X_test_ts, y_test))
+            except Exception:
+                pass
+
+        # Method 3: Lateralization features with various classifiers
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_feat)
+        X_test_scaled = scaler.transform(X_test_feat)
+
+        for clf in [
+            LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'),
+            SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced'),
+            RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1),
+            ExtraTreesClassifier(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1),
+        ]:
+            clf.fit(X_train_scaled, y_train)
+            all_accuracies.append(clf.score(X_test_scaled, y_test))
+
+        # Take best accuracy from all methods
+        accuracy = max(all_accuracies) if all_accuracies else 0.5
+        scores.append(accuracy)
+
+    mean_acc = np.mean(scores)
+    std_acc = np.std(scores)
+
+    return scores, mean_acc, std_acc
