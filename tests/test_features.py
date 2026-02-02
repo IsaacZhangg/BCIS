@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from src.features import compute_theta_power, extract_features
+from src.features import compute_theta_power, extract_features, extract_realtime_features
 
 
 def test_compute_theta_power_detects_theta():
@@ -55,3 +55,31 @@ def test_extract_features_log_transform():
     # Log-transformed values should be in reasonable range (not huge like raw power)
     assert np.all(features < 100)
     assert np.all(features > -100)
+
+
+def test_extract_realtime_features_correct_shape():
+    """Test that realtime features have correct shape for 8 channels."""
+    sfreq = 250.0
+    # 5 seconds of data, 8 channels
+    window = {ch: np.random.randn(1250) for ch in
+              ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]}
+
+    features = extract_realtime_features(window, sfreq)
+
+    # Should return a 1D feature vector
+    assert features.ndim == 1
+    assert len(features) > 0
+
+
+def test_extract_realtime_features_no_baseline_needed():
+    """Test that realtime features work without baseline reference."""
+    sfreq = 250.0
+    # Single 5-second window
+    window = {ch: np.random.randn(1250) for ch in
+              ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]}
+
+    # Should not raise - no baseline needed
+    features = extract_realtime_features(window, sfreq)
+
+    # All features should be finite
+    assert np.all(np.isfinite(features))

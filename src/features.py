@@ -234,3 +234,89 @@ def extract_erd_features(
         all_features.append(epoch_features)
 
     return np.array(all_features)
+
+
+def extract_realtime_features(
+    window_by_channel: dict[str, np.ndarray],
+    sfreq: float,
+) -> np.ndarray:
+    """
+    Extract features from a single time window for real-time inference.
+
+    Unlike extract_erd_features, this does NOT require a baseline epoch.
+    Uses absolute features that can be computed from a single window.
+
+    Args:
+        window_by_channel: Dict mapping channel names to signal arrays
+        sfreq: Sampling frequency in Hz
+
+    Returns:
+        1D feature vector
+    """
+    bands = {
+        "theta": (4, 8),
+        "alpha": (8, 13),
+        "low_beta": (13, 20),
+        "high_beta": (20, 30),
+        "beta": (13, 30),
+        "gamma": (30, 40),
+    }
+
+    channels = ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
+    features = []
+    channel_powers = {}
+
+    for ch_name in channels:
+        if ch_name not in window_by_channel:
+            continue
+
+        signal = window_by_channel[ch_name]
+        channel_powers[ch_name] = {}
+
+        # Total power for normalization
+        total_power = compute_band_power(signal, sfreq, 1, 40)
+
+        for band_name, (low, high) in bands.items():
+            power = compute_band_power(signal, sfreq, low, high)
+
+            # Absolute log power
+            features.append(np.log(power + 1e-10))
+
+            # Relative power (proportion of total)
+            rel_power = power / (total_power + 1e-10)
+            features.append(rel_power)
+
+            channel_powers[ch_name][band_name] = power
+
+        # Theta/Alpha ratio (drowsiness indicator)
+        theta = channel_powers[ch_name]["theta"]
+        alpha = channel_powers[ch_name]["alpha"]
+        features.append(theta / (alpha + 1e-10))
+
+        # Theta/Beta ratio (attention indicator)
+        beta = channel_powers[ch_name]["beta"]
+        features.append(theta / (beta + 1e-10))
+
+        # Hjorth parameters
+        activity, mobility, complexity = compute_hjorth_parameters(signal)
+        features.extend([activity, mobility, complexity])
+
+        # Envelope features
+        env_mean, env_std, env_max = compute_envelope_features(signal)
+        features.extend([env_mean, env_std, env_max])
+
+    # Inter-channel features
+    if "C3" in channel_powers and "C4" in channel_powers:
+        for band_name in bands:
+            c3 = channel_powers["C3"][band_name]
+            c4 = channel_powers["C4"][band_name]
+            # Asymmetry
+            features.append(np.log((c3 + 1e-10) / (c4 + 1e-10)))
+
+    if "Fz" in channel_powers and "Pz" in channel_powers:
+        for band_name in ["theta", "alpha", "beta"]:
+            fz = channel_powers["Fz"][band_name]
+            pz = channel_powers["Pz"][band_name]
+            features.append(np.log((fz + 1e-10) / (pz + 1e-10)))
+
+    return np.array(features)
