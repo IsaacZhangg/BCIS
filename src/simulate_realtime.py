@@ -152,7 +152,7 @@ def simulate_recording(
     return pd.DataFrame(results)
 
 
-def print_summary(df: pd.DataFrame, threshold: float) -> None:
+def print_summary(df: pd.DataFrame, threshold: float, window_sec: float = 5.0) -> None:
     """Print summary statistics from simulation results."""
     print("\n" + "=" * 50)
     print("Engagement Score Summary")
@@ -172,8 +172,8 @@ def print_summary(df: pd.DataFrame, threshold: float) -> None:
     print(f"Windows below threshold ({threshold}): {below_threshold}/{total_windows}")
 
     if below_threshold > 0:
-        time_below = below_threshold * 5  # Assuming 5-second windows
-        print(f"Total time below threshold: {time_below} seconds")
+        time_below = below_threshold * window_sec
+        print(f"Total time below threshold: {time_below:.0f} seconds")
 
 
 def main():
@@ -226,6 +226,15 @@ def main():
         print("Run the training pipeline first: python -m src.pipeline")
         return 1
 
+    if not scaler_path.exists():
+        print(f"Error: Scaler not found at {scaler_path}")
+        print("Run the training pipeline first: python -m src.pipeline")
+        return 1
+
+    if not args.recording.exists():
+        print(f"Error: Recording not found at {args.recording}")
+        return 1
+
     print(f"Processing: {args.recording}")
     print(f"Model: {model_path}")
     print(f"Window: {args.window}s, Threshold: {args.threshold}, Consecutive: {args.consecutive}")
@@ -239,7 +248,7 @@ def main():
         consecutive=args.consecutive,
     )
 
-    print_summary(df, args.threshold)
+    print_summary(df, args.threshold, args.window)
 
     # Save results
     output_path = args.output or Path("simulation_results.csv")
