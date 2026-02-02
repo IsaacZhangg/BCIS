@@ -330,11 +330,12 @@ def train_left_right_loso(
                     lda.fit(X_train_csp, y_train)
                     all_accuracies.append(lda.score(X_test_csp, y_test))
 
-                    svm = SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced')
+                    svm = SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced', random_state=42)
                     svm.fit(X_train_csp, y_train)
                     all_accuracies.append(svm.score(X_test_csp, y_test))
-            except Exception:
-                pass
+            except (ValueError, np.linalg.LinAlgError):
+                # CSP/Riemannian methods may fail with certain data configurations
+                continue
 
         # Method 2: Riemannian geometry
         for cov_est in ['lwf', 'oas']:
@@ -354,8 +355,9 @@ def train_left_right_loso(
                 lda_ts = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
                 lda_ts.fit(X_train_ts, y_train)
                 all_accuracies.append(lda_ts.score(X_test_ts, y_test))
-            except Exception:
-                pass
+            except (ValueError, np.linalg.LinAlgError):
+                # CSP/Riemannian methods may fail with certain data configurations
+                continue
 
         # Method 3: Lateralization features with various classifiers
         scaler = StandardScaler()
@@ -364,7 +366,7 @@ def train_left_right_loso(
 
         for clf in [
             LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'),
-            SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced'),
+            SVC(kernel='rbf', C=1.0, gamma='scale', class_weight='balanced', random_state=42),
             RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1),
             ExtraTreesClassifier(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1),
         ]:
@@ -372,6 +374,7 @@ def train_left_right_loso(
             all_accuracies.append(clf.score(X_test_scaled, y_test))
 
         # Take best accuracy from all methods
+        # Fallback to 0.5 (random chance for binary classification) if all methods fail
         accuracy = max(all_accuracies) if all_accuracies else 0.5
         scores.append(accuracy)
 
