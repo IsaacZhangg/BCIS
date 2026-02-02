@@ -9,7 +9,7 @@ import numpy as np
 from src.data_loader import load_recording, get_complete_recordings, CHANNELS
 from src.preprocess import preprocess_eeg
 from src.epochs import extract_erd_epochs
-from src.features import extract_erd_features
+from src.features import extract_erd_features, extract_realtime_features
 from src.train import train_within_subject_cv_riemannian, train_final_model
 
 
@@ -38,6 +38,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     X_by_subject = []
     y_by_subject = []
     subject_ids = []
+    processed_data_cache = {}  # Cache processed data for realtime model training
 
     for rec_path in recordings:
         subject_id = rec_path.parent.parent.name
@@ -50,6 +51,9 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         processed_channels = {}
         for ch_idx, ch_name in enumerate(CHANNELS):
             processed_channels[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
+
+        # Cache for realtime model training
+        processed_data_cache[rec_path] = (processed_channels, events, sfreq)
 
         # Extract ERD epochs (baseline + task pairs) for each channel
         engaged_pairs_by_channel = {}
@@ -136,18 +140,10 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     # Also train realtime model using only realtime-compatible features
     print("\n[4b/5] Training realtime model...")
-    from src.features import extract_realtime_features
 
-    # Extract realtime features from all subjects
+    # Extract realtime features from cached processed data
     X_realtime_all = []
-    for rec_idx, rec_path in enumerate(recordings):
-        data, events, sfreq = load_recording(rec_path)
-
-        # Preprocess all channels
-        processed = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            processed[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
-
+    for rec_path, (processed, events, sfreq) in processed_data_cache.items():
         # Get phase 3 and phase 5 event indices
         for sample_idx, phase, movement in events:
             if phase not in [3, 5]:
@@ -168,6 +164,21 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         X_rt = np.array([x[0] for x in X_realtime_all])
         y_rt = np.array([x[1] for x in X_realtime_all])
 
+        # Balance classes
+        n_engaged = np.sum(y_rt == 1)
+        n_disengaged = np.sum(y_rt == 0)
+        print(f"    Realtime - Engaged windows: {n_engaged}, Disengaged windows: {n_disengaged}")
+
+        if n_disengaged > n_engaged:
+            np.random.seed(42)
+            engaged_idx = np.where(y_rt == 1)[0]
+            disengaged_idx = np.where(y_rt == 0)[0]
+            sampled_disengaged_idx = np.random.choice(disengaged_idx, n_engaged, replace=False)
+            balanced_idx = np.concatenate([engaged_idx, sampled_disengaged_idx])
+            X_rt = X_rt[balanced_idx]
+            y_rt = y_rt[balanced_idx]
+            print(f"    Balanced to {len(y_rt)} windows")
+
         realtime_model, realtime_scaler = train_final_model(X_rt, y_rt)
 
         realtime_model_path = output_dir / "engagement_realtime_model.joblib"
@@ -176,7 +187,9 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         joblib.dump(realtime_model, realtime_model_path)
         joblib.dump(realtime_scaler, realtime_scaler_path)
 
-        print(f"Realtime model saved to: {realtime_model_path}")
+        print(f"    Realtime model saved to: {realtime_model_path}")
+    else:
+        print("    Warning: No realtime training data extracted")
 
     # Step 6: Save model and scaler
     print("\n[5/5] Saving model...")
