@@ -137,9 +137,7 @@ def compute_zero_crossings(epoch: np.ndarray) -> int:
     return np.sum(np.diff(np.sign(epoch - np.mean(epoch))) != 0)
 
 
-def compute_filter_bank_features(
-    epoch: np.ndarray, sfreq: float
-) -> list[float]:
+def compute_filter_bank_features(epoch: np.ndarray, sfreq: float) -> list[float]:
     """
     Compute filter bank features (FBCSP-style sub-band powers).
 
@@ -148,9 +146,22 @@ def compute_filter_bank_features(
     """
     # Filter bank: overlapping bands from 4-40 Hz
     filter_banks = [
-        (4, 8), (6, 10), (8, 12), (10, 14), (12, 16),
-        (14, 18), (16, 20), (18, 22), (20, 24), (22, 26),
-        (24, 28), (26, 30), (28, 32), (30, 34), (32, 36), (34, 38),
+        (4, 8),
+        (6, 10),
+        (8, 12),
+        (10, 14),
+        (12, 16),
+        (14, 18),
+        (16, 20),
+        (18, 22),
+        (20, 24),
+        (22, 26),
+        (24, 28),
+        (26, 30),
+        (28, 32),
+        (30, 34),
+        (32, 36),
+        (34, 38),
     ]
 
     features = []
@@ -180,10 +191,12 @@ def compute_wavelet_features(epoch: np.ndarray) -> list[float]:
         if len(detail) > scale:
             # Downsample by scale
             downsampled = detail[::scale]
-            features.extend([
-                np.log(np.var(downsampled) + 1e-10),
-                np.mean(np.abs(downsampled)),
-            ])
+            features.extend(
+                [
+                    np.log(np.var(downsampled) + 1e-10),
+                    np.mean(np.abs(downsampled)),
+                ]
+            )
         else:
             features.extend([0.0, 0.0])
 
@@ -205,7 +218,7 @@ def compute_temporal_features(epoch: np.ndarray, sfreq: float) -> list[float]:
     segment_vars = []
     segment_means = []
     for i in range(n_segments):
-        segment = epoch[i * segment_len:(i + 1) * segment_len]
+        segment = epoch[i * segment_len : (i + 1) * segment_len]
         segment_vars.append(np.var(segment))
         segment_means.append(np.mean(np.abs(segment)))
 
@@ -218,10 +231,10 @@ def compute_temporal_features(epoch: np.ndarray, sfreq: float) -> list[float]:
     features.append(segment_means[-1] / (segment_means[0] + 1e-10))
 
     # Root mean square
-    features.append(np.sqrt(np.mean(epoch ** 2)))
+    features.append(np.sqrt(np.mean(epoch**2)))
 
     # Signal energy
-    features.append(np.sum(epoch ** 2))
+    features.append(np.sum(epoch**2))
 
     # Autocorrelation at specific lags (rhythm indicators)
     for lag in [10, 25, 50]:  # 40ms, 100ms, 200ms at 250Hz
@@ -382,9 +395,9 @@ def extract_erd_features(
 
                 # Store for inter-channel features
                 channel_powers[ch_name][band_name] = {
-                    'baseline': baseline_power,
-                    'task': task_power,
-                    'erd': erd,
+                    "baseline": baseline_power,
+                    "task": task_power,
+                    "erd": erd,
                 }
 
             # Add time-domain features from task epoch
@@ -420,27 +433,27 @@ def extract_erd_features(
         # Inter-channel features: C3-C4 asymmetry for each band
         if "C3" in channel_powers and "C4" in channel_powers:
             for band_name in bands:
-                c3_erd = channel_powers["C3"][band_name]['erd']
-                c4_erd = channel_powers["C4"][band_name]['erd']
+                c3_erd = channel_powers["C3"][band_name]["erd"]
+                c4_erd = channel_powers["C4"][band_name]["erd"]
                 epoch_features.append(c3_erd - c4_erd)
 
                 # Power ratio
-                c3_task = channel_powers["C3"][band_name]['task']
-                c4_task = channel_powers["C4"][band_name]['task']
+                c3_task = channel_powers["C3"][band_name]["task"]
+                c4_task = channel_powers["C4"][band_name]["task"]
                 epoch_features.append(np.log((c3_task + 1e-10) / (c4_task + 1e-10)))
 
         # Frontal-Parietal connectivity proxy (Fz vs Pz)
         if "Fz" in channel_powers and "Pz" in channel_powers:
             for band_name in ["theta", "mu", "beta"]:
-                fz_task = channel_powers["Fz"][band_name]['task']
-                pz_task = channel_powers["Pz"][band_name]['task']
+                fz_task = channel_powers["Fz"][band_name]["task"]
+                pz_task = channel_powers["Pz"][band_name]["task"]
                 epoch_features.append(np.log((fz_task + 1e-10) / (pz_task + 1e-10)))
 
         # Central vs occipital (Cz vs Oz)
         if "Cz" in channel_powers and "Oz" in channel_powers:
             for band_name in ["mu", "beta"]:
-                cz_task = channel_powers["Cz"][band_name]['task']
-                oz_task = channel_powers["Oz"][band_name]['task']
+                cz_task = channel_powers["Cz"][band_name]["task"]
+                oz_task = channel_powers["Oz"][band_name]["task"]
                 epoch_features.append(np.log((cz_task + 1e-10) / (oz_task + 1e-10)))
 
         all_features.append(epoch_features)

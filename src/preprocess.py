@@ -34,7 +34,7 @@ def apply_laplacian(data: np.ndarray, channel_names: list[str]) -> np.ndarray:
     # Define neighbors for each channel based on 10-20 system
     # Fz, C3, Cz, C4, Pz, PO7, Oz, PO8
     neighbors = {
-        "C3": ["Fz", "Cz"],   # C3 surrounded by Fz, Cz
+        "C3": ["Fz", "Cz"],  # C3 surrounded by Fz, Cz
         "Cz": ["Fz", "C3", "C4", "Pz"],
         "C4": ["Fz", "Cz"],
     }
@@ -96,9 +96,7 @@ def notch_filter(
         Filtered signal
     """
     data_2d = data.reshape(1, -1)
-    filtered = mne.filter.notch_filter(
-        data_2d, sfreq, freqs=freq, verbose=False
-    )
+    filtered = mne.filter.notch_filter(data_2d, sfreq, freqs=freq, verbose=False)
     return filtered.flatten()
 
 

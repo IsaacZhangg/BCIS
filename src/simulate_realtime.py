@@ -83,7 +83,7 @@ def extract_sliding_windows(
     while start + window_samples <= total_samples:
         window = {}
         for ch_name, signal in data.items():
-            window[ch_name] = signal[start:start + window_samples]
+            window[ch_name] = signal[start : start + window_samples]
         windows.append(window)
         start += step_samples
 
@@ -112,44 +112,71 @@ def simulate_recording(
     Returns:
         DataFrame with timestamp, engagement_score, alert_triggered columns
     """
-    # Load model and scaler
+    # Load resources
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)
+    data, events, sample_rate = load_recording(recording_path)
 
-    # Load and preprocess recording
-    data, events, sfreq = load_recording(recording_path)
+    # Preprocess all channels
+    processed_channels = preprocess_recording(data, sample_rate, CHANNELS)
 
-    processed = {}
-    for ch_idx, ch_name in enumerate(CHANNELS):
-        processed[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
+    # Extract and process sliding windows
+    windows = extract_sliding_windows(
+        processed_channels, sample_rate, window_sec, window_sec
+    )
+    results = process_windows(
+        windows, model, scaler, sample_rate, window_sec, threshold, consecutive
+    )
 
-    # Extract sliding windows
-    windows = extract_sliding_windows(processed, sfreq, window_sec, window_sec)
+    return pd.DataFrame(results)
 
-    # Process each window
+
+def preprocess_recording(
+    data: np.ndarray, sample_rate: float, channels: list[str]
+) -> dict[str, np.ndarray]:
+    """Preprocess all channels in a recording."""
+    return {
+        channel_name: preprocess_eeg(data[channel_idx], sample_rate)
+        for channel_idx, channel_name in enumerate(channels)
+    }
+
+
+def process_windows(
+    windows: list[dict[str, np.ndarray]],
+    model: object,
+    scaler: object,
+    sample_rate: float,
+    window_sec: float,
+    threshold: float,
+    consecutive: int,
+) -> list[dict]:
+    """Process all windows and compute engagement scores."""
     results = []
     score_history = []
 
-    for idx, window in enumerate(windows):
-        # Extract features
-        features = extract_realtime_features(window, sfreq)
-        features_scaled = scaler.transform(features.reshape(1, -1))
+    for window_idx, window in enumerate(windows):
+        # Extract and scale features
+        features = extract_realtime_features(window, sample_rate)
+        scaled_features = scaler.transform(features.reshape(1, -1))
 
-        # Get probability of engaged class
-        prob = model.predict_proba(features_scaled)[0, 1]
-        score = compute_engagement_score(prob)
+        # Compute engagement score
+        engaged_probability = model.predict_proba(scaled_features)[0, 1]
+        score = compute_engagement_score(engaged_probability)
 
+        # Check for alert
         score_history.append(score)
         alert = check_alert(score_history, threshold, consecutive)
 
-        timestamp_sec = idx * window_sec
-        results.append({
-            "timestamp_sec": timestamp_sec,
-            "engagement_score": round(score, 1),
-            "alert_triggered": alert,
-        })
+        # Store result
+        results.append(
+            {
+                "timestamp_sec": window_idx * window_sec,
+                "engagement_score": round(score, 1),
+                "alert_triggered": alert,
+            }
+        )
 
-    return pd.DataFrame(results)
+    return results
 
 
 def print_summary(df: pd.DataFrame, threshold: float, window_sec: float = 5.0) -> None:
@@ -161,8 +188,12 @@ def print_summary(df: pd.DataFrame, threshold: float, window_sec: float = 5.0) -
     scores = df["engagement_score"]
     print(f"Mean:  {scores.mean():.1f}")
     print(f"Std:   {scores.std():.1f}")
-    print(f"Min:   {scores.min():.1f} at {df.loc[scores.idxmin(), 'timestamp_sec']:.0f}s")
-    print(f"Max:   {scores.max():.1f} at {df.loc[scores.idxmax(), 'timestamp_sec']:.0f}s")
+    print(
+        f"Min:   {scores.min():.1f} at {df.loc[scores.idxmin(), 'timestamp_sec']:.0f}s"
+    )
+    print(
+        f"Max:   {scores.max():.1f} at {df.loc[scores.idxmax(), 'timestamp_sec']:.0f}s"
+    )
 
     alerts = df["alert_triggered"].sum()
     print(f"\nAlerts triggered: {alerts}")
@@ -177,6 +208,45 @@ def print_summary(df: pd.DataFrame, threshold: float, window_sec: float = 5.0) -
 
 
 def main():
+    args = parse_arguments()
+
+    # Validate paths
+    model_path = args.model_dir / "engagement_realtime_model.joblib"
+    scaler_path = args.model_dir / "engagement_realtime_scaler.joblib"
+
+    validation_error = validate_paths(args.recording, model_path, scaler_path)
+    if validation_error:
+        print(validation_error)
+        return 1
+
+    # Run simulation
+    print(f"Processing: {args.recording}")
+    print(f"Model: {model_path}")
+    print(
+        f"Window: {args.window}s, Threshold: {args.threshold}, Consecutive: {args.consecutive}"
+    )
+
+    results_df = simulate_recording(
+        args.recording,
+        model_path,
+        scaler_path,
+        window_sec=args.window,
+        threshold=args.threshold,
+        consecutive=args.consecutive,
+    )
+
+    # Display and save results
+    print_summary(results_df, args.threshold, args.window)
+
+    output_path = args.output or Path("simulation_results.csv")
+    results_df.to_csv(output_path, index=False)
+    print(f"\nResults saved to: {output_path}")
+
+    return 0
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Simulate real-time engagement detection on EEG recording"
     )
@@ -216,46 +286,29 @@ def main():
         help="Consecutive windows below threshold to trigger alert (default: 3)",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    model_path = args.model_dir / "engagement_realtime_model.joblib"
-    scaler_path = args.model_dir / "engagement_realtime_scaler.joblib"
 
+def validate_paths(
+    recording_path: Path, model_path: Path, scaler_path: Path
+) -> str | None:
+    """Validate that all required paths exist."""
     if not model_path.exists():
-        print(f"Error: Model not found at {model_path}")
-        print("Run the training pipeline first: python -m src.pipeline")
-        return 1
+        return (
+            f"Error: Model not found at {model_path}\n"
+            "Run the training pipeline first: python -m src.pipeline"
+        )
 
     if not scaler_path.exists():
-        print(f"Error: Scaler not found at {scaler_path}")
-        print("Run the training pipeline first: python -m src.pipeline")
-        return 1
+        return (
+            f"Error: Scaler not found at {scaler_path}\n"
+            "Run the training pipeline first: python -m src.pipeline"
+        )
 
-    if not args.recording.exists():
-        print(f"Error: Recording not found at {args.recording}")
-        return 1
+    if not recording_path.exists():
+        return f"Error: Recording not found at {recording_path}"
 
-    print(f"Processing: {args.recording}")
-    print(f"Model: {model_path}")
-    print(f"Window: {args.window}s, Threshold: {args.threshold}, Consecutive: {args.consecutive}")
-
-    df = simulate_recording(
-        args.recording,
-        model_path,
-        scaler_path,
-        window_sec=args.window,
-        threshold=args.threshold,
-        consecutive=args.consecutive,
-    )
-
-    print_summary(df, args.threshold, args.window)
-
-    # Save results
-    output_path = args.output or Path("simulation_results.csv")
-    df.to_csv(output_path, index=False)
-    print(f"\nResults saved to: {output_path}")
-
-    return 0
+    return None
 
 
 if __name__ == "__main__":

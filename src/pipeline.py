@@ -13,6 +13,111 @@ from src.features import extract_erd_features, extract_realtime_features
 from src.train import train_within_subject_cv_riemannian, train_final_model
 
 
+def create_multichannel_arrays(
+    engaged_epochs_by_channel: dict,
+    disengaged_epochs_by_channel: dict,
+    channels: list[str],
+) -> np.ndarray:
+    """Create multichannel arrays for Riemannian classification."""
+    num_channels = len(channels)
+    num_engaged = len(engaged_epochs_by_channel[channels[0]])
+    num_disengaged = len(disengaged_epochs_by_channel[channels[0]])
+    num_samples = engaged_epochs_by_channel[channels[0]][0][1].shape[0]
+
+    engaged_array = np.zeros((num_engaged, num_channels, num_samples))
+    disengaged_array = np.zeros((num_disengaged, num_channels, num_samples))
+
+    for channel_idx, channel_name in enumerate(channels):
+        for trial_idx in range(num_engaged):
+            _, task_epoch = engaged_epochs_by_channel[channel_name][trial_idx]
+            engaged_array[trial_idx, channel_idx, :] = task_epoch
+        for trial_idx in range(num_disengaged):
+            _, task_epoch = disengaged_epochs_by_channel[channel_name][trial_idx]
+            disengaged_array[trial_idx, channel_idx, :] = task_epoch
+
+    return np.vstack([engaged_array, disengaged_array])
+
+
+def extract_realtime_training_data(
+    processed_cache: dict, channels: list[str]
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Extract realtime features from processed data cache."""
+    all_features = []
+    all_labels = []
+
+    for recording_path, (
+        channel_signals,
+        events,
+        sample_rate,
+    ) in processed_cache.items():
+        for sample_idx, phase, movement in events:
+            if phase not in [3, 5]:
+                continue
+
+            window_samples = int(5.0 * sample_rate)
+            if sample_idx + window_samples > len(channel_signals[channels[0]]):
+                continue
+
+            window = {
+                channel: channel_signals[channel][
+                    sample_idx : sample_idx + window_samples
+                ]
+                for channel in channels
+            }
+
+            features = extract_realtime_features(window, sample_rate)
+            label = 1 if phase == 3 else 0
+
+            all_features.append(features)
+            all_labels.append(label)
+
+    if not all_features:
+        return None
+
+    return np.array(all_features), np.array(all_labels)
+
+
+def balance_realtime_data(
+    features: np.ndarray, labels: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Balance realtime training data to prevent class imbalance."""
+    engaged_count = np.sum(labels == 1)
+    disengaged_count = np.sum(labels == 0)
+
+    print(
+        f"    Realtime - Engaged windows: {engaged_count}, Disengaged windows: {disengaged_count}"
+    )
+
+    if disengaged_count <= engaged_count:
+        return features, labels
+
+    # Downsample majority class
+    np.random.seed(42)
+    engaged_indices = np.where(labels == 1)[0]
+    disengaged_indices = np.where(labels == 0)[0]
+    sampled_disengaged = np.random.choice(
+        disengaged_indices, engaged_count, replace=False
+    )
+
+    balanced_indices = np.concatenate([engaged_indices, sampled_disengaged])
+    balanced_features = features[balanced_indices]
+    balanced_labels = labels[balanced_indices]
+
+    print(f"    Balanced to {len(balanced_labels)} windows")
+    return balanced_features, balanced_labels
+
+
+def save_realtime_model(model: object, scaler: object, output_dir: Path) -> None:
+    """Save realtime model and scaler to disk."""
+    model_path = output_dir / "engagement_realtime_model.joblib"
+    scaler_path = output_dir / "engagement_realtime_scaler.joblib"
+
+    joblib.dump(model, model_path)
+    joblib.dump(scaler, scaler_path)
+
+    print(f"    Realtime model saved to: {model_path}")
+
+
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     """
     Run the full training pipeline.
@@ -35,196 +140,153 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     # Step 2: Load and preprocess data for each subject
     print("\n[2/5] Loading and preprocessing data...")
-    X_by_subject = []
-    y_by_subject = []
+    subject_data = []
+    subject_labels = []
     subject_ids = []
-    processed_data_cache = {}  # Cache processed data for realtime model training
+    processed_data_cache = {}
 
-    for rec_path in recordings:
-        subject_id = rec_path.parent.parent.name
+    for recording_path in recordings:
+        subject_id = recording_path.parent.parent.name
         print(f"  Processing {subject_id}...")
 
-        # Load recording
-        data, events, sfreq = load_recording(rec_path)
+        # Load and preprocess recording
+        data, events, sample_rate = load_recording(recording_path)
+        preprocessed_data = preprocess_eeg_multichannel(
+            data, sample_rate, CHANNELS, spatial_filter="car"
+        )
 
-        # Process ALL channels with CAR spatial filtering
-        data_multichannel = preprocess_eeg_multichannel(data, sfreq, CHANNELS, spatial_filter="car")
-
-        processed_channels = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            processed_channels[ch_name] = data_multichannel[ch_idx]
+        # Create channel dictionary
+        channel_signals = {
+            channel_name: preprocessed_data[channel_index]
+            for channel_index, channel_name in enumerate(CHANNELS)
+        }
 
         # Cache for realtime model training
-        processed_data_cache[rec_path] = (processed_channels, events, sfreq)
+        processed_data_cache[recording_path] = (channel_signals, events, sample_rate)
 
-        # Extract ERD epochs (baseline + task pairs) for each channel
-        # Use augmented epochs to increase training data
-        engaged_pairs_by_channel = {}
-        disengaged_pairs_by_channel = {}
+        # Extract augmented epochs for each channel
+        engaged_epochs_by_channel = {}
+        disengaged_epochs_by_channel = {}
 
-        for ch_name, signal in processed_channels.items():
-            # Compare phase 3 (engaged/imagery) vs phase 5 (disengaged/rest)
-            # Use augmented epochs with 2 overlapping windows per trial
+        for channel_name, signal in channel_signals.items():
             engaged_pairs, disengaged_pairs = extract_augmented_epochs(
-                signal, events, sfreq,
+                signal,
+                events,
+                sample_rate,
                 window_duration=2.0,
                 n_windows=2,
-                class1_phase=3,
-                class2_phase=5,
+                class1_phase=3,  # Phase 3: Motor imagery (engaged)
+                class2_phase=5,  # Phase 5: Rest (disengaged)
             )
-            engaged_pairs_by_channel[ch_name] = engaged_pairs
-            disengaged_pairs_by_channel[ch_name] = disengaged_pairs
+            engaged_epochs_by_channel[channel_name] = engaged_pairs
+            disengaged_epochs_by_channel[channel_name] = disengaged_pairs
 
-        # Check counts
-        n_engaged = len(engaged_pairs_by_channel[CHANNELS[0]])
-        n_disengaged = len(disengaged_pairs_by_channel[CHANNELS[0]])
+        # Balance classes to prevent bias
+        engaged_count = len(engaged_epochs_by_channel[CHANNELS[0]])
+        disengaged_count = len(disengaged_epochs_by_channel[CHANNELS[0]])
 
-        # Balance classes
-        if n_disengaged > n_engaged:
+        if disengaged_count > engaged_count:
             np.random.seed(42)
-            indices = np.random.choice(n_disengaged, n_engaged, replace=False)
-            for ch_name in CHANNELS:
-                disengaged_pairs_by_channel[ch_name] = [disengaged_pairs_by_channel[ch_name][i] for i in indices]
-            n_disengaged = n_engaged
+            selected_indices = np.random.choice(
+                disengaged_count, engaged_count, replace=False
+            )
+            for channel_name in CHANNELS:
+                disengaged_epochs_by_channel[channel_name] = [
+                    disengaged_epochs_by_channel[channel_name][i]
+                    for i in selected_indices
+                ]
+            disengaged_count = engaged_count
 
-        print(f"    Engaged epochs: {n_engaged}, Disengaged epochs: {n_disengaged}")
+        print(
+            f"    Engaged epochs: {engaged_count}, Disengaged epochs: {disengaged_count}"
+        )
 
         # Extract ERD features
-        engaged_features = extract_erd_features(engaged_pairs_by_channel, sfreq)
-        disengaged_features = extract_erd_features(disengaged_pairs_by_channel, sfreq)
+        engaged_features = extract_erd_features(engaged_epochs_by_channel, sample_rate)
+        disengaged_features = extract_erd_features(
+            disengaged_epochs_by_channel, sample_rate
+        )
 
-        # Also create multichannel arrays for Riemannian classification
-        # Shape: (n_trials, n_channels, n_samples)
-        n_channels = len(CHANNELS)
-        n_engaged = len(engaged_pairs_by_channel[CHANNELS[0]])
-        n_disengaged = len(disengaged_pairs_by_channel[CHANNELS[0]])
-        n_samples = engaged_pairs_by_channel[CHANNELS[0]][0][1].shape[0]
+        # Create multichannel arrays for Riemannian classification
+        multichannel_data = create_multichannel_arrays(
+            engaged_epochs_by_channel, disengaged_epochs_by_channel, CHANNELS
+        )
 
-        engaged_multichannel = np.zeros((n_engaged, n_channels, n_samples))
-        disengaged_multichannel = np.zeros((n_disengaged, n_channels, n_samples))
+        # Combine features and labels
+        features = np.vstack([engaged_features, disengaged_features])
+        labels = np.array([1] * len(engaged_features) + [0] * len(disengaged_features))
 
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            for trial_idx in range(n_engaged):
-                engaged_multichannel[trial_idx, ch_idx, :] = engaged_pairs_by_channel[ch_name][trial_idx][1]
-            for trial_idx in range(n_disengaged):
-                disengaged_multichannel[trial_idx, ch_idx, :] = disengaged_pairs_by_channel[ch_name][trial_idx][1]
-
-        X_multichannel = np.vstack([engaged_multichannel, disengaged_multichannel])
-
-        # Combine ERD features
-        X = np.vstack([engaged_features, disengaged_features])
-        y = np.array([1] * len(engaged_features) + [0] * len(disengaged_features))
-
-        X_by_subject.append((X, X_multichannel))  # tuple of (features, multichannel)
-        y_by_subject.append(y)
+        subject_data.append((features, multichannel_data))
+        subject_labels.append(labels)
         subject_ids.append(subject_id)
 
-    # Step 3: Within-subject Cross-validation (realistic BCI evaluation)
+    # Step 3: Within-subject Cross-validation
     print("\n[3/5] Running within-subject cross-validation...")
     print("(Using Riemannian geometry + feature ensemble)")
-    scores, mean_acc, std_acc = train_within_subject_cv_riemannian(X_by_subject, y_by_subject)
+    scores, mean_accuracy, std_accuracy = train_within_subject_cv_riemannian(
+        subject_data, subject_labels
+    )
 
     print("\nPer-subject accuracy (within-subject CV):")
-    for sid, score in zip(subject_ids, scores):
+    for subject_id, score in zip(subject_ids, scores):
         status = "PASS" if score >= 0.9 else "FAIL"
-        print(f"  {sid}: {score:.1%} [{status}]")
+        print(f"  {subject_id}: {score:.1%} [{status}]")
 
-    print(f"\nMean accuracy: {mean_acc:.1%} (+/- {std_acc:.1%})")
+    print(f"\nMean accuracy: {mean_accuracy:.1%} (+/- {std_accuracy:.1%})")
 
-    # Step 4: Check if target met
-    target_met = mean_acc >= 0.90
+    # Check if target met
+    target_met = mean_accuracy >= 0.90
     print(f"\nTarget (>90%): {'MET' if target_met else 'NOT MET'}")
 
-    # Step 5: Train final model on all data
+    # Step 4: Train final model on all data
     print("\n[4/5] Training final model on all data...")
-    X_all = np.vstack([x[0] for x in X_by_subject])  # Just features for final model
-    y_all = np.concatenate(y_by_subject)
+    all_features = np.vstack([data[0] for data in subject_data])
+    all_labels = np.concatenate(subject_labels)
 
-    final_model, scaler = train_final_model(X_all, y_all)
+    final_model, scaler = train_final_model(all_features, all_labels)
 
-    # Also train realtime model using only realtime-compatible features
+    # Train realtime model using only realtime-compatible features
     print("\n[4b/5] Training realtime model...")
+    realtime_data = extract_realtime_training_data(processed_data_cache, CHANNELS)
 
-    # Extract realtime features from cached processed data
-    X_realtime_all = []
-    for rec_path, (processed, events, sfreq) in processed_data_cache.items():
-        # Get phase 3 and phase 5 event indices
-        for sample_idx, phase, movement in events:
-            if phase not in [3, 5]:
-                continue
+    if realtime_data:
+        features, labels = realtime_data
+        balanced_features, balanced_labels = balance_realtime_data(features, labels)
 
-            # Extract 5-second window (1250 samples at 250 Hz)
-            window_samples = int(5.0 * sfreq)
-            if sample_idx + window_samples > len(processed[CHANNELS[0]]):
-                continue
+        realtime_model, realtime_scaler = train_final_model(
+            balanced_features, balanced_labels
+        )
 
-            window = {ch: processed[ch][sample_idx:sample_idx + window_samples]
-                     for ch in CHANNELS}
-
-            features = extract_realtime_features(window, sfreq)
-            X_realtime_all.append((features, 1 if phase == 3 else 0))
-
-    if X_realtime_all:
-        X_rt = np.array([x[0] for x in X_realtime_all])
-        y_rt = np.array([x[1] for x in X_realtime_all])
-
-        # Balance classes
-        n_engaged = np.sum(y_rt == 1)
-        n_disengaged = np.sum(y_rt == 0)
-        print(f"    Realtime - Engaged windows: {n_engaged}, Disengaged windows: {n_disengaged}")
-
-        if n_disengaged > n_engaged:
-            np.random.seed(42)
-            engaged_idx = np.where(y_rt == 1)[0]
-            disengaged_idx = np.where(y_rt == 0)[0]
-            sampled_disengaged_idx = np.random.choice(disengaged_idx, n_engaged, replace=False)
-            balanced_idx = np.concatenate([engaged_idx, sampled_disengaged_idx])
-            X_rt = X_rt[balanced_idx]
-            y_rt = y_rt[balanced_idx]
-            print(f"    Balanced to {len(y_rt)} windows")
-
-        realtime_model, realtime_scaler = train_final_model(X_rt, y_rt)
-
-        realtime_model_path = output_dir / "engagement_realtime_model.joblib"
-        realtime_scaler_path = output_dir / "engagement_realtime_scaler.joblib"
-
-        joblib.dump(realtime_model, realtime_model_path)
-        joblib.dump(realtime_scaler, realtime_scaler_path)
-
-        print(f"    Realtime model saved to: {realtime_model_path}")
+        save_realtime_model(realtime_model, realtime_scaler, output_dir)
     else:
         print("    Warning: No realtime training data extracted")
 
-    # Step 6: Save model and scaler
-    print("\n[5/5] Saving model...")
+    # Step 5: Save models and results
+    print("\n[5/5] Saving models and results...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Save main model
     model_path = output_dir / "engagement_classifier_model.joblib"
     scaler_path = output_dir / "engagement_classifier_scaler.joblib"
-
     joblib.dump(final_model, model_path)
     joblib.dump(scaler, scaler_path)
-
     print(f"Model saved to: {model_path}")
     print(f"Scaler saved to: {scaler_path}")
 
-    # Save results as JSON
-    results = {
-        "n_subjects": len(recordings),
-        "per_subject_scores": dict(zip(subject_ids, [float(s) for s in scores])),
-        "mean_accuracy": float(mean_acc),
-        "std_accuracy": float(std_acc),
-        "target_met": bool(target_met),
-        "model_path": str(model_path),
-        "scaler_path": str(scaler_path),
-        "realtime_model_path": str(output_dir / "engagement_realtime_model.joblib"),
-        "realtime_scaler_path": str(output_dir / "engagement_realtime_scaler.joblib"),
-    }
+    # Create and save results
+    results = create_results_dict(
+        recordings=recordings,
+        subject_ids=subject_ids,
+        scores=scores,
+        mean_accuracy=mean_accuracy,
+        std_accuracy=std_accuracy,
+        target_met=target_met,
+        output_dir=output_dir,
+    )
 
     results_path = output_dir / "training_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
-
     print(f"Results saved to: {results_path}")
 
     print("\n" + "=" * 60)
@@ -232,6 +294,31 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("=" * 60)
 
     return results
+
+
+def create_results_dict(
+    recordings: list,
+    subject_ids: list,
+    scores: list,
+    mean_accuracy: float,
+    std_accuracy: float,
+    target_met: bool,
+    output_dir: Path,
+) -> dict:
+    """Create results dictionary for saving."""
+    return {
+        "n_subjects": len(recordings),
+        "per_subject_scores": dict(
+            zip(subject_ids, [float(score) for score in scores])
+        ),
+        "mean_accuracy": float(mean_accuracy),
+        "std_accuracy": float(std_accuracy),
+        "target_met": bool(target_met),
+        "model_path": str(output_dir / "engagement_classifier_model.joblib"),
+        "scaler_path": str(output_dir / "engagement_classifier_scaler.joblib"),
+        "realtime_model_path": str(output_dir / "engagement_realtime_model.joblib"),
+        "realtime_scaler_path": str(output_dir / "engagement_realtime_scaler.joblib"),
+    }
 
 
 if __name__ == "__main__":
