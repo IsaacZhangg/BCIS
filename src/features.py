@@ -60,20 +60,21 @@ def compute_hjorth_parameters(epoch: np.ndarray) -> tuple[float, float, float]:
     # Activity = variance
     activity = np.var(epoch)
 
-    # First derivative
-    diff1 = np.diff(epoch)
-    var_diff1 = np.var(diff1)
+    # First and second derivatives
+    first_derivative = np.diff(epoch)
+    second_derivative = np.diff(first_derivative)
 
-    # Second derivative
-    diff2 = np.diff(diff1)
-    var_diff2 = np.var(diff2)
+    var_first_derivative = np.var(first_derivative)
+    var_second_derivative = np.var(second_derivative)
 
-    # Mobility = sqrt(var(diff1) / var(signal))
-    mobility = np.sqrt(var_diff1 / (activity + 1e-10))
+    # Mobility = sqrt(var(first_derivative) / var(signal))
+    mobility = np.sqrt(var_first_derivative / (activity + 1e-10))
 
-    # Complexity = mobility(diff1) / mobility(signal)
-    mobility_diff1 = np.sqrt(var_diff2 / (var_diff1 + 1e-10))
-    complexity = mobility_diff1 / (mobility + 1e-10)
+    # Complexity = mobility(first_derivative) / mobility(signal)
+    mobility_first_derivative = np.sqrt(
+        var_second_derivative / (var_first_derivative + 1e-10)
+    )
+    complexity = mobility_first_derivative / (mobility + 1e-10)
 
     return activity, mobility, complexity
 
@@ -211,36 +212,44 @@ def compute_temporal_features(epoch: np.ndarray, sfreq: float) -> list[float]:
     """
     features = []
 
-    # Split epoch into segments
+    # Split epoch into segments for temporal analysis
     n_segments = 4
-    segment_len = len(epoch) // n_segments
+    segment_length = len(epoch) // n_segments
 
-    segment_vars = []
-    segment_means = []
+    segment_variances = []
+    segment_mean_amplitudes = []
+
     for i in range(n_segments):
-        segment = epoch[i * segment_len : (i + 1) * segment_len]
-        segment_vars.append(np.var(segment))
-        segment_means.append(np.mean(np.abs(segment)))
+        start_idx = i * segment_length
+        end_idx = (i + 1) * segment_length
+        segment = epoch[start_idx:end_idx]
 
-    # Variance trend (engaged should show more consistent variance)
-    features.append(np.std(segment_vars))
-    features.append(segment_vars[-1] / (segment_vars[0] + 1e-10))  # End/start ratio
+        segment_variances.append(np.var(segment))
+        segment_mean_amplitudes.append(np.mean(np.abs(segment)))
 
-    # Activity trend
-    features.append(np.std(segment_means))
-    features.append(segment_means[-1] / (segment_means[0] + 1e-10))
+    # Variance trend features
+    variance_std = np.std(segment_variances)
+    variance_ratio = segment_variances[-1] / (segment_variances[0] + 1e-10)
+    features.extend([variance_std, variance_ratio])
 
-    # Root mean square
-    features.append(np.sqrt(np.mean(epoch**2)))
+    # Activity trend features
+    amplitude_std = np.std(segment_mean_amplitudes)
+    amplitude_ratio = segment_mean_amplitudes[-1] / (segment_mean_amplitudes[0] + 1e-10)
+    features.extend([amplitude_std, amplitude_ratio])
 
-    # Signal energy
-    features.append(np.sum(epoch**2))
+    # Root mean square and signal energy
+    rms = np.sqrt(np.mean(epoch**2))
+    energy = np.sum(epoch**2)
+    features.extend([rms, energy])
 
     # Autocorrelation at specific lags (rhythm indicators)
-    for lag in [10, 25, 50]:  # 40ms, 100ms, 200ms at 250Hz
+    lags_ms = [40, 100, 200]  # milliseconds
+    lags_samples = [int(lag * sfreq / 1000) for lag in lags_ms]
+
+    for lag in lags_samples:
         if len(epoch) > lag:
             autocorr = np.corrcoef(epoch[:-lag], epoch[lag:])[0, 1]
-            features.append(autocorr if not np.isnan(autocorr) else 0.0)
+            features.append(0.0 if np.isnan(autocorr) else autocorr)
         else:
             features.append(0.0)
 
@@ -266,30 +275,35 @@ def compute_asymmetry_features(
 
     # C3-C4 asymmetry (critical for motor tasks)
     if "C3" in channels_data and "C4" in channels_data:
-        c3 = channels_data["C3"]
-        c4 = channels_data["C4"]
+        c3_signal = channels_data["C3"]
+        c4_signal = channels_data["C4"]
 
-        for band_name, (low, high) in bands.items():
-            c3_power = compute_band_power(c3, sfreq, low, high)
-            c4_power = compute_band_power(c4, sfreq, low, high)
+        for band_name, (low_freq, high_freq) in bands.items():
+            c3_power = compute_band_power(c3_signal, sfreq, low_freq, high_freq)
+            c4_power = compute_band_power(c4_signal, sfreq, low_freq, high_freq)
 
-            # Asymmetry index
-            asym = (c4_power - c3_power) / (c4_power + c3_power + 1e-10)
-            features.append(asym)
+            # Asymmetry index: (right - left) / (right + left)
+            total_power = c4_power + c3_power + 1e-10
+            asymmetry_index = (c4_power - c3_power) / total_power
+            features.append(asymmetry_index)
 
-            # Log ratio
-            features.append(np.log((c3_power + 1e-10) / (c4_power + 1e-10)))
+            # Log power ratio
+            log_ratio = np.log((c3_power + 1e-10) / (c4_power + 1e-10))
+            features.append(log_ratio)
 
-    # Frontal asymmetry (attention/engagement indicator)
+    # Frontal-parietal asymmetry (attention/engagement indicator)
     if "Fz" in channels_data and "Pz" in channels_data:
-        fz = channels_data["Fz"]
-        pz = channels_data["Pz"]
+        fz_signal = channels_data["Fz"]
+        pz_signal = channels_data["Pz"]
 
         for band_name in ["theta", "alpha"]:
-            low, high = bands[band_name]
-            fz_power = compute_band_power(fz, sfreq, low, high)
-            pz_power = compute_band_power(pz, sfreq, low, high)
-            features.append(np.log((fz_power + 1e-10) / (pz_power + 1e-10)))
+            low_freq, high_freq = bands[band_name]
+            fz_power = compute_band_power(fz_signal, sfreq, low_freq, high_freq)
+            pz_power = compute_band_power(pz_signal, sfreq, low_freq, high_freq)
+
+            # Log power ratio
+            log_ratio = np.log((fz_power + 1e-10) / (pz_power + 1e-10))
+            features.append(log_ratio)
 
     return features
 

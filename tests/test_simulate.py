@@ -37,8 +37,10 @@ def test_sliding_window_extraction():
 
     # 20 seconds of fake data at 250 Hz = 5000 samples
     n_samples = 5000
-    data = {ch: np.random.randn(n_samples) for ch in
-            ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]}
+    data = {
+        ch: np.random.randn(n_samples)
+        for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
+    }
 
     windows = extract_sliding_windows(data, sfreq=250.0, window_sec=5.0, step_sec=5.0)
 

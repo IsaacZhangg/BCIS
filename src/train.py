@@ -112,8 +112,14 @@ def train_within_subject_cv_riemannian(
 
 def determine_fold_count(sample_count: int, requested_folds: int) -> int:
     """Determine appropriate number of folds based on sample count."""
-    actual_folds = min(requested_folds, sample_count // 2)
-    return sample_count if actual_folds < 2 else actual_folds
+    max_possible_folds = sample_count // 2
+    actual_folds = min(requested_folds, max_possible_folds)
+
+    # Use leave-one-out CV if too few samples for k-fold
+    if actual_folds < 2:
+        return sample_count
+
+    return actual_folds
 
 
 def evaluate_subject_folds(
@@ -202,16 +208,20 @@ def compute_best_accuracy(
     predictions: list[np.ndarray], accuracies: list[float], test_labels: np.ndarray
 ) -> float:
     """Compute best accuracy from individual models or ensemble."""
-    if len(predictions) <= 5:
-        return max(accuracies) if accuracies else 0.5
+    if not accuracies:
+        return 0.5
 
-    # Create weighted ensemble
+    # For few models, use best individual model
+    if len(predictions) <= 5:
+        return max(accuracies)
+
+    # For many models, try weighted ensemble
     ensemble_accuracy = compute_weighted_ensemble_accuracy(
         predictions, accuracies, test_labels
     )
-    accuracies.append(ensemble_accuracy)
 
-    return max(accuracies)
+    # Return best of all approaches
+    return max(max(accuracies), ensemble_accuracy)
 
 
 def compute_weighted_ensemble_accuracy(
@@ -330,79 +340,194 @@ def train_traditional_models(
     test_scaled = scaler.transform(test_features)
 
     # Try different feature selection percentages
-    for feature_percentage in [0.3, 0.5, 0.7]:
-        num_features = train_scaled.shape[1]
-        k_features = max(10, int(feature_percentage * num_features))
+    feature_percentages = [0.3, 0.5, 0.7]
 
-        try:
-            selector = SelectKBest(f_classif, k=k_features)
-            train_selected = selector.fit_transform(train_scaled, train_labels)
-            test_selected = selector.transform(test_scaled)
-        except Exception:
+    for feature_percentage in feature_percentages:
+        # Select features
+        selected_data = select_features(
+            train_scaled, test_scaled, train_labels, feature_percentage
+        )
+        if selected_data is None:
             continue
 
-        # Random Forest
-        rf = RandomForestClassifier(
-            n_estimators=300,
-            max_depth=6,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1,
+        train_selected, test_selected = selected_data
+
+        # Train and evaluate each model type
+        model_results = train_model_ensemble(
+            train_selected, test_selected, train_labels, test_labels
         )
-        rf.fit(train_selected, train_labels)
-        prediction = rf.predict(test_selected)
-        predictions.append(prediction)
-        accuracies.append(np.mean(prediction == test_labels))
 
-        # Extra Trees
-        et = ExtraTreesClassifier(
-            n_estimators=300,
-            max_depth=6,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1,
-        )
-        et.fit(train_selected, train_labels)
-        prediction = et.predict(test_selected)
-        predictions.append(prediction)
-        accuracies.append(np.mean(prediction == test_labels))
-
-        # Gradient Boosting
-        gb = GradientBoostingClassifier(
-            n_estimators=150, max_depth=3, learning_rate=0.1, random_state=42
-        )
-        gb.fit(train_selected, train_labels)
-        prediction = gb.predict(test_selected)
-        predictions.append(prediction)
-        accuracies.append(np.mean(prediction == test_labels))
-
-        # SVM with different C values
-        for C in [1.0, 10.0]:
-            svm = SVC(
-                kernel="rbf",
-                C=C,
-                gamma="scale",
-                class_weight="balanced",
-                random_state=42,
-            )
-            svm.fit(train_selected, train_labels)
-            prediction = svm.predict(test_selected)
-            predictions.append(prediction)
-            accuracies.append(np.mean(prediction == test_labels))
-
-        # LDA
-        try:
-            lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-            lda.fit(train_selected, train_labels)
-            prediction = lda.predict(test_selected)
-            predictions.append(prediction)
-            accuracies.append(np.mean(prediction == test_labels))
-        except Exception:
-            pass
+        predictions.extend(model_results["predictions"])
+        accuracies.extend(model_results["accuracies"])
 
     return {"predictions": predictions, "accuracies": accuracies}
+
+
+def select_features(
+    train_scaled: np.ndarray,
+    test_scaled: np.ndarray,
+    train_labels: np.ndarray,
+    feature_percentage: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Select top k features based on ANOVA F-value."""
+    num_features = train_scaled.shape[1]
+    k_features = max(10, int(feature_percentage * num_features))
+
+    try:
+        selector = SelectKBest(f_classif, k=k_features)
+        train_selected = selector.fit_transform(train_scaled, train_labels)
+        test_selected = selector.transform(test_scaled)
+        return train_selected, test_selected
+    except Exception:
+        return None
+
+
+def train_model_ensemble(
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+) -> dict:
+    """Train ensemble of traditional ML models."""
+    predictions = []
+    accuracies = []
+
+    # Random Forest
+    rf_pred, rf_acc = train_random_forest(
+        train_features, test_features, train_labels, test_labels
+    )
+    predictions.append(rf_pred)
+    accuracies.append(rf_acc)
+
+    # Extra Trees
+    et_pred, et_acc = train_extra_trees(
+        train_features, test_features, train_labels, test_labels
+    )
+    predictions.append(et_pred)
+    accuracies.append(et_acc)
+
+    # Gradient Boosting
+    gb_pred, gb_acc = train_gradient_boosting(
+        train_features, test_features, train_labels, test_labels
+    )
+    predictions.append(gb_pred)
+    accuracies.append(gb_acc)
+
+    # SVM with different C values
+    for C in [1.0, 10.0]:
+        svm_pred, svm_acc = train_svm(
+            train_features, test_features, train_labels, test_labels, C
+        )
+        predictions.append(svm_pred)
+        accuracies.append(svm_acc)
+
+    # LDA
+    lda_result = train_lda(train_features, test_features, train_labels, test_labels)
+    if lda_result is not None:
+        lda_pred, lda_acc = lda_result
+        predictions.append(lda_pred)
+        accuracies.append(lda_acc)
+
+    return {"predictions": predictions, "accuracies": accuracies}
+
+
+def train_random_forest(
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Train Random Forest classifier."""
+    rf = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=6,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    rf.fit(train_features, train_labels)
+    prediction = rf.predict(test_features)
+    accuracy = np.mean(prediction == test_labels)
+    return prediction, accuracy
+
+
+def train_extra_trees(
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Train Extra Trees classifier."""
+    et = ExtraTreesClassifier(
+        n_estimators=300,
+        max_depth=6,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    et.fit(train_features, train_labels)
+    prediction = et.predict(test_features)
+    accuracy = np.mean(prediction == test_labels)
+    return prediction, accuracy
+
+
+def train_gradient_boosting(
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Train Gradient Boosting classifier."""
+    gb = GradientBoostingClassifier(
+        n_estimators=150,
+        max_depth=3,
+        learning_rate=0.1,
+        random_state=42,
+    )
+    gb.fit(train_features, train_labels)
+    prediction = gb.predict(test_features)
+    accuracy = np.mean(prediction == test_labels)
+    return prediction, accuracy
+
+
+def train_svm(
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+    C: float,
+) -> tuple[np.ndarray, float]:
+    """Train SVM classifier."""
+    svm = SVC(
+        kernel="rbf",
+        C=C,
+        gamma="scale",
+        class_weight="balanced",
+        random_state=42,
+    )
+    svm.fit(train_features, train_labels)
+    prediction = svm.predict(test_features)
+    accuracy = np.mean(prediction == test_labels)
+    return prediction, accuracy
+
+
+def train_lda(
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+) -> tuple[np.ndarray, float] | None:
+    """Train LDA classifier."""
+    try:
+        lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+        lda.fit(train_features, train_labels)
+        prediction = lda.predict(test_features)
+        accuracy = np.mean(prediction == test_labels)
+        return prediction, accuracy
+    except Exception:
+        return None
 
 
 def train_combined_models(

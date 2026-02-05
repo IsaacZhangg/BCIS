@@ -9,7 +9,7 @@ def test_bandpass_filter_removes_dc_offset():
     """Test that bandpass filter removes DC component."""
     sfreq = 250.0
     # Create signal with DC offset + 10 Hz sine wave
-    t = np.arange(0, 2, 1/sfreq)
+    t = np.arange(0, 2, 1 / sfreq)
     dc_offset = 73000  # Typical EEG offset in microvolts
     signal = dc_offset + 10 * np.sin(2 * np.pi * 10 * t)
 
@@ -22,7 +22,7 @@ def test_bandpass_filter_removes_dc_offset():
 def test_notch_filter_removes_60hz():
     """Test that notch filter attenuates 60 Hz."""
     sfreq = 250.0
-    t = np.arange(0, 2, 1/sfreq)
+    t = np.arange(0, 2, 1 / sfreq)
     # Signal with 10 Hz + 60 Hz noise
     signal = np.sin(2 * np.pi * 10 * t) + 0.5 * np.sin(2 * np.pi * 60 * t)
 
@@ -30,6 +30,7 @@ def test_notch_filter_removes_60hz():
 
     # Compute power at 60 Hz before and after
     from scipy.signal import welch
+
     _, psd_before = welch(signal, sfreq, nperseg=250)
     _, psd_after = welch(filtered, sfreq, nperseg=250)
 
@@ -44,7 +45,11 @@ def test_preprocess_eeg_full_pipeline():
     n_samples = 1000
     # Simulate raw EEG: DC offset + signal + 60 Hz noise
     np.random.seed(42)
-    raw = 73000 + np.random.randn(n_samples) * 10 + 0.5 * np.sin(2 * np.pi * 60 * np.arange(n_samples) / sfreq)
+    raw = (
+        73000
+        + np.random.randn(n_samples) * 10
+        + 0.5 * np.sin(2 * np.pi * 60 * np.arange(n_samples) / sfreq)
+    )
 
     processed = preprocess_eeg(raw, sfreq)
 

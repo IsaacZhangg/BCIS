@@ -2,13 +2,17 @@
 
 import numpy as np
 
-from src.features import compute_theta_power, extract_features, extract_realtime_features
+from src.features import (
+    compute_theta_power,
+    extract_features,
+    extract_realtime_features,
+)
 
 
 def test_compute_theta_power_detects_theta():
     """Test that theta power is higher for theta-dominant signal."""
     sfreq = 250.0
-    t = np.arange(0, 2, 1/sfreq)  # 2 seconds
+    t = np.arange(0, 2, 1 / sfreq)  # 2 seconds
 
     # Signal with strong 6 Hz (theta) component
     theta_signal = np.sin(2 * np.pi * 6 * t)
@@ -61,8 +65,10 @@ def test_extract_realtime_features_correct_shape():
     """Test that realtime features have correct shape for 8 channels."""
     sfreq = 250.0
     # 5 seconds of data, 8 channels
-    window = {ch: np.random.randn(1250) for ch in
-              ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]}
+    window = {
+        ch: np.random.randn(1250)
+        for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
+    }
 
     features = extract_realtime_features(window, sfreq)
 
@@ -75,8 +81,10 @@ def test_extract_realtime_features_no_baseline_needed():
     """Test that realtime features work without baseline reference."""
     sfreq = 250.0
     # Single 5-second window
-    window = {ch: np.random.randn(1250) for ch in
-              ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]}
+    window = {
+        ch: np.random.randn(1250)
+        for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
+    }
 
     # Should not raise - no baseline needed
     features = extract_realtime_features(window, sfreq)

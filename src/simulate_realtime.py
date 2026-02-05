@@ -48,8 +48,8 @@ def check_alert(
     if len(score_history) < consecutive:
         return False
 
-    recent = score_history[-consecutive:]
-    return all(score < threshold for score in recent)
+    recent_scores = score_history[-consecutive:]
+    return all(score < threshold for score in recent_scores)
 
 
 def extract_sliding_windows(
@@ -81,9 +81,10 @@ def extract_sliding_windows(
     start = 0
 
     while start + window_samples <= total_samples:
-        window = {}
-        for ch_name, signal in data.items():
-            window[ch_name] = signal[start : start + window_samples]
+        window = {
+            channel_name: signal[start : start + window_samples]
+            for channel_name, signal in data.items()
+        }
         windows.append(window)
         start += step_samples
 

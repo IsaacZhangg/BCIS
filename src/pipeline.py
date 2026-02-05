@@ -245,18 +245,16 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     final_model, scaler = train_final_model(all_features, all_labels)
 
-    # Train realtime model using only realtime-compatible features
+    # Step 4b: Train realtime model using only realtime-compatible features
     print("\n[4b/5] Training realtime model...")
     realtime_data = extract_realtime_training_data(processed_data_cache, CHANNELS)
 
     if realtime_data:
         features, labels = realtime_data
         balanced_features, balanced_labels = balance_realtime_data(features, labels)
-
         realtime_model, realtime_scaler = train_final_model(
             balanced_features, balanced_labels
         )
-
         save_realtime_model(realtime_model, realtime_scaler, output_dir)
     else:
         print("    Warning: No realtime training data extracted")

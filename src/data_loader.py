@@ -30,16 +30,23 @@ def load_recording(
     data = df[CHANNELS].values.T  # Transpose to (n_channels, n_samples)
 
     # Parse events from stim column
+    events = parse_events(df["stim"].values)
+
+    return data, events, SFREQ
+
+
+def parse_events(stim_values: np.ndarray) -> list[tuple[int, int, int]]:
+    """Parse event markers from stim column."""
     events = []
-    stim = df["stim"].values
-    for idx, val in enumerate(stim):
-        if val != 0:
-            stim_int = int(val)
-            phase = (stim_int // 10) % 10
+
+    for idx, value in enumerate(stim_values):
+        if value != 0:
+            stim_int = int(value)
+            phase = extract_phase_from_stim(stim_int)
             movement = stim_int % 10
             events.append((idx, phase, movement))
 
-    return data, events, SFREQ
+    return events
 
 
 def get_complete_recordings(data_dir: Path) -> list[Path]:
@@ -52,21 +59,37 @@ def get_complete_recordings(data_dir: Path) -> list[Path]:
     Returns:
         List of paths to complete recording CSVs
     """
-    complete = []
+    complete_recordings = []
 
     for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
-        df = pd.read_csv(csv_path)
-        stim = df["stim"].values
+        if is_complete_recording(csv_path):
+            complete_recordings.append(csv_path)
 
-        # Count phase 3 (imagery) events
-        phase3_count = 0
-        for val in stim:
-            if val != 0:
-                phase = (int(val) // 10) % 10
-                if phase == 3:
-                    phase3_count += 1
+    return complete_recordings
 
-        if phase3_count == 100:
-            complete.append(csv_path)
 
-    return complete
+def is_complete_recording(csv_path: Path) -> bool:
+    """Check if a recording has exactly 100 imagery trials."""
+    df = pd.read_csv(csv_path)
+    stim_values = df["stim"].values
+
+    # Count phase 3 (imagery) events
+    imagery_count = count_phase_events(stim_values, target_phase=3)
+
+    return imagery_count == 100
+
+
+def count_phase_events(stim_values: np.ndarray, target_phase: int) -> int:
+    """Count events for a specific phase in the stim column."""
+    count = 0
+    for value in stim_values:
+        if value != 0:
+            phase = extract_phase_from_stim(int(value))
+            if phase == target_phase:
+                count += 1
+    return count
+
+
+def extract_phase_from_stim(stim_value: int) -> int:
+    """Extract phase code from stim marker value."""
+    return (stim_value // 10) % 10
