@@ -140,12 +140,10 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("Engagement Classifier - Training Pipeline")
     print("=" * 60)
 
-    # Step 1: Find complete recordings
     print("\n[1/5] Finding complete recordings...")
     recordings = get_complete_recordings(data_dir)
     print(f"Found {len(recordings)} complete recordings")
 
-    # Step 2: Load and preprocess data for each subject
     print("\n[2/5] Loading and preprocessing data...")
     subject_data = []
     subject_labels = []
@@ -156,22 +154,18 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         subject_id = recording_path.parent.parent.name
         print(f"  Processing {subject_id}...")
 
-        # Load and preprocess recording
         data, events, sample_rate = load_recording(recording_path)
         preprocessed_data = preprocess_eeg_multichannel(
             data, sample_rate, CHANNELS, spatial_filter="car"
         )
 
-        # Create channel dictionary
         channel_signals = {
             channel_name: preprocessed_data[channel_index]
             for channel_index, channel_name in enumerate(CHANNELS)
         }
 
-        # Cache for realtime model training
         processed_data_cache[recording_path] = (channel_signals, events, sample_rate)
 
-        # Extract augmented epochs for each channel
         engaged_epochs_by_channel = {}
         disengaged_epochs_by_channel = {}
 
@@ -188,7 +182,6 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             engaged_epochs_by_channel[channel_name] = engaged_pairs
             disengaged_epochs_by_channel[channel_name] = disengaged_pairs
 
-        # Balance classes to prevent bias
         engaged_count = len(engaged_epochs_by_channel[CHANNELS[0]])
         disengaged_count = len(disengaged_epochs_by_channel[CHANNELS[0]])
 
@@ -208,18 +201,15 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             f"    Engaged epochs: {engaged_count}, Disengaged epochs: {disengaged_count}"
         )
 
-        # Extract ERD features
         engaged_features = extract_erd_features(engaged_epochs_by_channel, sample_rate)
         disengaged_features = extract_erd_features(
             disengaged_epochs_by_channel, sample_rate
         )
 
-        # Create multichannel arrays for Riemannian classification
         multichannel_data = create_multichannel_arrays(
             engaged_epochs_by_channel, disengaged_epochs_by_channel, CHANNELS
         )
 
-        # Combine features and labels
         features = np.vstack([engaged_features, disengaged_features])
         labels = np.array([1] * len(engaged_features) + [0] * len(disengaged_features))
 
@@ -227,7 +217,6 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         subject_labels.append(labels)
         subject_ids.append(subject_id)
 
-    # Step 3: Within-subject Cross-validation
     print("\n[3/5] Running within-subject cross-validation...")
     print("(Using Riemannian geometry + feature ensemble)")
     scores, mean_accuracy, std_accuracy = train_within_subject_cv_riemannian(
@@ -241,18 +230,15 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
     print(f"\nMean accuracy: {mean_accuracy:.1%} (+/- {std_accuracy:.1%})")
 
-    # Check if target met
     target_met = mean_accuracy >= 0.90
     print(f"\nTarget (>90%): {'MET' if target_met else 'NOT MET'}")
 
-    # Step 4: Train final model on all data
     print("\n[4/5] Training final model on all data...")
     all_features = np.vstack([data[0] for data in subject_data])
     all_labels = np.concatenate(subject_labels)
 
     final_model, scaler = train_final_model(all_features, all_labels)
 
-    # Step 4b: Train realtime model using only realtime-compatible features
     print("\n[4b/5] Training realtime model...")
     realtime_data = extract_realtime_training_data(processed_data_cache, CHANNELS)
 
@@ -266,11 +252,9 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     else:
         print("    Warning: No realtime training data extracted")
 
-    # Step 5: Save models and results
     print("\n[5/5] Saving models and results...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save main model
     model_path = output_dir / "engagement_classifier_model.joblib"
     scaler_path = output_dir / "engagement_classifier_scaler.joblib"
     joblib.dump(final_model, model_path)
@@ -278,7 +262,6 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print(f"Model saved to: {model_path}")
     print(f"Scaler saved to: {scaler_path}")
 
-    # Create and save results
     results = create_results_dict(
         recordings=recordings,
         subject_ids=subject_ids,

@@ -26,21 +26,11 @@ def train_loso_cv(
     X_by_subject: list[np.ndarray],
     y_by_subject: list[np.ndarray],
 ) -> tuple[list[float], float, float]:
-    """
-    Train with Leave-One-Subject-Out cross-validation.
-
-    Args:
-        X_by_subject: List of feature arrays, one per subject
-        y_by_subject: List of label arrays, one per subject
-
-    Returns:
-        Tuple of (per_subject_scores, mean_accuracy, std_accuracy)
-    """
+    """Train with Leave-One-Subject-Out cross-validation."""
     n_subjects = len(X_by_subject)
     scores = []
 
     for test_idx in range(n_subjects):
-        # Prepare train/test split
         X_train_list = []
         y_train_list = []
 
@@ -54,12 +44,10 @@ def train_loso_cv(
         X_test = X_by_subject[test_idx]
         y_test = y_by_subject[test_idx]
 
-        # Standardize features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # Train Random Forest classifier
         model = RandomForestClassifier(
             n_estimators=200,
             max_depth=10,
@@ -70,7 +58,6 @@ def train_loso_cv(
         )
         model.fit(X_train_scaled, y_train)
 
-        # Evaluate
         accuracy = model.score(X_test_scaled, y_test)
         scores.append(accuracy)
 
@@ -132,7 +119,6 @@ def evaluate_subject_folds(
     fold_scores = []
 
     for train_indices, test_indices in stratified_kfold.split(features, labels):
-        # Split data
         train_features = features[train_indices]
         test_features = features[test_indices]
         train_multichannel = multichannel_data[train_indices]
@@ -140,7 +126,6 @@ def evaluate_subject_folds(
         train_labels = labels[train_indices]
         test_labels = labels[test_indices]
 
-        # Collect predictions from multiple models
         predictions, accuracies = collect_model_predictions(
             train_features,
             test_features,
@@ -150,7 +135,6 @@ def evaluate_subject_folds(
             test_labels,
         )
 
-        # Get best accuracy (either individual model or ensemble)
         best_accuracy = compute_best_accuracy(predictions, accuracies, test_labels)
         fold_scores.append(best_accuracy)
 
@@ -208,16 +192,13 @@ def compute_best_accuracy(
     if not accuracies:
         return 0.5
 
-    # For few models, use best individual model
     if len(predictions) <= 5:
         return max(accuracies)
 
-    # For many models, try weighted ensemble
     ensemble_accuracy = compute_weighted_ensemble_accuracy(
         predictions, accuracies, test_labels
     )
 
-    # Return best of all approaches
     return max(max(accuracies), ensemble_accuracy)
 
 
@@ -228,14 +209,12 @@ def compute_weighted_ensemble_accuracy(
     predictions_array = np.array(predictions)
     accuracies_array = np.array(accuracies)
 
-    # Select top performers for voting
     top_k = min(20, len(accuracies_array))
     top_indices = np.argsort(accuracies_array)[-top_k:]
     top_predictions = predictions_array[top_indices]
     top_weights = accuracies_array[top_indices]
     top_weights = top_weights / top_weights.sum()
 
-    # Weighted voting
     weighted_votes = np.zeros((len(test_labels), 2))
     for i, prediction in enumerate(top_predictions):
         for j, pred_class in enumerate(prediction):
@@ -331,16 +310,13 @@ def train_traditional_models(
     predictions = []
     accuracies = []
 
-    # Scale features
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_features)
     test_scaled = scaler.transform(test_features)
 
-    # Try different feature selection percentages
     feature_percentages = [0.3, 0.5, 0.7]
 
     for feature_percentage in feature_percentages:
-        # Select features
         selected_data = select_features(
             train_scaled, test_scaled, train_labels, feature_percentage
         )
@@ -349,7 +325,6 @@ def train_traditional_models(
 
         train_selected, test_selected = selected_data
 
-        # Train and evaluate each model type
         model_results = train_model_ensemble(
             train_selected, test_selected, train_labels, test_labels
         )
@@ -389,28 +364,24 @@ def train_model_ensemble(
     predictions = []
     accuracies = []
 
-    # Random Forest
     rf_pred, rf_acc = train_random_forest(
         train_features, test_features, train_labels, test_labels
     )
     predictions.append(rf_pred)
     accuracies.append(rf_acc)
 
-    # Extra Trees
     et_pred, et_acc = train_extra_trees(
         train_features, test_features, train_labels, test_labels
     )
     predictions.append(et_pred)
     accuracies.append(et_acc)
 
-    # Gradient Boosting
     gb_pred, gb_acc = train_gradient_boosting(
         train_features, test_features, train_labels, test_labels
     )
     predictions.append(gb_pred)
     accuracies.append(gb_acc)
 
-    # SVM with different C values
     for C in [1.0, 10.0]:
         svm_pred, svm_acc = train_svm(
             train_features, test_features, train_labels, test_labels, C
@@ -418,7 +389,6 @@ def train_model_ensemble(
         predictions.append(svm_pred)
         accuracies.append(svm_acc)
 
-    # LDA
     lda_result = train_lda(train_features, test_features, train_labels, test_labels)
     if lda_result is not None:
         lda_pred, lda_acc = lda_result
@@ -539,12 +509,10 @@ def train_combined_models(
     predictions = []
     accuracies = []
 
-    # Scale traditional features
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_features)
     test_scaled = scaler.transform(test_features)
 
-    # Combine features
     train_combined = np.hstack([train_scaled, riemannian_train])
     test_combined = np.hstack([test_scaled, riemannian_test])
 
@@ -556,7 +524,6 @@ def train_combined_models(
         train_selected = selector.fit_transform(train_combined, train_labels)
         test_selected = selector.transform(test_combined)
 
-        # Extra Trees
         et = ExtraTreesClassifier(
             n_estimators=400,
             max_depth=8,
@@ -570,7 +537,6 @@ def train_combined_models(
         predictions.append(prediction)
         accuracies.append(np.mean(prediction == test_labels))
 
-        # Random Forest
         rf = RandomForestClassifier(
             n_estimators=400,
             max_depth=8,
@@ -591,16 +557,7 @@ def train_final_model(
     X: np.ndarray,
     y: np.ndarray,
 ) -> tuple[RandomForestClassifier, StandardScaler]:
-    """
-    Train final model on all data.
-
-    Args:
-        X: Feature array of shape (n_samples, n_features)
-        y: Label array of shape (n_samples,)
-
-    Returns:
-        Tuple of (fitted model, fitted scaler)
-    """
+    """Train final model on all data."""
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 

@@ -114,15 +114,12 @@ def simulate_recording(
     Returns:
         DataFrame with timestamp, engagement_score, alert_triggered columns
     """
-    # Load resources
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)
     data, events, sample_rate = load_recording(recording_path)
 
-    # Preprocess all channels
     processed_channels = preprocess_recording(data, sample_rate, CHANNELS)
 
-    # Extract and process sliding windows
     windows = extract_sliding_windows(
         processed_channels, sample_rate, window_sec, window_sec
     )
@@ -198,7 +195,6 @@ def simulate_recording_streaming(
 def preprocess_recording(
     data: np.ndarray, sample_rate: float, channels: list[str]
 ) -> dict[str, np.ndarray]:
-    """Preprocess all channels in a recording."""
     return {
         channel_name: preprocess_eeg(data[channel_idx], sample_rate)
         for channel_idx, channel_name in enumerate(channels)
@@ -214,24 +210,19 @@ def process_windows(
     threshold: float,
     consecutive: int,
 ) -> list[dict]:
-    """Process all windows and compute engagement scores."""
     results = []
     score_history = []
 
     for window_idx, window in enumerate(windows):
-        # Extract and scale features
         features = extract_realtime_features(window, sample_rate)
         scaled_features = scaler.transform(features.reshape(1, -1))
 
-        # Compute engagement score
         engaged_probability = model.predict_proba(scaled_features)[0, 1]
         score = compute_engagement_score(engaged_probability)
 
-        # Check for alert
         score_history.append(score)
         alert = check_alert(score_history, threshold, consecutive)
 
-        # Store result
         results.append(
             {
                 "timestamp_sec": window_idx * window_sec,
@@ -312,7 +303,6 @@ def print_summary(
 def main():
     args = parse_arguments()
 
-    # Validate paths
     model_path = args.model_dir / "engagement_realtime_model.joblib"
     scaler_path = args.model_dir / "engagement_realtime_scaler.joblib"
 
@@ -321,21 +311,18 @@ def main():
         print(validation_error)
         return 1
 
-    # Display configuration
     print(f"Processing: {args.recording}")
     print(f"Model: {model_path}")
     print(
         f"Window: {args.window}s, Threshold: {args.threshold}, Consecutive: {args.consecutive}"
     )
 
-    # Run simulation based on mode
     results_df = run_simulation(args, model_path, scaler_path)
 
     if results_df.empty:
         print("No results produced (recording may be too short for window size).")
         return 0
 
-    # Display and save results
     print_summary(results_df, args.threshold, args.window)
 
     output_path = args.output or Path("simulation_results.csv")
@@ -348,7 +335,6 @@ def main():
 def run_simulation(
     args: argparse.Namespace, model_path: Path, scaler_path: Path
 ) -> pd.DataFrame:
-    """Run simulation in the appropriate mode."""
     if args.streaming:
         print("Mode: streaming (FileEEGStream + RealtimeEngine)")
         return simulate_recording_streaming(
@@ -373,7 +359,6 @@ def run_simulation(
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Simulate real-time engagement detection on EEG recording"
     )
@@ -430,7 +415,6 @@ def parse_arguments() -> argparse.Namespace:
 def validate_paths(
     recording_path: Path, model_path: Path, scaler_path: Path
 ) -> str | None:
-    """Validate that all required paths exist."""
     if not model_path.exists():
         return (
             f"Error: Model not found at {model_path}\n"

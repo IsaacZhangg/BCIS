@@ -16,8 +16,6 @@ from src.simulate_realtime import check_alert, compute_engagement_score
 
 @dataclass
 class EngineConfig:
-    """Configuration for the RealtimeEngine."""
-
     sfreq: float = SFREQ
     window_sec: float = 5.0
     slide_sec: float = 1.0
@@ -26,13 +24,13 @@ class EngineConfig:
     bandpass_low: float = 1.0
     bandpass_high: float = 40.0
     notch_freq: float = 60.0
-    max_results: int | None = None  # None = unbounded (for finite runs), set for streaming
+    max_results: int | None = (
+        None  # None = unbounded (for finite runs), set for streaming
+    )
 
 
 @dataclass
 class WindowResult:
-    """Result from processing a single window."""
-
     timestamp_sec: float
     engagement_score: float
     alert_triggered: bool
@@ -62,7 +60,6 @@ class RingBuffer:
         return min(self._count, self._max)
 
     def append(self, sample: np.ndarray) -> None:
-        """Append a single (n_channels,) sample."""
         self._buf[:, self._write_pos] = sample
         self._write_pos = (self._write_pos + 1) % self._max
         self._count += 1
@@ -86,7 +83,6 @@ class RingBuffer:
         if n == 0:
             return np.zeros((self._n_channels, 0), dtype=np.float64)
 
-        # Read in chronological order from the ring buffer
         if self._count >= self._max:
             # Buffer has wrapped - reconstruct chronological order
             start = self._write_pos  # oldest data position
@@ -140,13 +136,11 @@ class IncrementalFilter:
 def _make_bandpass_sos(
     low: float, high: float, sfreq: float, order: int = 4
 ) -> np.ndarray:
-    """Create bandpass SOS filter coefficients."""
     nyq = sfreq / 2.0
     return butter(order, [low / nyq, high / nyq], btype="band", output="sos")
 
 
 def _make_notch_sos(freq: float, sfreq: float, Q: float = 30.0) -> np.ndarray:
-    """Create notch SOS filter coefficients."""
     b, a = iirnotch(freq, Q, sfreq)
     # Convert to SOS via a single biquad section
     sos = np.zeros((1, 6))
@@ -189,7 +183,6 @@ class RealtimeEngine:
         self._initialize_state()
 
     def _validate_config(self) -> None:
-        """Validate configuration parameters."""
         if self.config.sfreq != self.stream.sfreq:
             raise ValueError(
                 f"Config sfreq ({self.config.sfreq}) does not match "
@@ -221,12 +214,10 @@ class RealtimeEngine:
             )
 
     def _initialize_buffers(self) -> None:
-        """Initialize ring buffers for raw and filtered data."""
         self._buffer = RingBuffer(self._window_samples, self._n_channels)
         self._filtered_buffer = RingBuffer(self._window_samples, self._n_channels)
 
     def _initialize_filters(self) -> None:
-        """Initialize incremental IIR filters."""
         bp_sos = _make_bandpass_sos(
             self.config.bandpass_low, self.config.bandpass_high, self.config.sfreq
         )
@@ -235,20 +226,14 @@ class RealtimeEngine:
         self._notch_filter = IncrementalFilter(notch_sos, self._n_channels)
 
     def _initialize_state(self) -> None:
-        """Initialize engine state variables."""
-        self._score_history: deque[float] = deque(
-            maxlen=self.config.alert_consecutive
-        )
+        self._score_history: deque[float] = deque(maxlen=self.config.alert_consecutive)
         self._samples_since_last_window = 0
         self._total_samples = 0
         self._first_window_emitted = False
         self._running = False
-        self._results: deque[WindowResult] = deque(
-            maxlen=self.config.max_results
-        )
+        self._results: deque[WindowResult] = deque(maxlen=self.config.max_results)
 
     def start(self) -> None:
-        """Start the stream and prepare the engine, resetting all state."""
         self._buffer.clear()
         self._filtered_buffer.clear()
         self._bp_filter.reset()
@@ -262,7 +247,6 @@ class RealtimeEngine:
         self._running = True
 
     def stop(self) -> None:
-        """Stop the stream and engine."""
         self._running = False
         self.stream.stop()
 
@@ -283,7 +267,6 @@ class RealtimeEngine:
         results: list[WindowResult] = []
 
         for _timestamp, channels in samples:
-            # Incremental bandpass + notch filtering (stateful across samples)
             raw_2d = channels.reshape(self._n_channels, 1)
             bp_out = self._bp_filter.filter(raw_2d)
             filtered = self._notch_filter.filter(bp_out)
@@ -294,7 +277,6 @@ class RealtimeEngine:
             self._total_samples += 1
             self._samples_since_last_window += 1
 
-            # Check if we should emit a window
             if self._should_emit_window():
                 result = self._process_window()
                 if result is not None:
@@ -308,11 +290,6 @@ class RealtimeEngine:
         return results
 
     def _should_emit_window(self) -> bool:
-        """Check if a new window should be emitted.
-
-        First window emits as soon as the buffer is full.
-        Subsequent windows emit after slide_samples new data.
-        """
         if not self._filtered_buffer.is_full:
             return False
 
@@ -322,31 +299,23 @@ class RealtimeEngine:
         return self._samples_since_last_window >= self._slide_samples
 
     def _process_window(self) -> WindowResult | None:
-        """Extract features from the current window and classify."""
-        # Get incrementally filtered data: (n_channels, window_samples)
-        # Bandpass and notch are already applied continuously via IIR filters
         window_data = self._filtered_buffer.get_latest(self._window_samples)
 
         if window_data.shape[1] < self._window_samples:
             return None
 
-        # Apply CAR spatial filter per-window (needs all channels together)
         window_data = apply_car(window_data)
 
-        # Build the channel dict expected by extract_realtime_features
-        window_by_channel: dict[str, np.ndarray] = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            window_by_channel[ch_name] = window_data[ch_idx]
+        window_by_channel: dict[str, np.ndarray] = {
+            ch_name: window_data[ch_idx] for ch_idx, ch_name in enumerate(CHANNELS)
+        }
 
-        # Extract features
         features = extract_realtime_features(window_by_channel, self.config.sfreq)
         scaled = self.scaler.transform(features.reshape(1, -1))
 
-        # Classify
         prob_engaged = self.model.predict_proba(scaled)[0, 1]
         score = compute_engagement_score(prob_engaged)
 
-        # Alert check
         self._score_history.append(score)
         alert = check_alert(
             list(self._score_history),

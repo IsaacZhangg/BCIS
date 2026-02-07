@@ -168,19 +168,16 @@ def extract_realtime_features_fast(
     Optimized drop-in replacement for extract_realtime_features().
     Same interface: takes channel dict, returns 1D feature vector.
 
-    Feature layout (96 features total):
-    - Per channel (8 ch x 10 = 80):
-        - 5 bands x log(power)          = 5
-        - 5 bands x relative_power      = 5  (dropped: redundant with log)
-        - theta/alpha ratio              = 1  (dropped: derivable from above)
-        - theta/beta ratio               = 1  (dropped: derivable from above)
-        - Hjorth: activity, mobility, complexity = 3
-    - Filter bank (8 ch x ... -> replaced by PSD approach, 0 extra)
-    - Inter-channel (16):
-        - C3-C4 asymmetry: 5 bands      = 5
-        - Fz-Pz ratio: 3 bands          = 3
-        - theta/alpha, theta/beta ratios per channel = kept
-    Actual: see below for exact count.
+    Feature layout (128 features with all 8 channels):
+    - Per channel (8 ch x 15 = 120):
+        - 5 bands x log(power)
+        - 5 bands x relative_power
+        - theta/alpha ratio
+        - theta/beta ratio
+        - Hjorth: activity, mobility, complexity
+    - Inter-channel (8):
+        - C3-C4 asymmetry: 5 bands
+        - Fz-Pz ratio: 3 bands (theta, alpha, combined beta)
 
     Args:
         window_by_channel: Dict mapping channel names to signal arrays

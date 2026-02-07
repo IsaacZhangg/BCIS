@@ -8,7 +8,6 @@ import pandas as pd
 
 from src.data_loader import CHANNELS, SFREQ
 
-# Number of EEG channels on the Unicorn Hybrid Black
 N_EEG_CHANNELS = len(CHANNELS)
 
 
@@ -142,7 +141,6 @@ class RandomEEGStream(EEGStream):
         for _ in range(n):
             t = self._sample_index / self.sfreq
 
-            # Build a multi-channel sample from band oscillations + noise
             channels = np.zeros(N_EEG_CHANNELS)
             for ch_idx in range(N_EEG_CHANNELS):
                 # Alpha oscillation (~10 Hz) with per-channel phase offset
@@ -197,7 +195,6 @@ class LiveEEGStream(EEGStream):
                 "or FileEEGStream instead."
             ) from e
 
-        # Discover or connect to device before marking as running
         if self._serial is None:
             device_list = _UnicornPy.GetAvailableDevices(True)
             if not device_list:
@@ -209,13 +206,11 @@ class LiveEEGStream(EEGStream):
 
         self._device = _UnicornPy.Unicorn(self._serial)
 
-        # Resolve EEG channel indices (EEG 1..8)
         self._n_acquired_channels = self._device.GetNumberOfAcquiredChannels()
         self._eeg_indices = [
             self._device.GetChannelIndex(f"EEG {i}") for i in range(1, 9)
         ]
 
-        # Allocate receive buffer
         buf_len = self._frame_length * self._n_acquired_channels * 4  # float32
         self._receive_buffer = bytearray(buf_len)
 
@@ -253,7 +248,6 @@ class LiveEEGStream(EEGStream):
         while len(samples) < n:
             self._device.GetData(self._frame_length, buf, buf_len)
 
-            # Unpack float32 values
             all_values = np.frombuffer(
                 buf,
                 dtype=np.float32,

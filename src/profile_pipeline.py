@@ -78,7 +78,9 @@ def profile_preprocessing(data, sample_rate):
     _, single_ms, single_std = time_it(
         preprocess_eeg, single_channel, sample_rate, n_runs=3
     )
-    print(f"  preprocess_eeg (1 ch):          {single_ms:8.2f} ms (+/- {single_std:.2f})")
+    print(
+        f"  preprocess_eeg (1 ch):          {single_ms:8.2f} ms (+/- {single_std:.2f})"
+    )
     print(
         f"  preprocess_eeg (8 ch):          {single_ms * n_channels:8.2f} ms (estimated)"
     )
@@ -111,9 +113,7 @@ def profile_feature_extraction_components(epoch, sfreq):
         compute_filter_bank_features, epoch, sfreq, n_runs=n_runs
     )
     print(f"  Filter bank (16 sub-bands):     {fb_ms:8.4f} ms (+/- {fb_std:.4f})")
-    print(
-        f"  Filter bank (8 channels):       {fb_ms * 8:8.2f} ms (estimated)"
-    )
+    print(f"  Filter bank (8 channels):       {fb_ms * 8:8.2f} ms (estimated)")
 
     # Hjorth parameters
     _, hj_ms, hj_std = time_it(compute_hjorth_parameters, epoch, n_runs=n_runs)
@@ -159,7 +159,9 @@ def profile_erd_feature_extraction(epoch_pairs_by_channel, sfreq):
     _, erd_ms, erd_std = time_it(
         extract_erd_features, epoch_pairs_by_channel, sfreq, n_runs=3
     )
-    print(f"  extract_erd_features ({n_epochs} epochs): {erd_ms:8.2f} ms (+/- {erd_std:.2f})")
+    print(
+        f"  extract_erd_features ({n_epochs} epochs): {erd_ms:8.2f} ms (+/- {erd_std:.2f})"
+    )
     print(f"  Per epoch:                      {erd_ms / n_epochs:8.2f} ms")
 
     # Get feature count
@@ -178,9 +180,7 @@ def profile_realtime_features(channel_signals, sfreq):
 
     # Create a 5-second window
     window_samples = int(5.0 * sfreq)
-    window = {
-        ch: signal[:window_samples] for ch, signal in channel_signals.items()
-    }
+    window = {ch: signal[:window_samples] for ch, signal in channel_signals.items()}
 
     n_runs = 10
     features, rt_ms, rt_std = time_it(
@@ -206,9 +206,7 @@ def profile_realtime_simulation_window(channel_signals, sfreq):
     window_samples = int(5.0 * sfreq)
 
     # Simulate what simulate_realtime does: preprocess each channel then extract features
-    raw_window = {
-        ch: signal[:window_samples] for ch, signal in channel_signals.items()
-    }
+    raw_window = {ch: signal[:window_samples] for ch, signal in channel_signals.items()}
 
     n_runs = 5
 
@@ -239,9 +237,13 @@ def profile_realtime_simulation_window(channel_signals, sfreq):
     )
 
     print(f"  Total per-window processing:    {total_ms:8.2f} ms (+/- {total_std:.2f})")
-    print(f"    Preprocessing (8 channels):   {preproc_ms:8.2f} ms ({preproc_ms / total_ms * 100:.1f}%)")
-    print(f"    Feature extraction:           {feat_ms:8.2f} ms ({feat_ms / total_ms * 100:.1f}%)")
-    print(f"  Window duration:                5000.00 ms")
+    print(
+        f"    Preprocessing (8 channels):   {preproc_ms:8.2f} ms ({preproc_ms / total_ms * 100:.1f}%)"
+    )
+    print(
+        f"    Feature extraction:           {feat_ms:8.2f} ms ({feat_ms / total_ms * 100:.1f}%)"
+    )
+    print("  Window duration:                5000.00 ms")
     print(f"  Processing/Window ratio:        {total_ms / 5000 * 100:.2f}%")
 
     return total_ms, preproc_ms, feat_ms
@@ -277,7 +279,9 @@ def profile_model_inference(features_array, sfreq):
 
     # Time batch prediction
     _, batch_ms, batch_std = time_it(model.predict, X_scaled, n_runs=10)
-    print(f"  RF predict ({n_samples} samples):     {batch_ms:8.2f} ms (+/- {batch_std:.2f})")
+    print(
+        f"  RF predict ({n_samples} samples):     {batch_ms:8.2f} ms (+/- {batch_std:.2f})"
+    )
 
     # Time scaler transform
     _, scale_ms, scale_std = time_it(scaler.transform, single_sample, n_runs=50)
@@ -297,7 +301,16 @@ def analyze_feature_dimensionality(epoch_pairs_by_channel, sfreq, channel_signal
     n_erd = erd_features.shape[1]
 
     # Break down ERD features per channel
-    bands = ["theta", "low_alpha", "high_alpha", "mu", "low_beta", "high_beta", "beta", "gamma"]
+    bands = [
+        "theta",
+        "low_alpha",
+        "high_alpha",
+        "mu",
+        "low_beta",
+        "high_beta",
+        "beta",
+        "gamma",
+    ]
     n_bands = len(bands)
     n_channels = 8
 
@@ -315,14 +328,16 @@ def analyze_feature_dimensionality(epoch_pairs_by_channel, sfreq, channel_signal
 
     expected_total = all_channel_features + asym_features + inter_channel_features
 
-    print(f"\n  ERD Feature Breakdown:")
-    print(f"    Per band per channel:         {per_band_features} features x {n_bands} bands = {per_band_features * n_bands}")
-    print(f"    Per channel extras:")
-    print(f"      Hjorth parameters:          3")
-    print(f"      Envelope features:          3")
-    print(f"      Spectral entropy:           1")
-    print(f"      Filter bank (16 sub-bands): 16")
-    print(f"      Temporal features:          9")
+    print("\n  ERD Feature Breakdown:")
+    print(
+        f"    Per band per channel:         {per_band_features} features x {n_bands} bands = {per_band_features * n_bands}"
+    )
+    print("    Per channel extras:")
+    print("      Hjorth parameters:          3")
+    print("      Envelope features:          3")
+    print("      Spectral entropy:           1")
+    print("      Filter bank (16 sub-bands): 16")
+    print("      Temporal features:          9")
     print(f"    Per channel total:            {per_channel_total}")
     print(f"    All channels (x{n_channels}):          {all_channel_features}")
     print(f"    Asymmetry features:           {asym_features}")
@@ -347,33 +362,32 @@ def analyze_feature_dimensionality(epoch_pairs_by_channel, sfreq, channel_signal
     rt_all_channels = rt_per_channel * n_channels
     rt_inter = 6 + 3  # C3-C4 (6 bands) + Fz-Pz (3 bands)
 
-    print(f"\n  Realtime Feature Breakdown:")
-    print(f"    Per channel ({rt_per_channel} features):       {rt_per_channel} x {n_channels} channels = {rt_all_channels}")
+    print("\n  Realtime Feature Breakdown:")
+    print(
+        f"    Per channel ({rt_per_channel} features):       {rt_per_channel} x {n_channels} channels = {rt_all_channels}"
+    )
     print(f"    Inter-channel features:       {rt_inter}")
     print(f"    Expected total:               {rt_all_channels + rt_inter}")
     print(f"    Actual total:                 {n_rt}")
 
-    # Feature selection in training
-    from sklearn.feature_selection import SelectKBest, f_classif
-
-    n_epochs = erd_features.shape[0]
-    labels = np.array([1] * (n_epochs // 2) + [0] * (n_epochs - n_epochs // 2))
-
-    from sklearn.preprocessing import StandardScaler
-
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(erd_features)
-
     for pct in [0.3, 0.5, 0.7]:
         k = max(10, int(pct * n_erd))
-        print(f"\n  SelectKBest at {pct:.0%}: {k}/{n_erd} features selected ({k / n_erd * 100:.1f}% used)")
+        print(
+            f"\n  SelectKBest at {pct:.0%}: {k}/{n_erd} features selected ({k / n_erd * 100:.1f}% used)"
+        )
 
-    print(f"\n  SUMMARY:")
+    print("\n  SUMMARY:")
     print(f"    ERD features computed:        {n_erd}")
     print(f"    Realtime features computed:   {n_rt}")
-    print(f"    Max features actually used:   {max(10, int(0.7 * n_erd))} (70% SelectKBest)")
-    print(f"    Min features actually used:   {max(10, int(0.3 * n_erd))} (30% SelectKBest)")
-    print(f"    Features never used (worst):  {n_erd - max(10, int(0.3 * n_erd))} ({(n_erd - max(10, int(0.3 * n_erd))) / n_erd * 100:.1f}%)")
+    print(
+        f"    Max features actually used:   {max(10, int(0.7 * n_erd))} (70% SelectKBest)"
+    )
+    print(
+        f"    Min features actually used:   {max(10, int(0.3 * n_erd))} (30% SelectKBest)"
+    )
+    print(
+        f"    Features never used (worst):  {n_erd - max(10, int(0.3 * n_erd))} ({(n_erd - max(10, int(0.3 * n_erd))) / n_erd * 100:.1f}%)"
+    )
 
 
 def main():
@@ -398,24 +412,28 @@ def main():
 
     # 2. Preprocess for feature extraction
     preprocessed = preprocess_eeg_multichannel(data, sample_rate, CHANNELS, "car")
-    channel_signals = {
-        ch: preprocessed[i] for i, ch in enumerate(CHANNELS)
-    }
+    channel_signals = {ch: preprocessed[i] for i, ch in enumerate(CHANNELS)}
 
     # 3. Extract epochs for profiling
     engaged_epochs_by_channel = {}
     disengaged_epochs_by_channel = {}
     for ch_name, signal in channel_signals.items():
         engaged_pairs, disengaged_pairs = extract_augmented_epochs(
-            signal, events, sample_rate,
-            window_duration=2.0, n_windows=2,
-            class1_phase=3, class2_phase=5,
+            signal,
+            events,
+            sample_rate,
+            window_duration=2.0,
+            n_windows=2,
+            class1_phase=3,
+            class2_phase=5,
         )
         engaged_epochs_by_channel[ch_name] = engaged_pairs
         disengaged_epochs_by_channel[ch_name] = disengaged_pairs
 
     print(f"\nExtracted {len(engaged_epochs_by_channel[CHANNELS[0]])} engaged epochs")
-    print(f"Extracted {len(disengaged_epochs_by_channel[CHANNELS[0]])} disengaged epochs")
+    print(
+        f"Extracted {len(disengaged_epochs_by_channel[CHANNELS[0]])} disengaged epochs"
+    )
 
     # 4. Profile individual feature components
     _, task_epoch = engaged_epochs_by_channel[CHANNELS[0]][0]
@@ -451,30 +469,35 @@ def main():
 
     n_epochs = len(engaged_epochs_by_channel[CHANNELS[0]])
 
-    print(f"\n  Pipeline stage timings (for 1 subject):")
+    print("\n  Pipeline stage timings (for 1 subject):")
     print(f"    Preprocessing:                {preproc_ms:8.2f} ms")
     print(f"    ERD feature extraction:       {erd_ms:8.2f} ms ({n_epochs} epochs)")
     print(f"    Per-epoch ERD features:       {erd_ms / n_epochs:8.2f} ms")
     print(f"    RF single prediction:         {pred_ms:8.4f} ms")
 
-    print(f"\n  Real-time simulation per window:")
+    print("\n  Real-time simulation per window:")
     print(f"    Total:                        {total_window_ms:8.2f} ms")
     print(f"    Preprocessing:                {preproc_window_ms:8.2f} ms")
     print(f"    Feature extraction:           {feat_window_ms:8.2f} ms")
     print(f"    Model inference:              {proba_ms:8.4f} ms")
 
-    print(f"\n  Component breakdown (per epoch, per channel):")
+    print("\n  Component breakdown (per epoch, per channel):")
     for name, ms in sorted(component_times.items(), key=lambda x: -x[1]):
         print(f"    {name:35s} {ms:8.4f} ms")
 
-    print(f"\n  Top bottlenecks:")
+    print("\n  Top bottlenecks:")
 
-    # Rank bottlenecks
     bottlenecks = [
         ("Preprocessing (bandpass+notch, 8ch)", preproc_ms),
         ("ERD features (all epochs)", erd_ms),
-        ("Filter bank (16 bands x 8 ch x N epochs)", component_times["filter_bank_per_channel"] * 8 * n_epochs),
-        ("Welch PSD (160 calls per epoch x N epochs)", component_times["welch_per_call"] * 160 * n_epochs),
+        (
+            "Filter bank (16 bands x 8 ch x N epochs)",
+            component_times["filter_bank_per_channel"] * 8 * n_epochs,
+        ),
+        (
+            "Welch PSD (160 calls per epoch x N epochs)",
+            component_times["welch_per_call"] * 160 * n_epochs,
+        ),
         ("Realtime window total", total_window_ms),
         ("Realtime preprocess per window", preproc_window_ms),
         ("Realtime features per window", feat_window_ms),
