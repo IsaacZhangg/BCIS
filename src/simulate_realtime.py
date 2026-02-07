@@ -1,7 +1,8 @@
 """Real-time EEG engagement simulation.
 
 Processes recordings with sliding windows to simulate real-time
-fatigue/engagement detection.
+fatigue/engagement detection. Supports both the legacy batch approach
+and the new streaming architecture (FileEEGStream + RealtimeEngine).
 """
 
 import argparse
@@ -132,6 +133,68 @@ def simulate_recording(
     return pd.DataFrame(results)
 
 
+def simulate_recording_streaming(
+    recording_path: Path,
+    model_path: Path,
+    scaler_path: Path,
+    window_sec: float = 5.0,
+    slide_sec: float = 1.0,
+    threshold: float = 30.0,
+    consecutive: int = 3,
+) -> pd.DataFrame:
+    """
+    Simulate real-time engagement detection using the streaming architecture.
+
+    Uses FileEEGStream + RealtimeEngine for sample-by-sample processing
+    with incremental filtering, matching how a live headset would operate.
+
+    Args:
+        recording_path: Path to recording CSV
+        model_path: Path to trained model
+        scaler_path: Path to fitted scaler
+        window_sec: Window size in seconds
+        slide_sec: Slide between windows in seconds
+        threshold: Alert threshold (0-100)
+        consecutive: Consecutive windows below threshold to trigger alert
+
+    Returns:
+        DataFrame with timestamp_sec, engagement_score, alert_triggered columns
+    """
+    from src.eeg_stream import FileEEGStream
+    from src.realtime_engine import EngineConfig, RealtimeEngine
+
+    model = joblib.load(model_path)
+    scaler = joblib.load(scaler_path)
+
+    stream = FileEEGStream(recording_path)
+    config = EngineConfig(
+        window_sec=window_sec,
+        slide_sec=slide_sec,
+        alert_threshold=threshold,
+        alert_consecutive=consecutive,
+    )
+    engine = RealtimeEngine(stream, model, scaler, config)
+    engine.start()
+    results = engine.run()
+    engine.stop()
+
+    rows = [
+        {
+            "timestamp_sec": r.timestamp_sec,
+            "engagement_score": r.engagement_score,
+            "alert_triggered": r.alert_triggered,
+        }
+        for r in results
+    ]
+    return (
+        pd.DataFrame(rows)
+        if rows
+        else pd.DataFrame(
+            columns=["timestamp_sec", "engagement_score", "alert_triggered"]
+        )
+    )
+
+
 def preprocess_recording(
     data: np.ndarray, sample_rate: float, channels: list[str]
 ) -> dict[str, np.ndarray]:
@@ -180,7 +243,40 @@ def process_windows(
     return results
 
 
-def print_summary(df: pd.DataFrame, threshold: float, window_sec: float = 5.0) -> None:
+def _compute_time_coverage(timestamps: np.ndarray, window_sec: float) -> float:
+    """Compute total time covered by merging overlapping window intervals.
+
+    Each window at timestamp t covers [t, t + window_sec]. Overlapping
+    intervals are merged so time is not double-counted.
+    """
+    if len(timestamps) == 0:
+        return 0.0
+
+    starts = np.sort(timestamps)
+    total = 0.0
+    current_start = starts[0]
+    current_end = starts[0] + window_sec
+
+    for t in starts[1:]:
+        end = t + window_sec
+        if t <= current_end:
+            # Overlapping or adjacent — extend the current interval
+            current_end = max(current_end, end)
+        else:
+            # Gap — finalize previous interval and start a new one
+            total += current_end - current_start
+            current_start = t
+            current_end = end
+
+    total += current_end - current_start
+    return total
+
+
+def print_summary(
+    df: pd.DataFrame,
+    threshold: float,
+    window_sec: float = 5.0,
+) -> None:
     """Print summary statistics from simulation results."""
     print("\n" + "=" * 50)
     print("Engagement Score Summary")
@@ -204,7 +300,10 @@ def print_summary(df: pd.DataFrame, threshold: float, window_sec: float = 5.0) -
     print(f"Windows below threshold ({threshold}): {below_threshold}/{total_windows}")
 
     if below_threshold > 0:
-        time_below = below_threshold * window_sec
+        # Compute actual time coverage by merging overlapping window intervals
+        below_mask = scores < threshold
+        timestamps = df.loc[below_mask, "timestamp_sec"].values
+        time_below = _compute_time_coverage(timestamps, window_sec)
         print(f"Total time below threshold: {time_below:.0f} seconds")
 
 
@@ -227,14 +326,31 @@ def main():
         f"Window: {args.window}s, Threshold: {args.threshold}, Consecutive: {args.consecutive}"
     )
 
-    results_df = simulate_recording(
-        args.recording,
-        model_path,
-        scaler_path,
-        window_sec=args.window,
-        threshold=args.threshold,
-        consecutive=args.consecutive,
-    )
+    if args.streaming:
+        print("Mode: streaming (FileEEGStream + RealtimeEngine)")
+        results_df = simulate_recording_streaming(
+            args.recording,
+            model_path,
+            scaler_path,
+            window_sec=args.window,
+            slide_sec=args.slide,
+            threshold=args.threshold,
+            consecutive=args.consecutive,
+        )
+    else:
+        print("Mode: batch (legacy)")
+        results_df = simulate_recording(
+            args.recording,
+            model_path,
+            scaler_path,
+            window_sec=args.window,
+            threshold=args.threshold,
+            consecutive=args.consecutive,
+        )
+
+    if results_df.empty:
+        print("No results produced (recording may be too short for window size).")
+        return 0
 
     # Display and save results
     print_summary(results_df, args.threshold, args.window)
@@ -281,10 +397,21 @@ def parse_arguments() -> argparse.Namespace:
         help="Window size in seconds (default: 5.0)",
     )
     parser.add_argument(
+        "--slide",
+        type=float,
+        default=1.0,
+        help="Slide between windows in seconds (default: 1.0, streaming mode only)",
+    )
+    parser.add_argument(
         "--consecutive",
         type=int,
         default=3,
         help="Consecutive windows below threshold to trigger alert (default: 3)",
+    )
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Use streaming architecture (FileEEGStream + RealtimeEngine)",
     )
 
     return parser.parse_args()
