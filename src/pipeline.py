@@ -45,16 +45,14 @@ def extract_realtime_training_data(
     all_features = []
     all_labels = []
 
-    for recording_path, (
-        channel_signals,
-        events,
-        sample_rate,
-    ) in processed_cache.items():
+    for recording_path, cache_data in processed_cache.items():
+        channel_signals, events, sample_rate = cache_data
+        window_samples = int(5.0 * sample_rate)
+
         for sample_idx, phase, movement in events:
             if phase not in [3, 5]:
                 continue
 
-            window_samples = int(5.0 * sample_rate)
             if sample_idx + window_samples > len(channel_signals[channels[0]]):
                 continue
 
@@ -92,19 +90,28 @@ def balance_realtime_data(
         return features, labels
 
     # Downsample majority class
-    np.random.seed(42)
-    engaged_indices = np.where(labels == 1)[0]
-    disengaged_indices = np.where(labels == 0)[0]
-    sampled_disengaged = np.random.choice(
-        disengaged_indices, engaged_count, replace=False
+    balanced_features, balanced_labels = downsample_majority_class(
+        features, labels, engaged_count
     )
-
-    balanced_indices = np.concatenate([engaged_indices, sampled_disengaged])
-    balanced_features = features[balanced_indices]
-    balanced_labels = labels[balanced_indices]
 
     print(f"    Balanced to {len(balanced_labels)} windows")
     return balanced_features, balanced_labels
+
+
+def downsample_majority_class(
+    features: np.ndarray, labels: np.ndarray, target_count: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Downsample the majority class to match target count."""
+    np.random.seed(42)
+    engaged_indices = np.where(labels == 1)[0]
+    disengaged_indices = np.where(labels == 0)[0]
+
+    sampled_disengaged = np.random.choice(
+        disengaged_indices, target_count, replace=False
+    )
+
+    balanced_indices = np.concatenate([engaged_indices, sampled_disengaged])
+    return features[balanced_indices], labels[balanced_indices]
 
 
 def save_realtime_model(model: object, scaler: object, output_dir: Path) -> None:

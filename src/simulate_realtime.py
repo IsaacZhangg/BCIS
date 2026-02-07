@@ -257,17 +257,19 @@ def _compute_time_coverage(timestamps: np.ndarray, window_sec: float) -> float:
     current_start = starts[0]
     current_end = starts[0] + window_sec
 
-    for t in starts[1:]:
-        end = t + window_sec
-        if t <= current_end:
-            # Overlapping or adjacent — extend the current interval
-            current_end = max(current_end, end)
-        else:
-            # Gap — finalize previous interval and start a new one
-            total += current_end - current_start
-            current_start = t
-            current_end = end
+    for timestamp in starts[1:]:
+        window_end = timestamp + window_sec
 
+        if timestamp <= current_end:
+            # Overlapping or adjacent - extend the current interval
+            current_end = max(current_end, window_end)
+        else:
+            # Gap - finalize previous interval and start a new one
+            total += current_end - current_start
+            current_start = timestamp
+            current_end = window_end
+
+    # Add the final interval
     total += current_end - current_start
     return total
 
@@ -319,34 +321,15 @@ def main():
         print(validation_error)
         return 1
 
-    # Run simulation
+    # Display configuration
     print(f"Processing: {args.recording}")
     print(f"Model: {model_path}")
     print(
         f"Window: {args.window}s, Threshold: {args.threshold}, Consecutive: {args.consecutive}"
     )
 
-    if args.streaming:
-        print("Mode: streaming (FileEEGStream + RealtimeEngine)")
-        results_df = simulate_recording_streaming(
-            args.recording,
-            model_path,
-            scaler_path,
-            window_sec=args.window,
-            slide_sec=args.slide,
-            threshold=args.threshold,
-            consecutive=args.consecutive,
-        )
-    else:
-        print("Mode: batch (legacy)")
-        results_df = simulate_recording(
-            args.recording,
-            model_path,
-            scaler_path,
-            window_sec=args.window,
-            threshold=args.threshold,
-            consecutive=args.consecutive,
-        )
+    # Run simulation based on mode
+    results_df = run_simulation(args, model_path, scaler_path)
 
     if results_df.empty:
         print("No results produced (recording may be too short for window size).")
@@ -360,6 +343,33 @@ def main():
     print(f"\nResults saved to: {output_path}")
 
     return 0
+
+
+def run_simulation(
+    args: argparse.Namespace, model_path: Path, scaler_path: Path
+) -> pd.DataFrame:
+    """Run simulation in the appropriate mode."""
+    if args.streaming:
+        print("Mode: streaming (FileEEGStream + RealtimeEngine)")
+        return simulate_recording_streaming(
+            args.recording,
+            model_path,
+            scaler_path,
+            window_sec=args.window,
+            slide_sec=args.slide,
+            threshold=args.threshold,
+            consecutive=args.consecutive,
+        )
+
+    print("Mode: batch (legacy)")
+    return simulate_recording(
+        args.recording,
+        model_path,
+        scaler_path,
+        window_sec=args.window,
+        threshold=args.threshold,
+        consecutive=args.consecutive,
+    )
 
 
 def parse_arguments() -> argparse.Namespace:

@@ -24,6 +24,22 @@ from src.preprocess import preprocess_eeg_multichannel
 warnings.filterwarnings("ignore")
 
 
+def balance_classes(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Balance classes by downsampling the majority class."""
+    engaged_idx = np.where(y == 1)[0]
+    disengaged_idx = np.where(y == 0)[0]
+
+    if len(disengaged_idx) > len(engaged_idx):
+        np.random.seed(42)
+        sampled = np.random.choice(
+            disengaged_idx, len(engaged_idx), replace=False
+        )
+        keep = np.concatenate([engaged_idx, sampled])
+        return X[keep], y[keep]
+
+    return X, y
+
+
 def load_realtime_data(data_dir: Path) -> list[tuple[np.ndarray, np.ndarray]]:
     """Load and extract realtime features per subject, returning (X, y) per subject."""
     recordings = get_complete_recordings(data_dir)
@@ -60,15 +76,7 @@ def load_realtime_data(data_dir: Path) -> list[tuple[np.ndarray, np.ndarray]]:
             X = np.array(features_list)
             y = np.array(labels_list)
             # Balance classes
-            engaged_idx = np.where(y == 1)[0]
-            disengaged_idx = np.where(y == 0)[0]
-            if len(disengaged_idx) > len(engaged_idx):
-                np.random.seed(42)
-                sampled = np.random.choice(
-                    disengaged_idx, len(engaged_idx), replace=False
-                )
-                keep = np.concatenate([engaged_idx, sampled])
-                X, y = X[keep], y[keep]
+            X, y = balance_classes(X, y)
             print(f"  {subject_id}: {len(y)} samples ({np.sum(y==1)} engaged, {np.sum(y==0)} disengaged)")
             subject_data.append((X, y))
 

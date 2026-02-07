@@ -99,8 +99,10 @@ def _band_power_from_psd(
         Band power per channel (n_channels,) or scalar
     """
     mask = (freqs >= low) & (freqs <= high)
+
     if psd.ndim == 1:
         return np.mean(psd[mask])
+
     return np.mean(psd[:, mask], axis=1)
 
 
@@ -216,13 +218,13 @@ def extract_realtime_features_fast(
     log_powers = np.log(band_powers + 1e-10)  # (n_ch, n_bands)
     rel_powers = band_powers / (total_power[:, None] + 1e-10)  # (n_ch, n_bands)
 
-    # theta=0, alpha=1, low_beta=2, high_beta=3, gamma=4
+    # Band indices for ratio calculations
     theta_idx = BAND_NAMES.index("theta")
     alpha_idx = BAND_NAMES.index("alpha")
     low_beta_idx = BAND_NAMES.index("low_beta")
     high_beta_idx = BAND_NAMES.index("high_beta")
 
-    # Theta/alpha and theta/(low_beta+high_beta) ratios
+    # Calculate power ratios
     beta_power = band_powers[:, low_beta_idx] + band_powers[:, high_beta_idx]
     theta_alpha_ratio = band_powers[:, theta_idx] / (band_powers[:, alpha_idx] + 1e-10)
     theta_beta_ratio = band_powers[:, theta_idx] / (beta_power + 1e-10)
@@ -245,23 +247,29 @@ def extract_realtime_features_fast(
         c3_idx = ch_map["C3"]
         c4_idx = ch_map["C4"]
         for j in range(N_BANDS):
-            c3_p = band_powers[c3_idx, j]
-            c4_p = band_powers[c4_idx, j]
-            features.append(np.log((c3_p + 1e-10) / (c4_p + 1e-10)))
+            c3_power = band_powers[c3_idx, j]
+            c4_power = band_powers[c4_idx, j]
+            asymmetry = np.log((c3_power + 1e-10) / (c4_power + 1e-10))
+            features.append(asymmetry)
 
     # Fz-Pz ratio (theta, alpha, combined beta = 3)
     if "Fz" in ch_map and "Pz" in ch_map:
         fz_idx = ch_map["Fz"]
         pz_idx = ch_map["Pz"]
+
+        # Theta and alpha band ratios
         for band_name in ["theta", "alpha"]:
             j = BAND_NAMES.index(band_name)
-            fz_p = band_powers[fz_idx, j]
-            pz_p = band_powers[pz_idx, j]
-            features.append(np.log((fz_p + 1e-10) / (pz_p + 1e-10)))
-        # Combined beta
+            fz_power = band_powers[fz_idx, j]
+            pz_power = band_powers[pz_idx, j]
+            ratio = np.log((fz_power + 1e-10) / (pz_power + 1e-10))
+            features.append(ratio)
+
+        # Combined beta ratio
         fz_beta = band_powers[fz_idx, low_beta_idx] + band_powers[fz_idx, high_beta_idx]
         pz_beta = band_powers[pz_idx, low_beta_idx] + band_powers[pz_idx, high_beta_idx]
-        features.append(np.log((fz_beta + 1e-10) / (pz_beta + 1e-10)))
+        beta_ratio = np.log((fz_beta + 1e-10) / (pz_beta + 1e-10))
+        features.append(beta_ratio)
 
     # Total: 120 + 5 + 3 = 128 features (with all 8 channels present)
     return np.array(features)
@@ -340,25 +348,34 @@ def extract_realtime_features_fast_v2(
     # Inter-channel features
     ch_map = {ch: i for i, ch in enumerate(present_channels)}
 
+    # C3-C4 asymmetry
     if "C3" in ch_map and "C4" in ch_map:
-        c3_i = ch_map["C3"]
-        c4_i = ch_map["C4"]
+        c3_idx = ch_map["C3"]
+        c4_idx = ch_map["C4"]
         for j in range(N_BANDS):
-            features.append(
-                np.log((band_powers[c3_i, j] + 1e-10) / (band_powers[c4_i, j] + 1e-10))
-            )
+            c3_power = band_powers[c3_idx, j]
+            c4_power = band_powers[c4_idx, j]
+            asymmetry = np.log((c3_power + 1e-10) / (c4_power + 1e-10))
+            features.append(asymmetry)
 
+    # Fz-Pz ratios
     if "Fz" in ch_map and "Pz" in ch_map:
-        fz_i = ch_map["Fz"]
-        pz_i = ch_map["Pz"]
+        fz_idx = ch_map["Fz"]
+        pz_idx = ch_map["Pz"]
+
+        # Theta and alpha band ratios
         for band_name in ["theta", "alpha"]:
             j = BAND_NAMES.index(band_name)
-            features.append(
-                np.log((band_powers[fz_i, j] + 1e-10) / (band_powers[pz_i, j] + 1e-10))
-            )
-        fz_beta = band_powers[fz_i, low_beta_idx] + band_powers[fz_i, high_beta_idx]
-        pz_beta = band_powers[pz_i, low_beta_idx] + band_powers[pz_i, high_beta_idx]
-        features.append(np.log((fz_beta + 1e-10) / (pz_beta + 1e-10)))
+            fz_power = band_powers[fz_idx, j]
+            pz_power = band_powers[pz_idx, j]
+            ratio = np.log((fz_power + 1e-10) / (pz_power + 1e-10))
+            features.append(ratio)
+
+        # Combined beta ratio
+        fz_beta = band_powers[fz_idx, low_beta_idx] + band_powers[fz_idx, high_beta_idx]
+        pz_beta = band_powers[pz_idx, low_beta_idx] + band_powers[pz_idx, high_beta_idx]
+        beta_ratio = np.log((fz_beta + 1e-10) / (pz_beta + 1e-10))
+        features.append(beta_ratio)
 
     # Total: 120 + 80 + 5 + 3 = 208 (with FB), or 128 (without FB)
     return np.array(features)

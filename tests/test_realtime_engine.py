@@ -90,25 +90,35 @@ class TestIncrementalFilter:
 
     def test_incremental_vs_batch(self):
         """Incremental filtering should match batch filtering."""
+        from scipy.signal import sosfilt
+
         sos = _make_bandpass_sos(1.0, 40.0, 250.0)
         rng = np.random.default_rng(42)
         data = rng.normal(0, 10, (2, 1000))
 
         # Batch filter
-        from scipy.signal import sosfilt
-
         batch_out = np.zeros_like(data)
         for ch in range(2):
             batch_out[ch] = sosfilt(sos, data[ch])
 
         # Incremental filter (100-sample chunks)
-        inc_filt = IncrementalFilter(sos, n_channels=2)
-        inc_out = np.zeros_like(data)
-        for start in range(0, 1000, 100):
-            chunk = data[:, start : start + 100]
-            inc_out[:, start : start + 100] = inc_filt.filter(chunk)
+        inc_out = self._filter_incrementally(data, sos, chunk_size=100)
 
         np.testing.assert_array_almost_equal(batch_out, inc_out, decimal=10)
+
+    def _filter_incrementally(
+        self, data: np.ndarray, sos: np.ndarray, chunk_size: int
+    ) -> np.ndarray:
+        """Filter data incrementally in chunks."""
+        inc_filt = IncrementalFilter(sos, n_channels=data.shape[0])
+        inc_out = np.zeros_like(data)
+
+        for start in range(0, data.shape[1], chunk_size):
+            end = min(start + chunk_size, data.shape[1])
+            chunk = data[:, start:end]
+            inc_out[:, start:end] = inc_filt.filter(chunk)
+
+        return inc_out
 
     def test_reset(self):
         sos = _make_bandpass_sos(1.0, 40.0, 250.0)

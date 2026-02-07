@@ -88,14 +88,14 @@ class RingBuffer:
 
         # Read in chronological order from the ring buffer
         if self._count >= self._max:
-            # Buffer has wrapped
+            # Buffer has wrapped - reconstruct chronological order
             start = self._write_pos  # oldest data position
             indices = [(start + i) % self._max for i in range(self._max)]
             ordered = self._buf[:, indices]
             return ordered[:, -n:]
-        else:
-            # Buffer hasn't wrapped yet
-            return self._buf[:, : self._count][:, -n:]
+
+        # Buffer hasn't wrapped yet - data is already in order
+        return self._buf[:, : self._count][:, -n:]
 
     def clear(self) -> None:
         self._buf[:] = 0
@@ -183,37 +183,50 @@ class RealtimeEngine:
         self.config = config or EngineConfig(sfreq=stream.sfreq)
         self.on_result = on_result
 
-        if self.config.sfreq != stream.sfreq:
+        self._validate_config()
+        self._initialize_buffers()
+        self._initialize_filters()
+        self._initialize_state()
+
+    def _validate_config(self) -> None:
+        """Validate configuration parameters."""
+        if self.config.sfreq != self.stream.sfreq:
             raise ValueError(
                 f"Config sfreq ({self.config.sfreq}) does not match "
-                f"stream sfreq ({stream.sfreq}). Pass matching values or "
+                f"stream sfreq ({self.stream.sfreq}). Pass matching values or "
                 f"omit config.sfreq to use the stream's rate."
             )
 
         self._n_channels = len(CHANNELS)
         self._window_samples = int(self.config.sfreq * self.config.window_sec)
+        self._slide_samples = int(self.config.sfreq * self.config.slide_sec)
+
         if self._window_samples < 1:
             raise ValueError(
                 f"window_sec={self.config.window_sec} is too small for "
                 f"sfreq={self.config.sfreq} (results in 0 samples per window). "
                 f"Minimum window_sec is {1.0 / self.config.sfreq:.4f}."
             )
-        self._slide_samples = int(self.config.sfreq * self.config.slide_sec)
+
         if self._slide_samples < 1:
             raise ValueError(
                 f"slide_sec={self.config.slide_sec} is too small for "
                 f"sfreq={self.config.sfreq} (results in 0 samples per slide). "
                 f"Minimum slide_sec is {1.0 / self.config.sfreq:.4f}."
             )
+
         if self.config.alert_consecutive < 1:
             raise ValueError(
                 f"alert_consecutive must be >= 1, got {self.config.alert_consecutive}."
             )
 
-        # Ring buffer holds raw samples for one full window
+    def _initialize_buffers(self) -> None:
+        """Initialize ring buffers for raw and filtered data."""
         self._buffer = RingBuffer(self._window_samples, self._n_channels)
+        self._filtered_buffer = RingBuffer(self._window_samples, self._n_channels)
 
-        # Incremental IIR filters using config parameters
+    def _initialize_filters(self) -> None:
+        """Initialize incremental IIR filters."""
         bp_sos = _make_bandpass_sos(
             self.config.bandpass_low, self.config.bandpass_high, self.config.sfreq
         )
@@ -221,10 +234,8 @@ class RealtimeEngine:
         self._bp_filter = IncrementalFilter(bp_sos, self._n_channels)
         self._notch_filter = IncrementalFilter(notch_sos, self._n_channels)
 
-        # Filtered ring buffer (stores incrementally filtered data)
-        self._filtered_buffer = RingBuffer(self._window_samples, self._n_channels)
-
-        # Only keep enough score history for alert detection
+    def _initialize_state(self) -> None:
+        """Initialize engine state variables."""
         self._score_history: deque[float] = deque(
             maxlen=self.config.alert_consecutive
         )
@@ -232,7 +243,6 @@ class RealtimeEngine:
         self._total_samples = 0
         self._first_window_emitted = False
         self._running = False
-        # Bound result retention for long-running streams
         self._results: deque[WindowResult] = deque(
             maxlen=self.config.max_results
         )
@@ -284,14 +294,8 @@ class RealtimeEngine:
             self._total_samples += 1
             self._samples_since_last_window += 1
 
-            # Check if we should emit a window:
-            # - First window emits as soon as the buffer is full
-            # - Subsequent windows emit after slide_samples new data
-            should_emit = self._filtered_buffer.is_full and (
-                not self._first_window_emitted
-                or self._samples_since_last_window >= self._slide_samples
-            )
-            if should_emit:
+            # Check if we should emit a window
+            if self._should_emit_window():
                 result = self._process_window()
                 if result is not None:
                     results.append(result)
@@ -302,6 +306,20 @@ class RealtimeEngine:
                 self._samples_since_last_window = 0
 
         return results
+
+    def _should_emit_window(self) -> bool:
+        """Check if a new window should be emitted.
+
+        First window emits as soon as the buffer is full.
+        Subsequent windows emit after slide_samples new data.
+        """
+        if not self._filtered_buffer.is_full:
+            return False
+
+        if not self._first_window_emitted:
+            return True
+
+        return self._samples_since_last_window >= self._slide_samples
 
     def _process_window(self) -> WindowResult | None:
         """Extract features from the current window and classify."""

@@ -116,10 +116,7 @@ def determine_fold_count(sample_count: int, requested_folds: int) -> int:
     actual_folds = min(requested_folds, max_possible_folds)
 
     # Use leave-one-out CV if too few samples for k-fold
-    if actual_folds < 2:
-        return sample_count
-
-    return actual_folds
+    return sample_count if actual_folds < 2 else actual_folds
 
 
 def evaluate_subject_folds(
