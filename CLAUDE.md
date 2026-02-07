@@ -22,6 +22,7 @@ uv run python -m src.simulate_realtime unicorn-data/<recording>.csv
 
 # Run real-time simulation (streaming mode with sliding windows)
 uv run python -m src.simulate_realtime unicorn-data/<recording>.csv --streaming --slide 1.0
+# Additional options: --threshold 30 --window 5.0 --consecutive 3
 
 # Run classifier benchmarks (latency + accuracy comparison)
 uv run python -m src.benchmark_classifiers
@@ -90,7 +91,7 @@ Three-layer design for real-time inference:
 
 ### Stim Column Encoding
 
-Each non-zero stim value: `stim = trial_number * 10 + phase * 10 + movement`, decoded as `phase = (stim // 10) % 10`, `movement = stim % 10`.
+Each non-zero stim value: `stim = trial_number * 100 + phase * 10 + movement`, decoded as `phase = (stim // 10) % 10`, `movement = stim % 10`.
 
 **Phase codes:** 1=Video, 2=Instruction, 3=Imagery (engaged), 4=Movement, 5=Rest (disengaged)
 
