@@ -88,20 +88,17 @@ class FileEEGStream(EEGStream):
         if self._data is None:
             raise RuntimeError("Stream not started. Call start() first.")
 
-        samples: list[tuple[float, np.ndarray]] = []
         total = len(self._data)
-
         if total == 0:
-            return samples
+            return []
 
+        samples: list[tuple[float, np.ndarray]] = []
         for _ in range(n):
-            data_index = self._sample_index % total
             if self._sample_index >= total and not self.loop:
                 break
 
-            # Timestamp is monotonic (based on total samples emitted, not data index)
             timestamp = self._sample_index / self.sfreq
-            channels = self._data[data_index].copy()
+            channels = self._data[self._sample_index % total].copy()
             samples.append((timestamp, channels))
             self._sample_index += 1
 
@@ -137,21 +134,16 @@ class RandomEEGStream(EEGStream):
             raise RuntimeError("Stream not started. Call start() first.")
 
         samples: list[tuple[float, np.ndarray]] = []
+        ch_offsets = np.arange(N_EEG_CHANNELS, dtype=np.float64)
 
         for _ in range(n):
             t = self._sample_index / self.sfreq
 
-            channels = np.zeros(N_EEG_CHANNELS)
-            for ch_idx in range(N_EEG_CHANNELS):
-                # Alpha oscillation (~10 Hz) with per-channel phase offset
-                alpha = 15.0 * np.sin(2 * np.pi * 10 * t + ch_idx * 0.5)
-                # Beta oscillation (~20 Hz)
-                beta = 5.0 * np.sin(2 * np.pi * 20 * t + ch_idx * 0.3)
-                # Theta oscillation (~6 Hz)
-                theta = 8.0 * np.sin(2 * np.pi * 6 * t + ch_idx * 0.7)
-                # Pink-ish noise (scaled white noise)
-                noise = self._rng.normal(0, 10.0)
-                channels[ch_idx] = alpha + beta + theta + noise
+            alpha = 15.0 * np.sin(2 * np.pi * 10 * t + ch_offsets * 0.5)
+            beta = 5.0 * np.sin(2 * np.pi * 20 * t + ch_offsets * 0.3)
+            theta = 8.0 * np.sin(2 * np.pi * 6 * t + ch_offsets * 0.7)
+            noise = self._rng.normal(0, 10.0, size=N_EEG_CHANNELS)
+            channels = alpha + beta + theta + noise
 
             samples.append((t, channels))
             self._sample_index += 1
@@ -226,7 +218,6 @@ class LiveEEGStream(EEGStream):
                 self._device.StopAcquisition()
             except Exception:
                 pass
-            del self._device
             self._device = None
         self._receive_buffer = None
         self._leftover = []

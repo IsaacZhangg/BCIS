@@ -36,22 +36,18 @@ def load_test_windows(n_windows: int = 200) -> list[dict[str, np.ndarray]]:
 
     data, events, sfreq = load_recording(recording_path)
 
-    # Preprocess each channel
-    processed = {}
-    for ch_idx, ch_name in enumerate(CHANNELS):
-        processed[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
+    processed = {ch: preprocess_eeg(data[i], sfreq) for i, ch in enumerate(CHANNELS)}
 
-    # Extract 5-second windows
     window_samples = int(5.0 * sfreq)
     total_samples = len(processed[CHANNELS[0]])
-    step_samples = window_samples  # non-overlapping
 
     windows = []
-    start = 0
-    while start + window_samples <= total_samples and len(windows) < n_windows:
-        window = {ch: processed[ch][start : start + window_samples] for ch in CHANNELS}
-        windows.append(window)
-        start += step_samples
+    for start in range(0, total_samples - window_samples + 1, window_samples):
+        if len(windows) >= n_windows:
+            break
+        windows.append(
+            {ch: processed[ch][start : start + window_samples] for ch in CHANNELS}
+        )
 
     print(f"Extracted {len(windows)} windows ({window_samples} samples each)")
     return windows
@@ -66,34 +62,30 @@ def load_labeled_data() -> tuple[list[dict[str, np.ndarray]], np.ndarray]:
     all_labels = []
 
     for recording_path in recordings[:3]:  # Use first 3 subjects for speed
-        subject_id = recording_path.parent.parent.name
         data, events, sfreq = load_recording(recording_path)
-
-        # Preprocess
-        processed = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            processed[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
-
+        processed = {
+            ch: preprocess_eeg(data[i], sfreq) for i, ch in enumerate(CHANNELS)
+        }
         total_samples = len(processed[CHANNELS[0]])
         window_samples = int(5.0 * sfreq)
 
-        for sample_idx, phase, movement in events:
-            if phase not in [3, 5]:
+        for sample_idx, phase, _ in events:
+            if phase not in (3, 5):
                 continue
             if sample_idx + window_samples > total_samples:
                 continue
-
-            window = {
-                ch: processed[ch][sample_idx : sample_idx + window_samples]
-                for ch in CHANNELS
-            }
-            all_windows.append(window)
+            all_windows.append(
+                {
+                    ch: processed[ch][sample_idx : sample_idx + window_samples]
+                    for ch in CHANNELS
+                }
+            )
             all_labels.append(1 if phase == 3 else 0)
 
-        print(
-            f"  {subject_id}: {sum(1 for _, p, _ in events if p == 3)} engaged, "
-            f"{sum(1 for _, p, _ in events if p == 5)} disengaged events"
-        )
+        subject_id = recording_path.parent.parent.name
+        n_engaged = sum(1 for _, p, _ in events if p == 3)
+        n_disengaged = sum(1 for _, p, _ in events if p == 5)
+        print(f"  {subject_id}: {n_engaged} engaged, {n_disengaged} disengaged events")
 
     labels = np.array(all_labels)
     print(
@@ -106,26 +98,20 @@ def load_labeled_data() -> tuple[list[dict[str, np.ndarray]], np.ndarray]:
 def benchmark_function(func, windows, name, warmup=3, repeats=5):
     """Time a feature extraction function over all windows."""
     n = len(windows)
-    # Warmup
-    for w in windows[: min(warmup, n)]:
+    for w in windows[:warmup]:
         func(w, SFREQ)
 
-    # Timed runs
     times = []
     for _ in range(repeats):
         t0 = time.perf_counter()
         for w in windows:
             func(w, SFREQ)
-        elapsed = time.perf_counter() - t0
-        times.append(elapsed)
+        times.append(time.perf_counter() - t0)
 
     best = min(times)
     mean = np.mean(times)
     per_window_ms = (best / n) * 1000
-
-    # Get feature count
-    feat = func(windows[0], SFREQ)
-    n_features = len(feat)
+    n_features = len(func(windows[0], SFREQ))
 
     print(f"\n--- {name} ---")
     print(f"  Features: {n_features}")
@@ -140,11 +126,9 @@ def benchmark_function(func, windows, name, warmup=3, repeats=5):
 def evaluate_classification(windows, labels, func, name):
     """Evaluate classification accuracy with real labels."""
     features = np.array([func(w, SFREQ) for w in windows])
-
-    # Replace NaN/inf
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
-    n_folds = min(5, min(np.sum(labels == 0), np.sum(labels == 1)))
+    n_folds = min(5, np.sum(labels == 0), np.sum(labels == 1))
     if n_folds < 2:
         print(f"  {name}: Not enough samples for CV")
         return 0.0

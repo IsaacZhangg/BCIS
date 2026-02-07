@@ -2,17 +2,12 @@
 
 import numpy as np
 from scipy.signal import welch, hilbert, butter, filtfilt
-from scipy.stats import entropy, skew, kurtosis
+from scipy.stats import entropy
 
 
-# Frequency bands for feature extraction
-FREQUENCY_BANDS = {
-    "delta": (1, 4),
-    "theta": (4, 8),
-    "alpha": (8, 13),
-    "low_beta": (13, 20),
-    "high_beta": (20, 30),
-}
+def _welch_nperseg(sfreq: float, n_samples: int) -> int:
+    """Compute nperseg for Welch's method, clamped to [64, n_samples//2]."""
+    return max(64, min(int(sfreq / 2), n_samples // 2))
 
 
 def compute_band_power(
@@ -33,9 +28,7 @@ def compute_band_power(
     Returns:
         Mean power in the frequency band
     """
-    # nperseg must be <= len(epoch); use half the epoch for good frequency resolution
-    nperseg = min(int(sfreq / 2), len(epoch) // 2)
-    nperseg = max(nperseg, 64)  # Minimum for reasonable FFT
+    nperseg = _welch_nperseg(sfreq, len(epoch))
     freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low_freq) & (freqs <= high_freq)
     return float(np.mean(psd[mask]))
@@ -104,38 +97,12 @@ def bandpass_filter_signal(
     return filtfilt(b, a, signal)
 
 
-def compute_statistical_features(epoch: np.ndarray) -> list[float]:
-    """Compute statistical features from an epoch."""
-    features = [
-        np.mean(epoch),
-        np.std(epoch),
-        np.var(epoch),
-        skew(epoch),
-        kurtosis(epoch),
-        np.ptp(epoch),  # peak-to-peak
-        np.percentile(epoch, 25),
-        np.percentile(epoch, 75),
-    ]
-    return features
-
-
 def compute_spectral_entropy(epoch: np.ndarray, sfreq: float) -> float:
     """Compute spectral entropy."""
-    nperseg = min(int(sfreq / 2), len(epoch) // 2)
-    nperseg = max(nperseg, 64)
+    nperseg = _welch_nperseg(sfreq, len(epoch))
     freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     psd_norm = psd / (np.sum(psd) + 1e-10)
     return entropy(psd_norm + 1e-10)
-
-
-def compute_line_length(epoch: np.ndarray) -> float:
-    """Compute line length (sum of absolute differences)."""
-    return np.sum(np.abs(np.diff(epoch)))
-
-
-def compute_zero_crossings(epoch: np.ndarray) -> int:
-    """Count zero crossings."""
-    return np.sum(np.diff(np.sign(epoch - np.mean(epoch))) != 0)
 
 
 def compute_filter_bank_features(epoch: np.ndarray, sfreq: float) -> list[float]:
@@ -184,13 +151,11 @@ def compute_wavelet_features(epoch: np.ndarray) -> list[float]:
 
     Uses differencing at multiple scales instead of full wavelet transform.
     """
+    detail = np.diff(epoch, n=1)
     features = []
 
-    # Multi-scale analysis using differencing
     for scale in [1, 2, 4, 8, 16]:
-        detail = np.diff(epoch, n=1)
         if len(detail) > scale:
-            # Downsample by scale
             downsampled = detail[::scale]
             features.extend(
                 [
@@ -296,8 +261,7 @@ def compute_asymmetry_features(
         fz_signal = channels_data["Fz"]
         pz_signal = channels_data["Pz"]
 
-        for band_name in ["theta", "alpha"]:
-            low_freq, high_freq = bands[band_name]
+        for low_freq, high_freq in [bands["theta"], bands["alpha"]]:
             fz_power = compute_band_power(fz_signal, sfreq, low_freq, high_freq)
             pz_power = compute_band_power(pz_signal, sfreq, low_freq, high_freq)
 
@@ -435,11 +399,11 @@ def extract_erd_features(
             epoch_features.extend(temporal_feats)
 
         # Compute asymmetry features across channels for this epoch
-        task_by_channel = {}
-        for ch_name in motor_channels:
-            if ch_name in epoch_pairs_by_channel:
-                _, task = epoch_pairs_by_channel[ch_name][epoch_idx]
-                task_by_channel[ch_name] = task
+        task_by_channel = {
+            ch: epoch_pairs_by_channel[ch][epoch_idx][1]
+            for ch in motor_channels
+            if ch in epoch_pairs_by_channel
+        }
 
         asymmetry_feats = compute_asymmetry_features(task_by_channel, sfreq)
         epoch_features.extend(asymmetry_feats)

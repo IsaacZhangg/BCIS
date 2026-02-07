@@ -85,13 +85,13 @@ class RingBuffer:
 
         if self._count >= self._max:
             # Buffer has wrapped - reconstruct chronological order
-            start = self._write_pos  # oldest data position
-            indices = [(start + i) % self._max for i in range(self._max)]
-            ordered = self._buf[:, indices]
-            return ordered[:, -n:]
+            indices = (
+                np.arange(self._write_pos, self._write_pos + self._max) % self._max
+            )
+            return self._buf[:, indices][:, -n:]
 
         # Buffer hasn't wrapped yet - data is already in order
-        return self._buf[:, : self._count][:, -n:]
+        return self._buf[:, self._count - n : self._count]
 
     def clear(self) -> None:
         self._buf[:] = 0
@@ -109,10 +109,7 @@ class IncrementalFilter:
     def __init__(self, sos: np.ndarray, n_channels: int):
         self._sos = sos
         self._n_channels = n_channels
-        # Initialize filter state for each channel
-        zi_single = sosfilt_zi(sos)  # shape (n_sections, 2)
-        # Stack for all channels: (n_channels, n_sections, 2)
-        self._zi = np.stack([zi_single * 0.0 for _ in range(n_channels)])
+        self.reset()
 
     def filter(self, data: np.ndarray) -> np.ndarray:
         """Filter multi-channel data incrementally.
@@ -129,8 +126,8 @@ class IncrementalFilter:
         return out
 
     def reset(self) -> None:
-        zi_single = sosfilt_zi(self._sos)
-        self._zi = np.stack([zi_single * 0.0 for _ in range(self._n_channels)])
+        zi_shape = sosfilt_zi(self._sos).shape  # (n_sections, 2)
+        self._zi = np.zeros((self._n_channels, *zi_shape), dtype=np.float64)
 
 
 def _make_bandpass_sos(
@@ -178,9 +175,22 @@ class RealtimeEngine:
         self.on_result = on_result
 
         self._validate_config()
-        self._initialize_buffers()
-        self._initialize_filters()
-        self._initialize_state()
+        self._buffer = RingBuffer(self._window_samples, self._n_channels)
+        self._filtered_buffer = RingBuffer(self._window_samples, self._n_channels)
+
+        bp_sos = _make_bandpass_sos(
+            self.config.bandpass_low, self.config.bandpass_high, self.config.sfreq
+        )
+        notch_sos = _make_notch_sos(self.config.notch_freq, self.config.sfreq)
+        self._bp_filter = IncrementalFilter(bp_sos, self._n_channels)
+        self._notch_filter = IncrementalFilter(notch_sos, self._n_channels)
+
+        self._score_history: deque[float] = deque(maxlen=self.config.alert_consecutive)
+        self._results: deque[WindowResult] = deque(maxlen=self.config.max_results)
+        self._samples_since_last_window = 0
+        self._total_samples = 0
+        self._first_window_emitted = False
+        self._running = False
 
     def _validate_config(self) -> None:
         if self.config.sfreq != self.stream.sfreq:
@@ -212,26 +222,6 @@ class RealtimeEngine:
             raise ValueError(
                 f"alert_consecutive must be >= 1, got {self.config.alert_consecutive}."
             )
-
-    def _initialize_buffers(self) -> None:
-        self._buffer = RingBuffer(self._window_samples, self._n_channels)
-        self._filtered_buffer = RingBuffer(self._window_samples, self._n_channels)
-
-    def _initialize_filters(self) -> None:
-        bp_sos = _make_bandpass_sos(
-            self.config.bandpass_low, self.config.bandpass_high, self.config.sfreq
-        )
-        notch_sos = _make_notch_sos(self.config.notch_freq, self.config.sfreq)
-        self._bp_filter = IncrementalFilter(bp_sos, self._n_channels)
-        self._notch_filter = IncrementalFilter(notch_sos, self._n_channels)
-
-    def _initialize_state(self) -> None:
-        self._score_history: deque[float] = deque(maxlen=self.config.alert_consecutive)
-        self._samples_since_last_window = 0
-        self._total_samples = 0
-        self._first_window_emitted = False
-        self._running = False
-        self._results: deque[WindowResult] = deque(maxlen=self.config.max_results)
 
     def start(self) -> None:
         self._buffer.clear()
@@ -347,16 +337,16 @@ class RealtimeEngine:
         Returns:
             All WindowResult objects produced during the run.
         """
-        read_chunk = self._slide_samples  # Read one slide's worth at a time
         total_read = 0
 
         while self._running:
-            if max_samples is not None and total_read >= max_samples:
+            remaining = max_samples - total_read if max_samples is not None else None
+            if remaining is not None and remaining <= 0:
                 break
 
-            chunk_size = read_chunk
-            if max_samples is not None:
-                chunk_size = min(chunk_size, max_samples - total_read)
+            chunk_size = self._slide_samples
+            if remaining is not None:
+                chunk_size = min(chunk_size, remaining)
 
             samples = self.stream.read_samples(chunk_size)
             if not samples:

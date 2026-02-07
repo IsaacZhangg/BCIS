@@ -219,32 +219,24 @@ def get_models() -> dict:
 
 def measure_inference_latency(model, X_sample, n_iters=1000):
     """Measure single-sample and batch inference latency."""
+    predict = model.predict_proba if hasattr(model, "predict_proba") else model.predict
     single = X_sample[:1]
     batch = X_sample[: min(200, len(X_sample))]
 
     # Warm up
     for _ in range(10):
-        if hasattr(model, "predict_proba"):
-            model.predict_proba(single)
-        else:
-            model.predict(single)
+        predict(single)
 
     # Single-sample latency
     start = time.perf_counter()
     for _ in range(n_iters):
-        if hasattr(model, "predict_proba"):
-            model.predict_proba(single)
-        else:
-            model.predict(single)
+        predict(single)
     single_ms = (time.perf_counter() - start) / n_iters * 1000
 
     # Batch latency
     start = time.perf_counter()
     for _ in range(n_iters):
-        if hasattr(model, "predict_proba"):
-            model.predict_proba(batch)
-        else:
-            model.predict(batch)
+        predict(batch)
     batch_ms = (time.perf_counter() - start) / n_iters * 1000
 
     return single_ms, batch_ms
@@ -255,6 +247,34 @@ def measure_model_size(model):
     buf = io.BytesIO()
     joblib.dump(model, buf)
     return buf.tell()
+
+
+def print_summary_table(title: str, sorted_results: list[tuple[str, dict]]):
+    """Print a formatted summary table of benchmark results."""
+    header = (
+        f"{'Model':<22} {'Pooled CV':>10} {'(std)':>7} {'Within-Subj':>12} {'(std)':>7} "
+        f"{'Single(ms)':>11} {'Batch(ms)':>11} {'Size(KB)':>10} {'partial_fit':>12}"
+    )
+
+    print("\n")
+    print("=" * 130)
+    print(f"SUMMARY TABLE ({title})")
+    print("=" * 130)
+    print(header)
+    print("-" * 130)
+
+    for name, r in sorted_results:
+        meets_target = r["pooled_accuracy"] >= 0.90 and r["single_latency_ms"] < 2.0
+        marker = " ***" if meets_target else ""
+        print(
+            f"{name:<22} {r['pooled_accuracy']:>9.1%} {r['pooled_std']:>6.1%} "
+            f"{r['within_accuracy']:>11.1%} {r['within_std']:>6.1%} "
+            f"{r['single_latency_ms']:>10.3f} {r['batch_latency_ms']:>10.3f} "
+            f"{r['model_size_bytes'] / 1024:>9.1f} {str(r['partial_fit']):>12}{marker}"
+        )
+
+    print("-" * 130)
+    print("*** = meets target (<2ms single-sample latency AND >90% pooled CV accuracy)")
 
 
 def run_benchmark(data_dir: Path):
@@ -369,53 +389,13 @@ def run_benchmark(data_dir: Path):
         print(f"  Model size:            {model_bytes / 1024:.1f} KB")
         print(f"  Supports partial_fit:  {partial_fit}")
 
-    print("\n\n")
-    print("=" * 130)
-    print("SUMMARY TABLE (sorted by pooled CV accuracy)")
-    print("=" * 130)
-    header = (
-        f"{'Model':<22} {'Pooled CV':>10} {'(std)':>7} {'Within-Subj':>12} {'(std)':>7} "
-        f"{'Single(ms)':>11} {'Batch(ms)':>11} {'Size(KB)':>10} {'partial_fit':>12}"
-    )
-    print(header)
-    print("-" * 130)
-
     sorted_results = sorted(
         results.items(), key=lambda x: x[1]["pooled_accuracy"], reverse=True
     )
-    for name, r in sorted_results:
-        meets_target = r["pooled_accuracy"] >= 0.90 and r["single_latency_ms"] < 2.0
-        marker = " ***" if meets_target else ""
-        print(
-            f"{name:<22} {r['pooled_accuracy']:>9.1%} {r['pooled_std']:>6.1%} "
-            f"{r['within_accuracy']:>11.1%} {r['within_std']:>6.1%} "
-            f"{r['single_latency_ms']:>10.3f} {r['batch_latency_ms']:>10.3f} "
-            f"{r['model_size_bytes'] / 1024:>9.1f} {str(r['partial_fit']):>12}{marker}"
-        )
-
-    print("-" * 130)
-    print("*** = meets target (<2ms single-sample latency AND >90% pooled CV accuracy)")
-
-    print("\n")
-    print("=" * 130)
-    print("SUMMARY TABLE (sorted by single-sample latency)")
-    print("=" * 130)
-    print(header)
-    print("-" * 130)
-
     sorted_by_latency = sorted(results.items(), key=lambda x: x[1]["single_latency_ms"])
-    for name, r in sorted_by_latency:
-        meets_target = r["pooled_accuracy"] >= 0.90 and r["single_latency_ms"] < 2.0
-        marker = " ***" if meets_target else ""
-        print(
-            f"{name:<22} {r['pooled_accuracy']:>9.1%} {r['pooled_std']:>6.1%} "
-            f"{r['within_accuracy']:>11.1%} {r['within_std']:>6.1%} "
-            f"{r['single_latency_ms']:>10.3f} {r['batch_latency_ms']:>10.3f} "
-            f"{r['model_size_bytes'] / 1024:>9.1f} {str(r['partial_fit']):>12}{marker}"
-        )
 
-    print("-" * 130)
-    print("*** = meets target (<2ms single-sample latency AND >90% pooled CV accuracy)")
+    print_summary_table("sorted by pooled CV accuracy", sorted_results)
+    print_summary_table("sorted by single-sample latency", sorted_by_latency)
 
     print("\n")
     print("=" * 70)

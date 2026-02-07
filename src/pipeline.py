@@ -19,23 +19,17 @@ def create_multichannel_arrays(
     channels: list[str],
 ) -> np.ndarray:
     """Create multichannel arrays for Riemannian classification."""
-    num_channels = len(channels)
-    num_engaged = len(engaged_epochs_by_channel[channels[0]])
-    num_disengaged = len(disengaged_epochs_by_channel[channels[0]])
-    num_samples = engaged_epochs_by_channel[channels[0]][0][1].shape[0]
 
-    engaged_array = np.zeros((num_engaged, num_channels, num_samples))
-    disengaged_array = np.zeros((num_disengaged, num_channels, num_samples))
+    def _to_array(epochs_by_channel: dict) -> np.ndarray:
+        # Stack task epochs: (n_trials, n_channels, n_samples)
+        return np.stack(
+            [np.array([pair[1] for pair in epochs_by_channel[ch]]) for ch in channels],
+            axis=1,
+        )
 
-    for channel_idx, channel_name in enumerate(channels):
-        for trial_idx in range(num_engaged):
-            _, task_epoch = engaged_epochs_by_channel[channel_name][trial_idx]
-            engaged_array[trial_idx, channel_idx, :] = task_epoch
-        for trial_idx in range(num_disengaged):
-            _, task_epoch = disengaged_epochs_by_channel[channel_name][trial_idx]
-            disengaged_array[trial_idx, channel_idx, :] = task_epoch
-
-    return np.vstack([engaged_array, disengaged_array])
+    return np.vstack(
+        [_to_array(engaged_epochs_by_channel), _to_array(disengaged_epochs_by_channel)]
+    )
 
 
 def extract_realtime_training_data(
@@ -45,22 +39,17 @@ def extract_realtime_training_data(
     all_features = []
     all_labels = []
 
-    for recording_path, cache_data in processed_cache.items():
-        channel_signals, events, sample_rate = cache_data
+    for channel_signals, events, sample_rate in processed_cache.values():
         window_samples = int(5.0 * sample_rate)
+        signal_length = len(channel_signals[channels[0]])
 
-        for sample_idx, phase, movement in events:
-            if phase not in [3, 5]:
-                continue
-
-            if sample_idx + window_samples > len(channel_signals[channels[0]]):
+        for sample_idx, phase, _movement in events:
+            if phase not in {3, 5} or sample_idx + window_samples > signal_length:
                 continue
 
             window = {
-                channel: channel_signals[channel][
-                    sample_idx : sample_idx + window_samples
-                ]
-                for channel in channels
+                ch: channel_signals[ch][sample_idx : sample_idx + window_samples]
+                for ch in channels
             }
 
             features = extract_realtime_features(window, sample_rate)
@@ -78,9 +67,9 @@ def extract_realtime_training_data(
 def balance_realtime_data(
     features: np.ndarray, labels: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Balance realtime training data to prevent class imbalance."""
-    engaged_count = np.sum(labels == 1)
-    disengaged_count = np.sum(labels == 0)
+    """Balance realtime training data by downsampling the majority class."""
+    engaged_count = int(np.sum(labels == 1))
+    disengaged_count = int(np.sum(labels == 0))
 
     print(
         f"    Realtime - Engaged windows: {engaged_count}, Disengaged windows: {disengaged_count}"
@@ -89,40 +78,16 @@ def balance_realtime_data(
     if disengaged_count <= engaged_count:
         return features, labels
 
-    # Downsample majority class
-    balanced_features, balanced_labels = downsample_majority_class(
-        features, labels, engaged_count
-    )
-
-    print(f"    Balanced to {len(balanced_labels)} windows")
-    return balanced_features, balanced_labels
-
-
-def downsample_majority_class(
-    features: np.ndarray, labels: np.ndarray, target_count: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Downsample the majority class to match target count."""
     np.random.seed(42)
     engaged_indices = np.where(labels == 1)[0]
     disengaged_indices = np.where(labels == 0)[0]
-
     sampled_disengaged = np.random.choice(
-        disengaged_indices, target_count, replace=False
+        disengaged_indices, engaged_count, replace=False
     )
-
     balanced_indices = np.concatenate([engaged_indices, sampled_disengaged])
+
+    print(f"    Balanced to {len(balanced_indices)} windows")
     return features[balanced_indices], labels[balanced_indices]
-
-
-def save_realtime_model(model: object, scaler: object, output_dir: Path) -> None:
-    """Save realtime model and scaler to disk."""
-    model_path = output_dir / "engagement_realtime_model.joblib"
-    scaler_path = output_dir / "engagement_realtime_scaler.joblib"
-
-    joblib.dump(model, model_path)
-    joblib.dump(scaler, scaler_path)
-
-    print(f"    Realtime model saved to: {model_path}")
 
 
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
@@ -248,7 +213,11 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         realtime_model, realtime_scaler = train_final_model(
             balanced_features, balanced_labels
         )
-        save_realtime_model(realtime_model, realtime_scaler, output_dir)
+        joblib.dump(realtime_model, output_dir / "engagement_realtime_model.joblib")
+        joblib.dump(realtime_scaler, output_dir / "engagement_realtime_scaler.joblib")
+        print(
+            f"    Realtime model saved to: {output_dir / 'engagement_realtime_model.joblib'}"
+        )
     else:
         print("    Warning: No realtime training data extracted")
 
@@ -262,15 +231,17 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print(f"Model saved to: {model_path}")
     print(f"Scaler saved to: {scaler_path}")
 
-    results = create_results_dict(
-        recordings=recordings,
-        subject_ids=subject_ids,
-        scores=scores,
-        mean_accuracy=mean_accuracy,
-        std_accuracy=std_accuracy,
-        target_met=target_met,
-        output_dir=output_dir,
-    )
+    results = {
+        "n_subjects": len(recordings),
+        "per_subject_scores": {sid: float(s) for sid, s in zip(subject_ids, scores)},
+        "mean_accuracy": float(mean_accuracy),
+        "std_accuracy": float(std_accuracy),
+        "target_met": bool(target_met),
+        "model_path": str(model_path),
+        "scaler_path": str(scaler_path),
+        "realtime_model_path": str(output_dir / "engagement_realtime_model.joblib"),
+        "realtime_scaler_path": str(output_dir / "engagement_realtime_scaler.joblib"),
+    }
 
     results_path = output_dir / "training_results.json"
     with open(results_path, "w") as f:
@@ -282,31 +253,6 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("=" * 60)
 
     return results
-
-
-def create_results_dict(
-    recordings: list,
-    subject_ids: list,
-    scores: list,
-    mean_accuracy: float,
-    std_accuracy: float,
-    target_met: bool,
-    output_dir: Path,
-) -> dict:
-    """Create results dictionary for saving."""
-    return {
-        "n_subjects": len(recordings),
-        "per_subject_scores": dict(
-            zip(subject_ids, [float(score) for score in scores])
-        ),
-        "mean_accuracy": float(mean_accuracy),
-        "std_accuracy": float(std_accuracy),
-        "target_met": bool(target_met),
-        "model_path": str(output_dir / "engagement_classifier_model.joblib"),
-        "scaler_path": str(output_dir / "engagement_classifier_scaler.joblib"),
-        "realtime_model_path": str(output_dir / "engagement_realtime_model.joblib"),
-        "realtime_scaler_path": str(output_dir / "engagement_realtime_scaler.joblib"),
-    }
 
 
 if __name__ == "__main__":

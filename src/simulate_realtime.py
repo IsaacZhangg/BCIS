@@ -18,15 +18,7 @@ from src.features import extract_realtime_features
 
 
 def compute_engagement_score(probability: float) -> float:
-    """
-    Convert model probability to 0-100 engagement score.
-
-    Args:
-        probability: Probability of engaged class (0-1)
-
-    Returns:
-        Engagement score (0-100)
-    """
+    """Convert model probability to 0-100 engagement score."""
     return probability * 100
 
 
@@ -35,22 +27,10 @@ def check_alert(
     threshold: float = 30.0,
     consecutive: int = 3,
 ) -> bool:
-    """
-    Check if alert should be triggered based on score history.
-
-    Args:
-        score_history: List of recent engagement scores
-        threshold: Score below which is considered fatigued
-        consecutive: Number of consecutive low scores to trigger alert
-
-    Returns:
-        True if alert should trigger
-    """
+    """Check if alert should be triggered based on score history."""
     if len(score_history) < consecutive:
         return False
-
-    recent_scores = score_history[-consecutive:]
-    return all(score < threshold for score in recent_scores)
+    return all(score < threshold for score in score_history[-consecutive:])
 
 
 def extract_sliding_windows(
@@ -59,32 +39,16 @@ def extract_sliding_windows(
     window_sec: float = 5.0,
     step_sec: float = 5.0,
 ) -> list[dict[str, np.ndarray]]:
-    """
-    Extract sliding windows from multi-channel data.
-
-    Args:
-        data: Dict mapping channel names to signal arrays
-        sfreq: Sampling frequency in Hz
-        window_sec: Window duration in seconds
-        step_sec: Step between windows in seconds
-
-    Returns:
-        List of window dicts, each mapping channel names to signal arrays
-    """
+    """Extract sliding windows from multi-channel data."""
     window_samples = int(window_sec * sfreq)
     step_samples = int(step_sec * sfreq)
-
-    # Get total length from first channel
-    first_channel = list(data.keys())[0]
-    total_samples = len(data[first_channel])
+    total_samples = len(next(iter(data.values())))
 
     windows = []
     start = 0
-
     while start + window_samples <= total_samples:
         window = {
-            channel_name: signal[start : start + window_samples]
-            for channel_name, signal in data.items()
+            ch: signal[start : start + window_samples] for ch, signal in data.items()
         }
         windows.append(window)
         start += step_samples
@@ -100,20 +64,7 @@ def simulate_recording(
     threshold: float = 30.0,
     consecutive: int = 3,
 ) -> pd.DataFrame:
-    """
-    Simulate real-time engagement detection on a recording.
-
-    Args:
-        recording_path: Path to recording CSV
-        model_path: Path to trained model
-        scaler_path: Path to fitted scaler
-        window_sec: Window size in seconds
-        threshold: Alert threshold (0-100)
-        consecutive: Consecutive windows below threshold to trigger alert
-
-    Returns:
-        DataFrame with timestamp, engagement_score, alert_triggered columns
-    """
+    """Simulate real-time engagement detection on a recording."""
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)
     data, events, sample_rate = load_recording(recording_path)
@@ -139,24 +90,7 @@ def simulate_recording_streaming(
     threshold: float = 30.0,
     consecutive: int = 3,
 ) -> pd.DataFrame:
-    """
-    Simulate real-time engagement detection using the streaming architecture.
-
-    Uses FileEEGStream + RealtimeEngine for sample-by-sample processing
-    with incremental filtering, matching how a live headset would operate.
-
-    Args:
-        recording_path: Path to recording CSV
-        model_path: Path to trained model
-        scaler_path: Path to fitted scaler
-        window_sec: Window size in seconds
-        slide_sec: Slide between windows in seconds
-        threshold: Alert threshold (0-100)
-        consecutive: Consecutive windows below threshold to trigger alert
-
-    Returns:
-        DataFrame with timestamp_sec, engagement_score, alert_triggered columns
-    """
+    """Simulate real-time engagement detection using the streaming architecture."""
     from src.eeg_stream import FileEEGStream
     from src.realtime_engine import EngineConfig, RealtimeEngine
 
@@ -175,20 +109,20 @@ def simulate_recording_streaming(
     results = engine.run()
     engine.stop()
 
-    rows = [
-        {
-            "timestamp_sec": r.timestamp_sec,
-            "engagement_score": r.engagement_score,
-            "alert_triggered": r.alert_triggered,
-        }
-        for r in results
-    ]
-    return (
-        pd.DataFrame(rows)
-        if rows
-        else pd.DataFrame(
+    if not results:
+        return pd.DataFrame(
             columns=["timestamp_sec", "engagement_score", "alert_triggered"]
         )
+
+    return pd.DataFrame(
+        [
+            {
+                "timestamp_sec": r.timestamp_sec,
+                "engagement_score": r.engagement_score,
+                "alert_triggered": r.alert_triggered,
+            }
+            for r in results
+        ]
     )
 
 

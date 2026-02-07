@@ -37,39 +37,35 @@ def main():
         subject_id = recording_path.parent.parent.name
         data, events, sr = load_recording(recording_path)
 
-        processed = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            processed[ch_name] = preprocess_eeg(data[ch_idx], sr)
+        processed = {ch: preprocess_eeg(data[i], sr) for i, ch in enumerate(CHANNELS)}
 
         total_samples = len(processed[CHANNELS[0]])
 
         windows = []
         labels = []
-        for sample_idx, phase, movement in events:
-            if phase not in [3, 5]:
+        for sample_idx, phase, _ in events:
+            if phase not in (3, 5):
                 continue
             if sample_idx + window_samples > total_samples:
                 continue
-            window = {
-                ch: processed[ch][sample_idx : sample_idx + window_samples]
-                for ch in CHANNELS
-            }
-            windows.append(window)
+            windows.append(
+                {
+                    ch: processed[ch][sample_idx : sample_idx + window_samples]
+                    for ch in CHANNELS
+                }
+            )
             labels.append(1 if phase == 3 else 0)
 
         labels = np.array(labels)
         if len(labels) < 10:
             continue
 
-        # Balance classes
-        n_min = min(np.sum(labels == 0), np.sum(labels == 1))
-        np.random.seed(42)
+        rng = np.random.RandomState(42)
         idx_0 = np.where(labels == 0)[0]
         idx_1 = np.where(labels == 1)[0]
-        if len(idx_0) > n_min:
-            idx_0 = np.random.choice(idx_0, n_min, replace=False)
-        if len(idx_1) > n_min:
-            idx_1 = np.random.choice(idx_1, n_min, replace=False)
+        n_min = min(len(idx_0), len(idx_1))
+        idx_0 = rng.choice(idx_0, n_min, replace=False)
+        idx_1 = rng.choice(idx_1, n_min, replace=False)
         sel = np.sort(np.concatenate([idx_0, idx_1]))
         windows = [windows[i] for i in sel]
         labels = labels[sel]

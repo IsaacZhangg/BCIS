@@ -204,36 +204,19 @@ def profile_realtime_simulation_window(channel_signals, sfreq):
     print("=" * 60)
 
     window_samples = int(5.0 * sfreq)
-
-    # Simulate what simulate_realtime does: preprocess each channel then extract features
     raw_window = {ch: signal[:window_samples] for ch, signal in channel_signals.items()}
-
     n_runs = 5
 
-    def process_one_window():
-        # Preprocess each channel
-        processed = {}
-        for ch_name, signal in raw_window.items():
-            processed[ch_name] = preprocess_eeg(signal, sfreq)
-        # Extract features
-        features = extract_realtime_features(processed, sfreq)
-        return features
+    def preprocess_window():
+        return {ch: preprocess_eeg(signal, sfreq) for ch, signal in raw_window.items()}
 
-    _, total_ms, total_std = time_it(process_one_window, n_runs=n_runs)
+    def process_full_window():
+        return extract_realtime_features(preprocess_window(), sfreq)
 
-    # Break down: preprocessing portion
-    def preprocess_only():
-        processed = {}
-        for ch_name, signal in raw_window.items():
-            processed[ch_name] = preprocess_eeg(signal, sfreq)
-        return processed
-
-    _, preproc_ms, _ = time_it(preprocess_only, n_runs=n_runs)
-
-    # Features portion
-    preprocessed_window = preprocess_only()
+    _, total_ms, total_std = time_it(process_full_window, n_runs=n_runs)
+    _, preproc_ms, _ = time_it(preprocess_window, n_runs=n_runs)
     _, feat_ms, _ = time_it(
-        extract_realtime_features, preprocessed_window, sfreq, n_runs=n_runs
+        extract_realtime_features, preprocess_window(), sfreq, n_runs=n_runs
     )
 
     print(f"  Total per-window processing:    {total_ms:8.2f} ms (+/- {total_std:.2f})")

@@ -13,13 +13,24 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import SelectKBest, f_classif
 import warnings
 
-# Riemannian geometry classifiers
 from pyriemann.estimation import Covariances
 from pyriemann.classification import MDM
 from pyriemann.tangentspace import TangentSpace
 
-# Suppress convergence warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+def _fit_predict(
+    clf,
+    train_features: np.ndarray,
+    test_features: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Fit a classifier and return (predictions, accuracy)."""
+    clf.fit(train_features, train_labels)
+    predictions = clf.predict(test_features)
+    return predictions, float(np.mean(predictions == test_labels))
 
 
 def train_loso_cv(
@@ -27,20 +38,13 @@ def train_loso_cv(
     y_by_subject: list[np.ndarray],
 ) -> tuple[list[float], float, float]:
     """Train with Leave-One-Subject-Out cross-validation."""
-    n_subjects = len(X_by_subject)
     scores = []
 
-    for test_idx in range(n_subjects):
-        X_train_list = []
-        y_train_list = []
-
-        for i in range(n_subjects):
-            if i != test_idx:
-                X_train_list.append(X_by_subject[i])
-                y_train_list.append(y_by_subject[i])
-
-        X_train = np.vstack(X_train_list)
-        y_train = np.concatenate(y_train_list)
+    for test_idx in range(len(X_by_subject)):
+        X_train = np.vstack([X for i, X in enumerate(X_by_subject) if i != test_idx])
+        y_train = np.concatenate(
+            [y for i, y in enumerate(y_by_subject) if i != test_idx]
+        )
         X_test = X_by_subject[test_idx]
         y_test = y_by_subject[test_idx]
 
@@ -57,14 +61,9 @@ def train_loso_cv(
             n_jobs=-1,
         )
         model.fit(X_train_scaled, y_train)
+        scores.append(model.score(X_test_scaled, y_test))
 
-        accuracy = model.score(X_test_scaled, y_test)
-        scores.append(accuracy)
-
-    mean_acc = np.mean(scores)
-    std_acc = np.std(scores)
-
-    return scores, mean_acc, std_acc
+    return scores, float(np.mean(scores)), float(np.std(scores))
 
 
 def train_within_subject_cv_riemannian(
@@ -72,29 +71,17 @@ def train_within_subject_cv_riemannian(
     y_by_subject: list[np.ndarray],
     n_folds: int = 10,
 ) -> tuple[list[float], float, float]:
-    """
-    Train with enhanced Riemannian geometry combined with focused feature ensemble.
-
-    Uses tangent space projection from covariance matrices combined with
-    carefully selected classifiers.
-    """
+    """Train with Riemannian geometry combined with focused feature ensemble."""
     subject_scores = []
 
-    for subject_idx in range(len(X_by_subject)):
-        features, multichannel_data = X_by_subject[subject_idx]
-        labels = y_by_subject[subject_idx]
-
+    for (features, multichannel_data), labels in zip(X_by_subject, y_by_subject):
         fold_count = determine_fold_count(len(labels), n_folds)
         fold_scores = evaluate_subject_folds(
             features, multichannel_data, labels, fold_count
         )
-
         subject_scores.append(np.mean(fold_scores))
 
-    mean_accuracy = np.mean(subject_scores)
-    std_accuracy = np.std(subject_scores)
-
-    return subject_scores, mean_accuracy, std_accuracy
+    return subject_scores, float(np.mean(subject_scores)), float(np.std(subject_scores))
 
 
 def determine_fold_count(sample_count: int, requested_folds: int) -> int:
@@ -211,17 +198,34 @@ def compute_weighted_ensemble_accuracy(
 
     top_k = min(20, len(accuracies_array))
     top_indices = np.argsort(accuracies_array)[-top_k:]
-    top_predictions = predictions_array[top_indices]
+    top_predictions = predictions_array[top_indices].astype(int)
     top_weights = accuracies_array[top_indices]
     top_weights = top_weights / top_weights.sum()
 
-    weighted_votes = np.zeros((len(test_labels), 2))
-    for i, prediction in enumerate(top_predictions):
-        for j, pred_class in enumerate(prediction):
-            weighted_votes[j, int(pred_class)] += top_weights[i]
+    n_samples = len(test_labels)
+    weighted_votes = np.zeros((n_samples, 2))
+    for i in range(len(top_predictions)):
+        weighted_votes[np.arange(n_samples), top_predictions[i]] += top_weights[i]
 
     ensemble_predictions = np.argmax(weighted_votes, axis=1)
-    return np.mean(ensemble_predictions == test_labels)
+    return float(np.mean(ensemble_predictions == test_labels))
+
+
+def _tangent_classifiers() -> list:
+    """Return classifiers used on tangent space features."""
+    return [
+        LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
+        SVC(
+            kernel="rbf", C=1.0, gamma="scale", class_weight="balanced", random_state=42
+        ),
+        SVC(
+            kernel="rbf",
+            C=10.0,
+            gamma="scale",
+            class_weight="balanced",
+            random_state=42,
+        ),
+    ]
 
 
 def train_riemannian_models(
@@ -236,61 +240,42 @@ def train_riemannian_models(
     tangent_train = None
     tangent_test = None
 
-    for covariance_estimator in ["lwf", "oas"]:
+    for estimator in ["lwf", "oas"]:
         try:
-            covariance = Covariances(estimator=covariance_estimator)
-            train_covariances = covariance.fit_transform(train_multichannel)
-            test_covariances = covariance.transform(test_multichannel)
-
-            # MDM classifier with different metrics
-            for metric in ["riemann", "logeuclid"]:
-                try:
-                    mdm = MDM(metric=metric)
-                    mdm.fit(train_covariances, train_labels)
-                    prediction = mdm.predict(test_covariances)
-                    predictions.append(prediction)
-                    accuracies.append(np.mean(prediction == test_labels))
-                except Exception:
-                    pass
-
-            # Tangent space projection
-            for tangent_metric in ["riemann", "logeuclid"]:
-                try:
-                    tangent_space = TangentSpace(metric=tangent_metric)
-                    train_tangent = tangent_space.fit_transform(
-                        train_covariances, train_labels
-                    )
-                    test_tangent = tangent_space.transform(test_covariances)
-
-                    if tangent_train is None:
-                        tangent_train = train_tangent
-                        tangent_test = test_tangent
-
-                    # LDA on tangent space
-                    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-                    lda.fit(train_tangent, train_labels)
-                    prediction = lda.predict(test_tangent)
-                    predictions.append(prediction)
-                    accuracies.append(np.mean(prediction == test_labels))
-
-                    # SVM on tangent space
-                    for C in [1.0, 10.0]:
-                        svm = SVC(
-                            kernel="rbf",
-                            C=C,
-                            gamma="scale",
-                            class_weight="balanced",
-                            random_state=42,
-                        )
-                        svm.fit(train_tangent, train_labels)
-                        prediction = svm.predict(test_tangent)
-                        predictions.append(prediction)
-                        accuracies.append(np.mean(prediction == test_labels))
-
-                except Exception:
-                    pass
+            cov = Covariances(estimator=estimator)
+            train_cov = cov.fit_transform(train_multichannel)
+            test_cov = cov.transform(test_multichannel)
         except Exception:
-            pass
+            continue
+
+        for metric in ["riemann", "logeuclid"]:
+            try:
+                pred, acc = _fit_predict(
+                    MDM(metric=metric), train_cov, test_cov, train_labels, test_labels
+                )
+                predictions.append(pred)
+                accuracies.append(acc)
+            except Exception:
+                pass
+
+        for metric in ["riemann", "logeuclid"]:
+            try:
+                ts = TangentSpace(metric=metric)
+                train_tan = ts.fit_transform(train_cov, train_labels)
+                test_tan = ts.transform(test_cov)
+
+                if tangent_train is None:
+                    tangent_train = train_tan
+                    tangent_test = test_tan
+
+                for clf in _tangent_classifiers():
+                    pred, acc = _fit_predict(
+                        clf, train_tan, test_tan, train_labels, test_labels
+                    )
+                    predictions.append(pred)
+                    accuracies.append(acc)
+            except Exception:
+                pass
 
     return {
         "predictions": predictions,
@@ -354,6 +339,45 @@ def select_features(
         return None
 
 
+def _traditional_classifiers() -> list:
+    """Return the list of traditional classifiers for ensemble training."""
+    return [
+        RandomForestClassifier(
+            n_estimators=300,
+            max_depth=6,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+        ExtraTreesClassifier(
+            n_estimators=300,
+            max_depth=6,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+        GradientBoostingClassifier(
+            n_estimators=150,
+            max_depth=3,
+            learning_rate=0.1,
+            random_state=42,
+        ),
+        SVC(
+            kernel="rbf", C=1.0, gamma="scale", class_weight="balanced", random_state=42
+        ),
+        SVC(
+            kernel="rbf",
+            C=10.0,
+            gamma="scale",
+            class_weight="balanced",
+            random_state=42,
+        ),
+        LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
+    ]
+
+
 def train_model_ensemble(
     train_features: np.ndarray,
     test_features: np.ndarray,
@@ -364,137 +388,39 @@ def train_model_ensemble(
     predictions = []
     accuracies = []
 
-    rf_pred, rf_acc = train_random_forest(
-        train_features, test_features, train_labels, test_labels
-    )
-    predictions.append(rf_pred)
-    accuracies.append(rf_acc)
-
-    et_pred, et_acc = train_extra_trees(
-        train_features, test_features, train_labels, test_labels
-    )
-    predictions.append(et_pred)
-    accuracies.append(et_acc)
-
-    gb_pred, gb_acc = train_gradient_boosting(
-        train_features, test_features, train_labels, test_labels
-    )
-    predictions.append(gb_pred)
-    accuracies.append(gb_acc)
-
-    for C in [1.0, 10.0]:
-        svm_pred, svm_acc = train_svm(
-            train_features, test_features, train_labels, test_labels, C
-        )
-        predictions.append(svm_pred)
-        accuracies.append(svm_acc)
-
-    lda_result = train_lda(train_features, test_features, train_labels, test_labels)
-    if lda_result is not None:
-        lda_pred, lda_acc = lda_result
-        predictions.append(lda_pred)
-        accuracies.append(lda_acc)
+    for clf in _traditional_classifiers():
+        try:
+            pred, acc = _fit_predict(
+                clf, train_features, test_features, train_labels, test_labels
+            )
+            predictions.append(pred)
+            accuracies.append(acc)
+        except Exception:
+            pass
 
     return {"predictions": predictions, "accuracies": accuracies}
 
 
-def train_random_forest(
-    train_features: np.ndarray,
-    test_features: np.ndarray,
-    train_labels: np.ndarray,
-    test_labels: np.ndarray,
-) -> tuple[np.ndarray, float]:
-    """Train Random Forest classifier."""
-    rf = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=6,
-        min_samples_leaf=2,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    rf.fit(train_features, train_labels)
-    prediction = rf.predict(test_features)
-    accuracy = np.mean(prediction == test_labels)
-    return prediction, accuracy
-
-
-def train_extra_trees(
-    train_features: np.ndarray,
-    test_features: np.ndarray,
-    train_labels: np.ndarray,
-    test_labels: np.ndarray,
-) -> tuple[np.ndarray, float]:
-    """Train Extra Trees classifier."""
-    et = ExtraTreesClassifier(
-        n_estimators=300,
-        max_depth=6,
-        min_samples_leaf=2,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    et.fit(train_features, train_labels)
-    prediction = et.predict(test_features)
-    accuracy = np.mean(prediction == test_labels)
-    return prediction, accuracy
-
-
-def train_gradient_boosting(
-    train_features: np.ndarray,
-    test_features: np.ndarray,
-    train_labels: np.ndarray,
-    test_labels: np.ndarray,
-) -> tuple[np.ndarray, float]:
-    """Train Gradient Boosting classifier."""
-    gb = GradientBoostingClassifier(
-        n_estimators=150,
-        max_depth=3,
-        learning_rate=0.1,
-        random_state=42,
-    )
-    gb.fit(train_features, train_labels)
-    prediction = gb.predict(test_features)
-    accuracy = np.mean(prediction == test_labels)
-    return prediction, accuracy
-
-
-def train_svm(
-    train_features: np.ndarray,
-    test_features: np.ndarray,
-    train_labels: np.ndarray,
-    test_labels: np.ndarray,
-    C: float,
-) -> tuple[np.ndarray, float]:
-    """Train SVM classifier."""
-    svm = SVC(
-        kernel="rbf",
-        C=C,
-        gamma="scale",
-        class_weight="balanced",
-        random_state=42,
-    )
-    svm.fit(train_features, train_labels)
-    prediction = svm.predict(test_features)
-    accuracy = np.mean(prediction == test_labels)
-    return prediction, accuracy
-
-
-def train_lda(
-    train_features: np.ndarray,
-    test_features: np.ndarray,
-    train_labels: np.ndarray,
-    test_labels: np.ndarray,
-) -> tuple[np.ndarray, float] | None:
-    """Train LDA classifier."""
-    try:
-        lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-        lda.fit(train_features, train_labels)
-        prediction = lda.predict(test_features)
-        accuracy = np.mean(prediction == test_labels)
-        return prediction, accuracy
-    except Exception:
-        return None
+def _combined_classifiers() -> list:
+    """Return classifiers for combined feature training."""
+    return [
+        ExtraTreesClassifier(
+            n_estimators=400,
+            max_depth=8,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+        RandomForestClassifier(
+            n_estimators=400,
+            max_depth=8,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        ),
+    ]
 
 
 def train_combined_models(
@@ -515,40 +441,20 @@ def train_combined_models(
 
     train_combined = np.hstack([train_scaled, riemannian_train])
     test_combined = np.hstack([test_scaled, riemannian_test])
+    num_features = train_combined.shape[1]
 
-    for feature_percentage in [0.4, 0.6, 0.8]:
-        num_features = train_combined.shape[1]
-        k_features = max(20, int(feature_percentage * num_features))
-
+    for pct in [0.4, 0.6, 0.8]:
+        k_features = max(20, int(pct * num_features))
         selector = SelectKBest(f_classif, k=k_features)
         train_selected = selector.fit_transform(train_combined, train_labels)
         test_selected = selector.transform(test_combined)
 
-        et = ExtraTreesClassifier(
-            n_estimators=400,
-            max_depth=8,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1,
-        )
-        et.fit(train_selected, train_labels)
-        prediction = et.predict(test_selected)
-        predictions.append(prediction)
-        accuracies.append(np.mean(prediction == test_labels))
-
-        rf = RandomForestClassifier(
-            n_estimators=400,
-            max_depth=8,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=-1,
-        )
-        rf.fit(train_selected, train_labels)
-        prediction = rf.predict(test_selected)
-        predictions.append(prediction)
-        accuracies.append(np.mean(prediction == test_labels))
+        for clf in _combined_classifiers():
+            pred, acc = _fit_predict(
+                clf, train_selected, test_selected, train_labels, test_labels
+            )
+            predictions.append(pred)
+            accuracies.append(acc)
 
     return {"predictions": predictions, "accuracies": accuracies}
 
