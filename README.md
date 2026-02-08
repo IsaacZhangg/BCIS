@@ -2,7 +2,7 @@
 
 A brain-computer interface (BCI) system that classifies left vs right hand motor imagery from EEG signals. Designed for real-time control of a robotic 6th finger, where **left imagery = finger down** and **right imagery = finger up**.
 
-Built on a four-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-space**, **FBCSP + SVM (RBF)**, and **LDA+SVM Ensemble** — with adaptive amplitude-based artifact rejection and Surface Laplacian spatial filtering. The pipeline evaluates all four classifiers per subject and selects the best one. Evaluated with within-subject 10-fold stratified cross-validation.
+Built on a four-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-space**, **FBCSP + SVM (RBF)**, and **LDA+SVM Ensemble** — with adaptive amplitude-based artifact rejection and Surface Laplacian spatial filtering. The pipeline uses **nested model-selection CV** to select the best classifier per subject without selection bias, and supports optional held-out evaluation and cross-session validation.
 
 ## Table of Contents
 
@@ -25,24 +25,24 @@ Built on a four-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-sp
 
 ## Results
 
-**61.2% best-of mean accuracy** across 10 subjects (within-subject 10-fold stratified CV, best of four classifiers per subject).
+**59.2% nested selection mean accuracy** (unbiased) across 10 subjects, with 61.3% best-of mean (optimistic, for reference). Evaluated with within-subject nested model-selection CV: outer 10-fold selects the best classifier per fold via inner 5-fold CV, eliminating post-hoc selection bias.
 
 3 of 10 subjects show above-chance classification (>=60%). This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
 
-| Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Best | Status |
-|---------|-----------|---------|-----|----------|------|--------|
-| subject0001 | **56.2%** | 50.7% | 55.1% | 55.1% | **56.2%** | chance |
-| subject0002 | 41.0% | **52.9%** | 41.1% | 42.1% | **52.9%** | chance |
-| subject0004 | 37.8% | 33.6% | **45.9%** | 38.7% | **45.9%** | chance |
-| subject0005 | **55.0%** | 44.9% | 48.3% | 48.4% | **55.0%** | chance |
-| subject0006 | **92.0%** | 38.0% | 88.0% | 91.0% | **92.0%** | signal |
-| subject0007 | 58.0% | 46.0% | 56.0% | **59.0%** | **59.0%** | chance |
-| subject0008 | 59.4% | 47.9% | 59.2% | **59.4%** | **59.4%** | chance |
-| subject0009 | 47.1% | **55.1%** | 50.6% | 49.4% | **55.1%** | chance |
-| subject0010 | 70.1% | 72.1% | 74.2% | **75.3%** | **75.3%** | signal |
-| subject0011 | 54.7% | **60.8%** | 53.8% | 52.2% | **60.8%** | signal |
+| Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Best (optimistic) | Nested (unbiased) | Selected | Status |
+|---------|-----------|---------|-----|----------|-------------------|-------------------|----------|--------|
+| subject0001 | 56.2% | 50.7% | 55.1% | 56.2% | 56.2% | **54.0%** | FBCSP | chance |
+| subject0002 | 41.0% | 52.9% | 41.1% | 42.1% | 52.9% | **44.6%** | Riemann | chance |
+| subject0004 | 37.8% | 33.6% | 45.9% | 42.9% | 45.9% | **44.8%** | SVM | chance |
+| subject0005 | 55.0% | 44.9% | 48.3% | 47.3% | 55.0% | **50.6%** | SVM | chance |
+| subject0006 | 92.0% | 38.0% | 88.0% | 90.0% | 92.0% | **90.0%** | FBCSP | signal |
+| subject0007 | 58.0% | 46.0% | 56.0% | 59.0% | 59.0% | **58.0%** | Ensemble | chance |
+| subject0008 | 59.4% | 47.9% | 59.2% | 59.4% | 59.4% | **59.4%** | FBCSP | chance |
+| subject0009 | 47.1% | 55.1% | 50.6% | 49.6% | 55.1% | **55.4%** | Riemann | chance |
+| subject0010 | 70.1% | 72.1% | 74.2% | 76.3% | 76.3% | **74.2%** | FBCSP | signal |
+| subject0011 | 54.7% | 60.8% | 53.8% | 53.5% | 60.8% | **61.1%** | Riemann | signal |
 
-Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~42-59%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on subjects 0002, 0009, and 0011. The Ensemble (LDA+SVM soft voting) wins for subjects 0007, 0008, and 0010 where averaging predictions improves stability.
+Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~42-59%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on subjects 0002, 0009, and 0011. The nested CV selects the classifier method per subject without the inflated accuracy of post-hoc selection.
 
 ## Hardware
 
@@ -78,8 +78,9 @@ CSV files (8 channels, 250 Hz, Unicorn headset)
   │                         → SelectKBest(k=10) → SVC(RBF)
   │                      4. Ensemble: LDA + SVM soft voting
   │
-  └─ pipeline.py ────── Orchestrates everything, runs all four classifiers,
-                         saves best model per subject
+  └─ pipeline.py ────── Orchestrates everything, runs all four classifiers
+                         + nested model-selection CV, optional held-out split,
+                         cross-session detection, saves models per subject
 ```
 
 ## Architecture
@@ -167,7 +168,7 @@ Computed in `src/train.py` during the training loop (fitted per fold to avoid da
 
 **Module**: `src/train.py`
 
-Four classifiers are evaluated per subject. The best per-subject classifier is selected for deployment.
+Four classifiers are evaluated per subject. The best per-subject classifier is selected via **nested model-selection CV** (inner 5-fold selects, outer 10-fold evaluates) to avoid selection bias.
 
 #### Classifier 1: FBCSP + LDA
 
@@ -210,9 +211,9 @@ Per-subject, per-fold pipeline (10-fold stratified CV):
 
 Riemannian is excluded from the ensemble because its lower overall accuracy (50.2%) drags down the vote.
 
-**Evaluation**: 10-fold stratified cross-validation per subject for all four classifiers. CSP models are re-fitted on each fold's training set to prevent information leakage.
+**Evaluation**: 10-fold stratified cross-validation per subject for all four classifiers individually, plus nested model-selection CV for unbiased best-of-4 estimation. CSP models are re-fitted on each fold's training set to prevent information leakage. The pipeline also supports optional held-out evaluation (`holdout_fraction` parameter) and cross-session validation for subjects with multiple recordings.
 
-**Deployment models**: After CV evaluation, the best-scoring classifier is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA, FBCSP+SVM, and Ensemble models contain the full inference pipeline (CSP models, feature selector, scaler, classifier). Riemannian models contain a single sklearn Pipeline. Ensemble winners are saved as their LDA component for deployment.
+**Deployment models**: After CV evaluation, the classifier selected by nested CV is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA, FBCSP+SVM, and Ensemble models contain the full inference pipeline (CSP models, feature selector, scaler, classifier). Riemannian models contain a single sklearn Pipeline. Ensemble winners are saved as their LDA component for deployment.
 
 ## Project Structure
 
@@ -220,8 +221,8 @@ Riemannian is excluded from the ensemble because its lower overall accuracy (50.
 BCIS/
 ├── src/
 │   ├── __init__.py
-│   ├── pipeline.py          # Main pipeline orchestrator (entry point)
-│   ├── train.py              # FBCSP+LDA & Riemannian training, CV, inference
+│   ├── pipeline.py          # Main pipeline orchestrator (entry point, held-out, cross-session)
+│   ├── train.py              # FBCSP+LDA & Riemannian training, nested CV, cross-session eval
 │   ├── data_loader.py        # CSV loading, event parsing
 │   ├── preprocess.py         # Bandpass + notch filtering, CAR, ASR
 │   ├── epochs.py             # Epoch extraction + adaptive artifact rejection
@@ -276,15 +277,23 @@ unicorn-data/
 
 ### Run the full pipeline
 
-Loads data, preprocesses, extracts features, runs 10-fold CV per subject, trains final models, and saves results:
+Loads data, preprocesses, extracts features, runs 10-fold CV per subject (including nested model-selection CV), trains final models, and saves results:
 
 ```bash
+# Default mode (no held-out split, backward compatible)
 uv run python -m src.pipeline
+
+# With held-out evaluation (20% of trials reserved as independent test set)
+uv run python -c "
+from pathlib import Path
+from src.pipeline import run_pipeline
+run_pipeline(Path('unicorn-data'), Path('models'), holdout_fraction=0.2)
+"
 ```
 
 Output:
 - Per-subject `.joblib` models in `models/`
-- `models/training_results.json` with accuracy metrics
+- `models/training_results.json` with accuracy metrics (includes both optimistic and unbiased scores)
 
 ### Use a trained model for inference
 
@@ -370,12 +379,12 @@ uv run pytest tests/ -v
 uv run pytest tests/test_train.py -v
 ```
 
-**Test coverage** (48 tests):
+**Test coverage** (52 tests):
 - `test_data_loader.py` -- CSV parsing, event extraction, complete recording discovery
 - `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline, CAR common-mode removal, ASR artifact cleaning
 - `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end), artifact rejection (amplitude, flat signal, adaptive outlier, gradient, HF power, criteria disable)
 - `test_features.py` -- Feature dimensions (39 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
-- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip; Ensemble CV scores, leakage check
+- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip; Ensemble CV scores, leakage check; Nested model-selection CV scores, leakage check; Cross-session evaluate scores, leakage check
 
 ## Dependencies
 

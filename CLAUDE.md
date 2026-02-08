@@ -38,7 +38,10 @@ CSV files (8ch, 250Hz Unicorn headset)
       2. Riemannian: Covariances(OAS) → TangentSpace(riemann) → LogisticRegression
       3. FBCSP + SVM: same FBCSP features → SelectKBest(k=10) → StandardScaler → SVC(RBF)
       4. Ensemble: soft voting (LDA + SVM probability averaging)
-  → pipeline.py: orchestrates the above, runs all four classifiers, saves best per subject
+  → train.py (nested CV): nested model-selection CV picks best classifier
+                          per outer fold (unbiased); cross-session evaluate
+  → pipeline.py: orchestrates the above, optional held-out split,
+                  cross-session detection, saves models using nested CV selection
 ```
 
 **Event encoding**: stim value = `phase * 10 + movement` (phase 3 only; movement 1=left, 2=right). Each complete recording has exactly 100 phase-3 trials (50 left, 50 right).
@@ -50,6 +53,12 @@ CSV files (8ch, 250Hz Unicorn headset)
 **FBCSP + SVM pipeline**: `train.py` provides an FBCSP + SVM(RBF) classifier — same FBCSP + handcrafted feature pipeline as LDA but with SVC(kernel='rbf', C=1.0, gamma='scale') and fixed k=10. Tests nonlinear decision boundaries that LDA misses. Replaces the previous Transfer learning pipeline which averaged below chance (46.9%).
 
 **Ensemble pipeline**: Soft voting between LDA and SVM — averages their predicted probabilities (both use `predict_proba`) and takes argmax. Riemannian is excluded from the ensemble because its lower overall accuracy drags down the vote.
+
+**Nested model-selection CV**: `train.py: train_nested_model_selection_cv()` provides an unbiased estimate of the "best-of-4" strategy. Outer 10-fold loop per subject; inner 5-fold loop evaluates all 4 classifiers on outer-train, picks best, retrains on full outer-train, evaluates on outer-test. Eliminates post-hoc selection bias (61.3% optimistic → 59.2% unbiased). Uses `_evaluate_classifier()` shared helper for all 4 classifiers.
+
+**Cross-session evaluation**: `train.py: cross_session_evaluate()` trains on session A, evaluates on session B (no CV — independent test). Returns per-classifier accuracy. `data_loader.py: get_recordings_by_subject()` groups recordings by subject for detection.
+
+**Held-out split**: `pipeline.py: run_pipeline(holdout_fraction=0.2)` splits epochs before artifact rejection, computes threshold from train only via `epochs.py: compute_rejection_threshold()`, applies to both splits. Default 0.0 preserves existing behavior.
 
 **Artifact rejection**: `epochs.py` uses adaptive amplitude-only rejection: peak-to-peak amplitude via median + 4×MAD threshold, plus flat signal rejection (ptp < 1µV). Gradient and HF power criteria are available but disabled by default — they were found to reject trials containing discriminative motor imagery signal.
 
@@ -68,4 +77,4 @@ EEG recordings live in `unicorn-data/` (gitignored). Structure: `unicorn-data/su
 
 ## Current Status
 
-Four-classifier pipeline (FBCSP+LDA, Riemannian, FBCSP+SVM, Ensemble) with amplitude-only adaptive artifact rejection and Surface Laplacian spatial filtering. 39 handcrafted features (Laplacian-filtered C3/C4 lateralization, ERD, Hjorth, Cz motor area, frontal theta) + 40 FBCSP features, reduced via nested CV SelectKBest for LDA (k from {5,8,10,15,20}) and fixed k=10 for SVM. LDA uses class priors estimated from training fold. Best-of mean accuracy 61.2% across 10 subjects, 3 above chance (>=60%). The pipeline selects the best of four classifiers per subject. Signal quality remains the bottleneck with the 8-channel consumer-grade Unicorn headset. Git branch `P3LR` with PR base `P3P5`.
+Four-classifier pipeline (FBCSP+LDA, Riemannian, FBCSP+SVM, Ensemble) with nested model-selection CV, optional held-out split, and cross-session evaluation infrastructure. Amplitude-only adaptive artifact rejection and Surface Laplacian spatial filtering. 39 handcrafted features (Laplacian-filtered C3/C4 lateralization, ERD, Hjorth, Cz motor area, frontal theta) + 40 FBCSP features, reduced via nested CV SelectKBest for LDA (k from {5,8,10,15,20}) and fixed k=10 for SVM. LDA uses class priors estimated from training fold. Nested selection mean accuracy 59.2% (unbiased) across 10 subjects, 3 above chance (>=60%). Best-of mean 61.3% (optimistic, shown for reference). The pipeline uses nested CV to select the best classifier per subject, eliminating post-hoc selection bias. Signal quality remains the bottleneck with the 8-channel consumer-grade Unicorn headset. Git branch `P3LR` with PR base `P3P5`.
