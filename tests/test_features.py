@@ -138,10 +138,10 @@ def test_extract_lateralization_features_expected_count():
     features = extract_lateralization_features(epoch_pairs_by_channel, sfreq)
 
     # Expected feature count breakdown:
-    # - 4 bands x 7 features per band = 28 (lateralization features for C3/C4)
+    # - 4 bands x 7 features per band = 28 (Laplacian C3/C4 lateralization)
     # - 2 bands x 2 features per band = 4 (Cz features: mu and beta)
     # - 1 feature (Fz theta ratio)
-    # - 2 channels x 3 Hjorth params = 6 (C3 and C4 time-domain features)
+    # - 2 channels x 3 Hjorth params = 6 (Laplacian C3/C4 time-domain)
     # Total = 28 + 4 + 1 + 6 = 39
     expected_feature_count = 39
     assert features.shape == (n_epochs, expected_feature_count)
@@ -152,7 +152,7 @@ def test_extract_lateralization_features_missing_channels():
     sfreq = 250.0
     n_epochs = 2
 
-    # Missing C4, Fz, PO7, PO8 channels
+    # Missing C4, Fz, PO7, PO8, Pz channels
     epoch_pairs_by_channel = {
         ch: [(np.random.randn(250), np.random.randn(375)) for _ in range(n_epochs)]
         for ch in ["C3", "Cz"]

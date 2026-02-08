@@ -143,8 +143,38 @@ def train_within_subject_cv(
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
-            k = min(k_best, X_train_combined.shape[1])
-            selector = SelectKBest(f_classif, k=k)
+            # Class priors from training fold
+            classes, counts = np.unique(y_train, return_counts=True)
+            priors = counts / counts.sum()
+
+            # Nested CV to select k_best
+            best_k = min(k_best, X_train_combined.shape[1])
+            best_inner_score = -1.0
+            inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+            for k_candidate in [5, 8, 10, 15, 20]:
+                k_actual = min(k_candidate, X_train_combined.shape[1])
+                inner_scores = []
+                for inner_train, inner_val in inner_cv.split(X_train_combined, y_train):
+                    sel = SelectKBest(f_classif, k=k_actual)
+                    X_it = sel.fit_transform(
+                        X_train_combined[inner_train], y_train[inner_train]
+                    )
+                    X_iv = sel.transform(X_train_combined[inner_val])
+                    sc = StandardScaler()
+                    X_it = sc.fit_transform(X_it)
+                    X_iv = sc.transform(X_iv)
+                    clf = LinearDiscriminantAnalysis(
+                        solver="lsqr", shrinkage="auto", priors=priors
+                    )
+                    clf.fit(X_it, y_train[inner_train])
+                    inner_scores.append(clf.score(X_iv, y_train[inner_val]))
+                mean_inner = float(np.mean(inner_scores))
+                if mean_inner > best_inner_score:
+                    best_inner_score = mean_inner
+                    best_k = k_actual
+
+            selector = SelectKBest(f_classif, k=best_k)
             X_train_sel = selector.fit_transform(X_train_combined, y_train)
             X_test_sel = selector.transform(X_test_combined)
 
@@ -152,7 +182,9 @@ def train_within_subject_cv(
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+            lda = LinearDiscriminantAnalysis(
+                solver="lsqr", shrinkage="auto", priors=priors
+            )
             lda.fit(X_train_scaled, y_train)
             fold_scores.append(lda.score(X_test_scaled, y_test))
 
@@ -233,18 +265,21 @@ def predict(
 def train_within_subject_cv_riemann(
     X_by_subject: list[np.ndarray],
     y_by_subject: list[np.ndarray],
+    sfreq: float = 250.0,
     n_folds: int = 10,
 ) -> tuple[list[float], float, float]:
     """Within-subject stratified k-fold CV using Riemannian tangent-space classifier.
 
     Per fold:
-    1. Covariances(estimator='oas') — shrinkage covariance estimation
-    2. TangentSpace(metric='riemann') — project SPD matrices to tangent space
-    3. LogisticRegression(C=1.0, solver='lbfgs') — classify
+    1. Bandpass filter 8-30Hz (mu/beta bands)
+    2. Covariances(estimator='oas') — shrinkage covariance estimation
+    3. TangentSpace(metric='riemann') — project SPD matrices to tangent space
+    4. LogisticRegression(C=1.0, solver='lbfgs') — classify
 
     Args:
         X_by_subject: List of multichannel EEG arrays (n_trials, n_channels, n_samples).
         y_by_subject: List of label arrays per subject.
+        sfreq: Sampling frequency in Hz.
         n_folds: Number of CV folds.
 
     Returns:
@@ -280,11 +315,12 @@ def train_within_subject_cv_riemann(
 def train_final_model_riemann(
     X_multichannel: np.ndarray,
     y: np.ndarray,
+    sfreq: float = 250.0,
 ) -> dict:
     """Train a deployable Riemannian model on all data for a single subject.
 
     Returns:
-        Dict with key 'pipeline' containing the fitted sklearn Pipeline.
+        Dict with keys 'pipeline', 'sfreq'.
     """
     pipe = make_pipeline(
         Covariances(estimator="oas"),
@@ -292,7 +328,7 @@ def train_final_model_riemann(
         LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
     )
     pipe.fit(X_multichannel, y)
-    return {"pipeline": pipe}
+    return {"pipeline": pipe, "sfreq": sfreq}
 
 
 # ---------------------------------------------------------------------------
@@ -419,3 +455,90 @@ def predict_riemann(
         Predicted class labels.
     """
     return model["pipeline"].predict(X_multichannel)
+
+
+# ---------------------------------------------------------------------------
+# Soft-voting ensemble (FBCSP+LDA + Riemannian + FBCSP+SVM)
+# ---------------------------------------------------------------------------
+
+
+def train_within_subject_cv_ensemble(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    sfreq: float = 250.0,
+    n_folds: int = 10,
+) -> tuple[list[float], float, float]:
+    """Within-subject CV using soft-voting ensemble of FBCSP+LDA and FBCSP+SVM.
+
+    Per fold, trains both FBCSP classifiers on the same features, averages
+    their predicted probabilities, and picks the argmax class.  Uses only
+    LDA + SVM since they provide genuine diversity (linear vs nonlinear)
+    on the same FBCSP feature space.
+
+    Args:
+        X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
+        y_by_subject: List of label arrays per subject.
+        sfreq: Sampling frequency in Hz.
+        n_folds: Number of CV folds.
+
+    Returns:
+        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
+    """
+    scores = []
+
+    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
+        n_samples = len(y)
+        actual_folds = min(n_folds, n_samples // 2)
+        if actual_folds < 2:
+            actual_folds = n_samples
+
+        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+        fold_scores = []
+
+        for train_idx, test_idx in skf.split(X_features, y):
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # --- Shared FBCSP features ---
+            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+                X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
+            )
+            X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
+            X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
+
+            k = min(10, X_train_combined.shape[1])
+            selector = SelectKBest(f_classif, k=k)
+            X_train_sel = selector.fit_transform(X_train_combined, y_train)
+            X_test_sel = selector.transform(X_test_combined)
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train_sel)
+            X_test_scaled = scaler.transform(X_test_sel)
+
+            # --- Classifier 1: LDA ---
+            classes, counts = np.unique(y_train, return_counts=True)
+            priors = counts / counts.sum()
+            lda = LinearDiscriminantAnalysis(
+                solver="lsqr", shrinkage="auto", priors=priors
+            )
+            lda.fit(X_train_scaled, y_train)
+            proba_lda = lda.predict_proba(X_test_scaled)
+
+            # --- Classifier 2: SVM ---
+            svm = SVC(kernel="rbf", C=1.0, gamma="scale", probability=True)
+            svm.fit(X_train_scaled, y_train)
+            proba_svm = svm.predict_proba(X_test_scaled)
+
+            # --- Soft voting (LDA + SVM) ---
+            avg_proba = (proba_lda + proba_svm) / 2
+            preds = np.argmax(avg_proba, axis=1)
+
+            # Map predictions back to original class labels
+            classes_sorted = lda.classes_
+            preds_labels = classes_sorted[preds]
+
+            fold_scores.append(float(np.mean(preds_labels == y_test)))
+
+        scores.append(float(np.mean(fold_scores)))
+
+    mean_acc = float(np.mean(scores))
+    std_acc = float(np.std(scores))
+    return scores, mean_acc, std_acc

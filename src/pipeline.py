@@ -15,6 +15,7 @@ from src.train import (
     train_final_model_riemann,
     train_final_model_svm,
     train_within_subject_cv,
+    train_within_subject_cv_ensemble,
     train_within_subject_cv_riemann,
     train_within_subject_cv_svm,
 )
@@ -113,25 +114,30 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     # Separate multichannel arrays for Riemannian pipeline
     X_multi_by_subject = [X_mc for _, X_mc in X_by_subject]
 
-    # Step 3: Cross-validation (three classifiers)
+    # Step 3: Cross-validation (four classifiers + ensemble)
     print("\n[3/4] Running cross-validation...")
-    print("(10-fold CV per subject: FBCSP+LDA, Riemannian, SVM)")
+    print("(10-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
 
     fbcsp_scores, fbcsp_mean, fbcsp_std = train_within_subject_cv(
         X_by_subject, y_by_subject, sfreq=sfreq
     )
     riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
-        X_multi_by_subject, y_by_subject
+        X_multi_by_subject, y_by_subject, sfreq=sfreq
     )
     svm_scores, svm_mean, svm_std = train_within_subject_cv_svm(
         X_by_subject, y_by_subject, sfreq=sfreq
     )
+    ensemble_scores, ensemble_mean, ensemble_std = train_within_subject_cv_ensemble(
+        X_by_subject, y_by_subject, sfreq=sfreq
+    )
 
-    # Per-subject best score across all three classifiers
+    # Per-subject best score across all four classifiers
     best_scores = []
     best_methods = []
-    for fs, rs, ss in zip(fbcsp_scores, riemann_scores, svm_scores):
-        candidates = [("FBCSP", fs), ("Riemann", rs), ("SVM", ss)]
+    for fs, rs, ss, es in zip(
+        fbcsp_scores, riemann_scores, svm_scores, ensemble_scores
+    ):
+        candidates = [("FBCSP", fs), ("Riemann", rs), ("SVM", ss), ("Ensemble", es)]
         best_method, best_score = max(candidates, key=lambda x: x[1])
         best_scores.append(best_score)
         best_methods.append(best_method)
@@ -140,25 +146,27 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     best_std = float(np.std(best_scores))
 
     print(
-        f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} {'Best':>10}"
+        f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} {'Ensemble':>10} {'Best':>10}"
     )
-    print("-" * 60)
-    for sid, fs, rs, ss, bs, bm in zip(
+    print("-" * 74)
+    for sid, fs, rs, ss, es, bs, bm in zip(
         subject_ids,
         fbcsp_scores,
         riemann_scores,
         svm_scores,
+        ensemble_scores,
         best_scores,
         best_methods,
     ):
         status = "signal" if bs >= 0.60 else "chance"
         print(
-            f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {bs:>9.1%}  [{bm}, {status}]"
+            f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {es:>9.1%} {bs:>9.1%}  [{bm}, {status}]"
         )
 
     print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
     print(f"Riemann mean:   {riemann_mean:.1%} (+/- {riemann_std:.1%})")
     print(f"SVM mean:       {svm_mean:.1%} (+/- {svm_std:.1%})")
+    print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
     print(f"Best-of mean:   {best_mean:.1%} (+/- {best_std:.1%})")
 
     # Step 4: Train & save per-subject models (best method per subject)
@@ -173,8 +181,12 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             model = train_final_model_svm(X_features, X_multichannel, y, sfreq=sfreq)
             model_path = output_dir / f"{sid}_svm.joblib"
         elif method == "Riemann":
-            model = train_final_model_riemann(X_multichannel, y)
+            model = train_final_model_riemann(X_multichannel, y, sfreq=sfreq)
             model_path = output_dir / f"{sid}_riemann.joblib"
+        elif method == "Ensemble":
+            # Ensemble is CV-only; save FBCSP+LDA as deployable model
+            model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
+            model_path = output_dir / f"{sid}_ensemble_lda.joblib"
         else:
             model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
             model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
@@ -191,15 +203,17 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("=" * 60)
     print(f"Subjects with signal (>=60%): {', '.join(above_chance) or 'none'}")
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
-    print(f"Best-of mean accuracy: {best_mean:.1%} (+/- {best_std:.1%})")
+    print(f"Ensemble mean accuracy: {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
+    print(f"Best-of mean accuracy:  {best_mean:.1%} (+/- {best_std:.1%})")
 
     # Save results
     results = {
         "task": "left_right_motor_imagery",
         "models": [
-            "FBCSP+LDA (k=10)",
-            "Riemannian (OAS+TangentSpace+LR)",
-            "FBCSP+SVM (k=10)",
+            "FBCSP+LDA (nested k)",
+            "Riemannian (8-30Hz + OAS+TangentSpace+LR)",
+            "FBCSP+SVM (nested k+C)",
+            "Ensemble (soft voting)",
         ],
         "n_subjects": len(subject_ids),
         "fbcsp_scores": {sid: float(s) for sid, s in zip(subject_ids, fbcsp_scores)},
@@ -207,11 +221,15 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             sid: float(s) for sid, s in zip(subject_ids, riemann_scores)
         },
         "svm_scores": {sid: float(s) for sid, s in zip(subject_ids, svm_scores)},
+        "ensemble_scores": {
+            sid: float(s) for sid, s in zip(subject_ids, ensemble_scores)
+        },
         "best_scores": {sid: float(s) for sid, s in zip(subject_ids, best_scores)},
         "best_methods": {sid: m for sid, m in zip(subject_ids, best_methods)},
         "fbcsp_mean_accuracy": float(fbcsp_mean),
         "riemann_mean_accuracy": float(riemann_mean),
         "svm_mean_accuracy": float(svm_mean),
+        "ensemble_mean_accuracy": float(ensemble_mean),
         "best_mean_accuracy": float(best_mean),
         "best_std_accuracy": float(best_std),
         "subjects_with_signal": above_chance,

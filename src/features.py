@@ -206,10 +206,10 @@ def extract_lateralization_features(
         Feature array of shape (n_epochs, n_features)
 
     Raises:
-        ValueError: If required channels (C3, C4, Cz, Fz) are missing from input
+        ValueError: If required channels (C3, C4, Cz, Fz, Pz, PO7, PO8) are missing from input
     """
     # Validate required channels exist
-    required_channels = {"C3", "C4", "Cz", "Fz"}
+    required_channels = {"C3", "C4", "Cz", "Fz", "Pz", "PO7", "PO8"}
     available_channels = set(epoch_pairs_by_channel.keys())
     missing_channels = required_channels - available_channels
     if missing_channels:
@@ -233,44 +233,58 @@ def extract_lateralization_features(
     for epoch_idx in range(n_epochs):
         epoch_features = []
 
-        # Get C3 and C4 signals for this epoch
+        # Get raw channel signals for this epoch
         c3_baseline, c3_task = epoch_pairs_by_channel["C3"][epoch_idx]
         c4_baseline, c4_task = epoch_pairs_by_channel["C4"][epoch_idx]
+        cz_baseline, cz_task = epoch_pairs_by_channel["Cz"][epoch_idx]
+        fz_baseline, fz_task_sig = epoch_pairs_by_channel["Fz"][epoch_idx]
+        po7_baseline, po7_task = epoch_pairs_by_channel["PO7"][epoch_idx]
+        pz_baseline, pz_task = epoch_pairs_by_channel["Pz"][epoch_idx]
+        po8_baseline, po8_task = epoch_pairs_by_channel["PO8"][epoch_idx]
 
-        # PRIMARY: Lateralization features (C3 vs C4)
-        for _band_name, (low, high) in bands.items():
-            # Compute powers once per band (avoids redundant Welch calls)
-            c3_bp = compute_band_power(c3_baseline, sfreq, low, high)
-            c3_tp = compute_band_power(c3_task, sfreq, low, high)
-            c4_bp = compute_band_power(c4_baseline, sfreq, low, high)
-            c4_tp = compute_band_power(c4_task, sfreq, low, high)
+        # Surface Laplacian: sharpen spatial resolution for motor cortex channels
+        # C3 neighbors in Unicorn montage: Fz, Cz, PO7
+        # C4 neighbors in Unicorn montage: Cz, Pz, PO8
+        c3_baseline_lap = c3_baseline - (fz_baseline + cz_baseline + po7_baseline) / 3
+        c3_task_lap = c3_task - (fz_task_sig + cz_task + po7_task) / 3
+        c4_baseline_lap = c4_baseline - (cz_baseline + pz_baseline + po8_baseline) / 3
+        c4_task_lap = c4_task - (cz_task + pz_task + po8_task) / 3
 
-            # Lateralization indices: (C4 - C3) / (C4 + C3)
-            lat_task = (c4_tp - c3_tp) / (c4_tp + c3_tp + 1e-10)
-            lat_baseline = (c4_bp - c3_bp) / (c4_bp + c3_bp + 1e-10)
+        # PRIMARY: Lateralization features from Laplacian-filtered C3/C4.
+        # Surface Laplacian sharpens spatial resolution, improving motor cortex
+        # signal separation with the dense Unicorn montage.
+        for c3b, c3t, c4b, c4t in [
+            (c3_baseline_lap, c3_task_lap, c4_baseline_lap, c4_task_lap),
+        ]:
+            for _band_name, (low, high) in bands.items():
+                c3_bp = compute_band_power(c3b, sfreq, low, high)
+                c3_tp = compute_band_power(c3t, sfreq, low, high)
+                c4_bp = compute_band_power(c4b, sfreq, low, high)
+                c4_tp = compute_band_power(c4t, sfreq, low, high)
 
-            # ERD per channel: % power decrease from baseline
-            c3_erd = (c3_bp - c3_tp) / (c3_bp + 1e-10) * 100
-            c4_erd = (c4_bp - c4_tp) / (c4_bp + 1e-10) * 100
+                lat_task = (c4_tp - c3_tp) / (c4_tp + c3_tp + 1e-10)
+                lat_baseline = (c4_bp - c3_bp) / (c4_bp + c3_bp + 1e-10)
 
-            epoch_features.extend(
-                [
-                    lat_task,
-                    lat_baseline,
-                    lat_task - lat_baseline,
-                    c3_erd - c4_erd,
-                    np.log((c3_tp + 1e-10) / (c4_tp + 1e-10)),
-                    c3_erd,
-                    c4_erd,
-                ]
-            )
+                c3_erd = (c3_bp - c3_tp) / (c3_bp + 1e-10) * 100
+                c4_erd = (c4_bp - c4_tp) / (c4_bp + 1e-10) * 100
 
-        # SECONDARY: Cz features (supplementary motor area)
+                epoch_features.extend(
+                    [
+                        lat_task,
+                        lat_baseline,
+                        lat_task - lat_baseline,
+                        c3_erd - c4_erd,
+                        np.log((c3_tp + 1e-10) / (c4_tp + 1e-10)),
+                        c3_erd,
+                        c4_erd,
+                    ]
+                )
+
+        # SECONDARY: Cz features (supplementary motor area, raw signal)
         # Note: Cz uses only mu and beta bands (not all 4 bands like C3/C4) because:
         # - Cz sits over the supplementary motor area, not primary motor cortex
         # - Mu (8-12Hz) captures motor planning activity
         # - Beta (13-30Hz, combined) is sufficient for SMA; splitting into low/high adds noise
-        cz_baseline, cz_task = epoch_pairs_by_channel["Cz"][epoch_idx]
         for band_name, (low, high) in [("mu", (8, 12)), ("beta", (13, 30))]:
             cz_baseline_power = compute_band_power(cz_baseline, sfreq, low, high)
             cz_task_power = compute_band_power(cz_task, sfreq, low, high)
@@ -280,20 +294,19 @@ def extract_lateralization_features(
             epoch_features.append(cz_erd)
             epoch_features.append(np.log(cz_task_power + 1e-10))
 
-        # TERTIARY: Fz theta (attention/effort marker)
+        # TERTIARY: Fz theta (attention/effort marker, raw signal)
         # Note: Fz uses only theta band (4-8Hz) because:
         # - Frontal theta is a well-established marker of cognitive effort and attention
         # - Motor imagery requires attention, and frontal theta increases with task demands
         # - Mu/beta bands at Fz don't reflect motor-specific activity (Fz is frontal, not motor)
-        fz_baseline, fz_task = epoch_pairs_by_channel["Fz"][epoch_idx]
         fz_theta_baseline = compute_band_power(fz_baseline, sfreq, 4, 8)
-        fz_theta_task = compute_band_power(fz_task, sfreq, 4, 8)
+        fz_theta_task = compute_band_power(fz_task_sig, sfreq, 4, 8)
         epoch_features.append(
             np.log((fz_theta_task + 1e-10) / (fz_theta_baseline + 1e-10))
         )
 
-        # Time-domain features from C3 and C4
-        for signal in [c3_task, c4_task]:
+        # Time-domain features from Laplacian-filtered C3 and C4
+        for signal in [c3_task_lap, c4_task_lap]:
             activity, mobility, complexity = compute_hjorth_parameters(signal)
             epoch_features.extend([activity, mobility, complexity])
 

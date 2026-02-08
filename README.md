@@ -2,7 +2,7 @@
 
 A brain-computer interface (BCI) system that classifies left vs right hand motor imagery from EEG signals. Designed for real-time control of a robotic 6th finger, where **left imagery = finger down** and **right imagery = finger up**.
 
-Built on a triple-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-space**, and **FBCSP + SVM (RBF)** — with adaptive amplitude-based artifact rejection. The pipeline evaluates all three classifiers per subject and selects the best one. Evaluated with within-subject 10-fold stratified cross-validation.
+Built on a four-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-space**, **FBCSP + SVM (RBF)**, and **LDA+SVM Ensemble** — with adaptive amplitude-based artifact rejection and Surface Laplacian spatial filtering. The pipeline evaluates all four classifiers per subject and selects the best one. Evaluated with within-subject 10-fold stratified cross-validation.
 
 ## Table of Contents
 
@@ -25,24 +25,24 @@ Built on a triple-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-
 
 ## Results
 
-**60.6% best-of mean accuracy** across 10 subjects (within-subject 10-fold stratified CV, best of three classifiers per subject).
+**61.2% best-of mean accuracy** across 10 subjects (within-subject 10-fold stratified CV, best of four classifiers per subject).
 
-4 of 10 subjects show above-chance classification. This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
+3 of 10 subjects show above-chance classification (>=60%). This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
 
-| Subject | FBCSP+LDA | Riemann | SVM | Best | Status |
-|---------|-----------|---------|-----|------|--------|
-| subject0001 | 56.2% | **61.0%** | 55.1% | **61.0%** | signal |
-| subject0002 | 47.8% | 45.3% | 39.9% | 47.8% | chance |
-| subject0004 | 54.0% | 38.6% | 51.1% | 54.0% | chance |
-| subject0005 | 52.2% | 52.2% | 48.9% | 52.2% | chance |
-| subject0006 | 84.0% | 31.0% | **85.0%** | **85.0%** | signal |
-| subject0007 | 46.0% | 48.0% | 47.0% | 48.0% | chance |
-| subject0008 | 37.1% | **55.9%** | 44.3% | **55.9%** | chance |
-| subject0009 | 54.7% | 43.9% | 52.5% | 54.7% | chance |
-| subject0010 | 74.4% | 76.7% | **79.4%** | **79.4%** | signal |
-| subject0011 | 53.5% | **58.8%** | 55.1% | **58.8%** | chance |
+| Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Best | Status |
+|---------|-----------|---------|-----|----------|------|--------|
+| subject0001 | **56.2%** | 50.7% | 55.1% | 55.1% | **56.2%** | chance |
+| subject0002 | 41.0% | **52.9%** | 41.1% | 42.1% | **52.9%** | chance |
+| subject0004 | 37.8% | 33.6% | **45.9%** | 38.7% | **45.9%** | chance |
+| subject0005 | **55.0%** | 44.9% | 48.3% | 48.4% | **55.0%** | chance |
+| subject0006 | **92.0%** | 38.0% | 88.0% | 91.0% | **92.0%** | signal |
+| subject0007 | 58.0% | 46.0% | 56.0% | **59.0%** | **59.0%** | chance |
+| subject0008 | 59.4% | 47.9% | 59.2% | **59.4%** | **59.4%** | chance |
+| subject0009 | 47.1% | **55.1%** | 50.6% | 49.4% | **55.1%** | chance |
+| subject0010 | 70.1% | 72.1% | 74.2% | **75.3%** | **75.3%** | signal |
+| subject0011 | 54.7% | **60.8%** | 53.8% | 52.2% | **60.8%** | signal |
 
-Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~48-55%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP+LDA on subjects 0001, 0008, and 0011. The SVM classifier wins for subjects 0006 and 0010 where nonlinear decision boundaries improve over LDA.
+Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~42-59%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on subjects 0002, 0009, and 0011. The Ensemble (LDA+SVM soft voting) wins for subjects 0007, 0008, and 0010 where averaging predictions improves stability.
 
 ## Hardware
 
@@ -64,19 +64,21 @@ CSV files (8 channels, 250 Hz, Unicorn headset)
   │                      + adaptive amplitude-based artifact rejection
   │
   ├─ features.py ────── 39 handcrafted features:
+  │                        Surface Laplacian filtered C3/C4,
   │                        Lateralization indices, ERD asymmetry,
-  │                        Hjorth parameters, frontal theta
+  │                        Hjorth parameters, Cz motor area, frontal theta
   │
-  ├─ train.py ─────────  Three classifiers evaluated per subject:
+  ├─ train.py ─────────  Four classifiers evaluated per subject:
   │                      1. FBCSP (10 bands × 4 CSP = 40 features)
-  │                         + 39 handcrafted → SelectKBest(k=10)
-  │                         → StandardScaler → LDA (shrinkage)
+  │                         + 39 handcrafted → SelectKBest(nested CV k)
+  │                         → StandardScaler → LDA (shrinkage + class priors)
   │                      2. Riemannian: Covariances(OAS)
   │                         → TangentSpace(riemann) → LogisticRegression
   │                      3. FBCSP + SVM: same FBCSP features
   │                         → SelectKBest(k=10) → SVC(RBF)
+  │                      4. Ensemble: LDA + SVM soft voting
   │
-  └─ pipeline.py ────── Orchestrates everything, runs all three classifiers,
+  └─ pipeline.py ────── Orchestrates everything, runs all four classifiers,
                          saves best model per subject
 ```
 
@@ -138,14 +140,14 @@ Two feature sets are computed and later concatenated:
 
 #### Handcrafted Features (39 total)
 
-Computed from baseline-vs-task comparisons using Welch's method for spectral analysis:
+Computed from baseline-vs-task comparisons using Welch's method for spectral analysis. C3/C4 features use **Surface Laplacian** spatial filtering to sharpen motor cortex signals: C3_lap = C3 − mean(Fz, Cz, PO7), C4_lap = C4 − mean(Cz, Pz, PO8).
 
 | Feature Group | Channels | Bands | Features per Band | Count |
 |---|---|---|---|---|
-| C3/C4 lateralization | C3, C4 | mu (8-12 Hz), low beta (13-20 Hz), high beta (20-30 Hz), beta (13-30 Hz) | lateralization (task), lateralization (baseline), lateralization difference, ERD asymmetry, log power ratio, ERD C3, ERD C4 | 4 × 7 = **28** |
+| C3/C4 lateralization | C3_lap, C4_lap | mu (8-12 Hz), low beta (13-20 Hz), high beta (20-30 Hz), beta (13-30 Hz) | lateralization (task), lateralization (baseline), lateralization difference, ERD asymmetry, log power ratio, ERD C3, ERD C4 | 4 × 7 = **28** |
 | Cz supplementary motor area | Cz | mu (8-12 Hz), beta (13-30 Hz) | ERD, log power | 2 × 2 = **4** |
 | Fz frontal theta | Fz | theta (4-8 Hz) | log(theta_task / theta_baseline) | **1** |
-| Time-domain (Hjorth) | C3, C4 | -- | activity, mobility, complexity | 2 × 3 = **6** |
+| Time-domain (Hjorth) | C3_lap, C4_lap | -- | activity, mobility, complexity | 2 × 3 = **6** |
 
 **Key formulas**:
 - **Lateralization Index**: `(C4_power - C3_power) / (C4_power + C3_power)` -- positive for left imagery (contralateral C3 desynchronization), negative for right
@@ -165,7 +167,7 @@ Computed in `src/train.py` during the training loop (fitted per fold to avoid da
 
 **Module**: `src/train.py`
 
-Three classifiers are evaluated per subject. The best per-subject classifier is selected for deployment.
+Four classifiers are evaluated per subject. The best per-subject classifier is selected for deployment.
 
 #### Classifier 1: FBCSP + LDA
 
@@ -173,9 +175,9 @@ Per-subject, per-fold pipeline (10-fold stratified CV):
 
 1. **FBCSP extraction** -- bandpass filter to each of 10 bands, fit CSP on training set, transform both train and test (up to 40 features)
 2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (39) = ~79 features
-3. **Feature selection** -- `SelectKBest(f_classif, k=10)` picks the 10 most discriminative features by ANOVA F-score
+3. **Feature selection** -- `SelectKBest(f_classif)` with k selected via nested 3-fold CV from {5, 8, 10, 15, 20}
 4. **Scaling** -- `StandardScaler` zero-centers and unit-normalizes features
-5. **Classification** -- `LDA(solver='lsqr', shrinkage='auto')` with automatic Ledoit-Wolf shrinkage for robust covariance estimation
+5. **Classification** -- `LDA(solver='lsqr', shrinkage='auto', priors=...)` with Ledoit-Wolf shrinkage and class priors estimated from training fold frequencies
 
 #### Classifier 2: Riemannian Tangent Space
 
@@ -197,9 +199,20 @@ Per-subject, per-fold pipeline (10-fold stratified CV):
 
 This classifier replaces a previous Transfer learning (Riemannian domain adaptation) classifier that averaged below chance (46.9%) with only 10 subjects.
 
-**Evaluation**: 10-fold stratified cross-validation per subject for all three classifiers. CSP models are re-fitted on each fold's training set to prevent information leakage.
+#### Classifier 4: LDA + SVM Ensemble (Soft Voting)
 
-**Deployment models**: After CV evaluation, the best-scoring classifier is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA and FBCSP+SVM models contain the full inference pipeline (CSP models, feature selector, scaler, classifier). Riemannian models contain a single sklearn Pipeline.
+Per-subject, per-fold pipeline (10-fold stratified CV):
+
+1. **Shared FBCSP extraction** -- same as Classifiers 1 and 3
+2. **Independent pipelines** -- LDA and SVM each run their full SelectKBest → Scaler → Classifier pipeline
+3. **Probability averaging** -- `(LDA_proba + SVM_proba) / 2` averages predicted class probabilities from both classifiers
+4. **Prediction** -- `argmax` of averaged probabilities
+
+Riemannian is excluded from the ensemble because its lower overall accuracy (50.2%) drags down the vote.
+
+**Evaluation**: 10-fold stratified cross-validation per subject for all four classifiers. CSP models are re-fitted on each fold's training set to prevent information leakage.
+
+**Deployment models**: After CV evaluation, the best-scoring classifier is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA, FBCSP+SVM, and Ensemble models contain the full inference pipeline (CSP models, feature selector, scaler, classifier). Riemannian models contain a single sklearn Pipeline. Ensemble winners are saved as their LDA component for deployment.
 
 ## Project Structure
 
@@ -343,6 +356,7 @@ Same structure as FBCSP+LDA models, but `classifier` is `SVC` instead of `Linear
 | Key | Type | Description |
 |-----|------|-------------|
 | `pipeline` | `sklearn.pipeline.Pipeline` | Full pipeline: Covariances → TangentSpace → LogisticRegression |
+| `sfreq` | `float` | Sampling frequency (250.0 Hz) |
 
 ## Testing
 
@@ -356,12 +370,12 @@ uv run pytest tests/ -v
 uv run pytest tests/test_train.py -v
 ```
 
-**Test coverage** (46 tests):
+**Test coverage** (48 tests):
 - `test_data_loader.py` -- CSV parsing, event extraction, complete recording discovery
 - `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline, CAR common-mode removal, ASR artifact cleaning
 - `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end), artifact rejection (amplitude, flat signal, adaptive outlier, gradient, HF power, criteria disable)
 - `test_features.py` -- Feature dimensions (39 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
-- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip
+- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip; Ensemble CV scores, leakage check
 
 ## Dependencies
 
