@@ -150,6 +150,44 @@ def _compute_hf_power(task: np.ndarray, sfreq: float, low: float, high: float) -
     return float(np.mean(psd[mask]))
 
 
+def compute_rejection_threshold(
+    left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    n_mad: float = 4.0,
+) -> float:
+    """Compute adaptive amplitude rejection threshold without applying it.
+
+    Computes median + n_mad * MAD of peak-to-peak amplitudes across all trials
+    and channels.  Use the returned value as ``threshold_uv`` in
+    :func:`reject_bad_epochs` to apply a pre-computed threshold (e.g. one
+    derived from training data only).
+
+    Args:
+        left_pairs_by_channel: Dict mapping channel names to (baseline, task) pairs for left trials.
+        right_pairs_by_channel: Same for right trials.
+        n_mad: Number of MADs above the median for the threshold.
+
+    Returns:
+        Adaptive threshold in µV.
+    """
+    channels = list(left_pairs_by_channel.keys())
+
+    def _trial_ptps(pairs_by_channel: dict) -> list[float]:
+        n_trials = len(pairs_by_channel[channels[0]])
+        ptps = []
+        for i in range(n_trials):
+            max_ptp = max(float(np.ptp(pairs_by_channel[ch][i][1])) for ch in channels)
+            ptps.append(max_ptp)
+        return ptps
+
+    all_ptps = np.array(
+        _trial_ptps(left_pairs_by_channel) + _trial_ptps(right_pairs_by_channel)
+    )
+    median = float(np.median(all_ptps))
+    mad = float(np.median(np.abs(all_ptps - median)))
+    return median + n_mad * mad
+
+
 def reject_bad_epochs(
     left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],

@@ -3,11 +3,13 @@
 import numpy as np
 
 from src.train import (
+    cross_session_evaluate,
     predict,
     predict_riemann,
     train_final_model,
     train_final_model_riemann,
     train_final_model_svm,
+    train_nested_model_selection_cv,
     train_within_subject_cv,
     train_within_subject_cv_ensemble,
     train_within_subject_cv_riemann,
@@ -247,3 +249,78 @@ def test_ensemble_no_leakage_on_random_data():
     assert mean_acc < 0.70, (
         f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
     )
+
+
+# ---------- Nested model selection CV tests ----------
+
+
+def test_nested_model_selection_cv_returns_scores():
+    """Nested CV returns per-subject scores, mean, std, and method names."""
+    n_subjects = 2
+    X_by_subject = [
+        _make_subject_data(np.random.default_rng(42 + i)) for i in range(n_subjects)
+    ]
+    y_by_subject = [LABELS for _ in range(n_subjects)]
+
+    scores, mean_acc, std_acc, methods = train_nested_model_selection_cv(
+        X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
+    )
+
+    assert len(scores) == n_subjects
+    assert 0 <= mean_acc <= 1
+    assert std_acc >= 0
+    for s in scores:
+        assert 0 <= s <= 1
+    assert len(methods) == n_subjects
+    for m in methods:
+        assert m in {"lda", "riemann", "svm", "ensemble"}
+
+
+def test_nested_model_selection_no_leakage():
+    """On random data, nested model selection CV should stay near chance."""
+    n_subjects = 2
+    rng = np.random.default_rng(123)
+    X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
+    y_by_subject = [LABELS for _ in range(n_subjects)]
+
+    _, mean_acc, _, _ = train_nested_model_selection_cv(
+        X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
+    )
+
+    assert mean_acc < 0.70, (
+        f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
+    )
+
+
+# ---------- Cross-session evaluation tests ----------
+
+
+def test_cross_session_evaluate_returns_all_methods():
+    """cross_session_evaluate returns accuracy for all 4 classifiers."""
+    rng = np.random.default_rng(42)
+    X_feat_a, X_mc_a = _make_subject_data(rng)
+    X_feat_b, X_mc_b = _make_subject_data(rng)
+
+    results = cross_session_evaluate(
+        (X_feat_a, X_mc_a), LABELS, (X_feat_b, X_mc_b), LABELS
+    )
+
+    assert set(results.keys()) == {"lda", "riemann", "svm", "ensemble"}
+    for acc in results.values():
+        assert 0 <= acc <= 1
+
+
+def test_cross_session_no_leakage():
+    """On random data, cross-session accuracy should stay near chance."""
+    rng = np.random.default_rng(123)
+    X_feat_a, X_mc_a = _make_subject_data(rng)
+    X_feat_b, X_mc_b = _make_subject_data(rng)
+
+    results = cross_session_evaluate(
+        (X_feat_a, X_mc_a), LABELS, (X_feat_b, X_mc_b), LABELS
+    )
+
+    for method, acc in results.items():
+        assert acc < 0.70, (
+            f"Cross-session {method} accuracy {acc:.1%} is suspiciously high"
+        )

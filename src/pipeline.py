@@ -6,51 +6,230 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from src.data_loader import CHANNELS, get_complete_recordings, load_recording
-from src.epochs import extract_left_right_epochs, reject_bad_epochs
+from src.data_loader import (
+    CHANNELS,
+    get_complete_recordings,
+    get_recordings_by_subject,
+    load_recording,
+)
+from src.epochs import (
+    compute_rejection_threshold,
+    extract_left_right_epochs,
+    reject_bad_epochs,
+)
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_eeg
 from src.train import (
+    cross_session_evaluate,
     train_final_model,
     train_final_model_riemann,
     train_final_model_svm,
+    train_nested_model_selection_cv,
     train_within_subject_cv,
     train_within_subject_cv_ensemble,
     train_within_subject_cv_riemann,
     train_within_subject_cv_svm,
 )
 
+# Map nested CV method names to pipeline display names
+_NESTED_TO_DISPLAY = {
+    "lda": "FBCSP",
+    "riemann": "Riemann",
+    "svm": "SVM",
+    "ensemble": "Ensemble",
+}
 
-def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
+
+def _task_epochs(
+    pairs_by_ch: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+) -> np.ndarray:
+    """Convert per-channel epoch pairs to (n_trials, n_channels, n_samples)."""
+    return np.array(
+        [[trial[1] for trial in pairs_by_ch[ch]] for ch in CHANNELS]
+    ).transpose(1, 0, 2)
+
+
+def _process_recording(
+    rec_path: Path,
+    sfreq: float,
+    threshold_uv: float | None = None,
+) -> (
+    tuple[
+        dict[str, list[tuple[np.ndarray, np.ndarray]]],
+        dict[str, list[tuple[np.ndarray, np.ndarray]]],
+        int,
+        int,
+        int,
+        int,
+    ]
+    | None
+):
+    """Load, preprocess, epoch, and artifact-reject a single recording.
+
+    Args:
+        rec_path: Path to the recording CSV.
+        sfreq: Sampling frequency in Hz.
+        threshold_uv: Fixed rejection threshold.  When ``None``, adaptive
+            threshold is computed from this recording's data.
+
+    Returns:
+        Tuple of (left_pairs, right_pairs, n_left_raw, n_right_raw,
+        rej_left, rej_right) or ``None`` if nothing remains after rejection.
+    """
+    data, events, _ = load_recording(rec_path)
+
+    left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+    right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+    for ch_idx, ch_name in enumerate(CHANNELS):
+        signal = preprocess_eeg(data[ch_idx], sfreq)
+        left, right = extract_left_right_epochs(
+            signal,
+            events,
+            sfreq,
+            task_duration=1.8,
+            baseline_duration=1.0,
+            skip_duration=0.5,
+        )
+        left_pairs_by_channel[ch_name] = left
+        right_pairs_by_channel[ch_name] = right
+
+    n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
+    n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
+
+    left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = reject_bad_epochs(
+        left_pairs_by_channel,
+        right_pairs_by_channel,
+        threshold_uv=threshold_uv,
+    )
+
+    n_left = len(left_pairs_by_channel[CHANNELS[0]])
+    n_right = len(right_pairs_by_channel[CHANNELS[0]])
+
+    if n_left == 0 or n_right == 0:
+        return None
+
+    return (
+        left_pairs_by_channel,
+        right_pairs_by_channel,
+        n_left_raw,
+        n_right_raw,
+        rej_l,
+        rej_r,
+    )
+
+
+def _split_epoch_pairs(
+    left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    test_fraction: float,
+    random_state: int = 42,
+) -> tuple[
+    dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    dict[str, list[tuple[np.ndarray, np.ndarray]]],
+]:
+    """Stratified split of epoch pairs into train and test before artifact rejection.
+
+    The split is performed on trial indices (same across all channels), so the
+    same trials end up in train/test for every channel.
+
+    Args:
+        left_pairs_by_channel: Left epoch pairs keyed by channel.
+        right_pairs_by_channel: Right epoch pairs keyed by channel.
+        test_fraction: Fraction of trials to hold out (0-1).
+        random_state: RNG seed for reproducibility.
+
+    Returns:
+        (train_left, train_right, test_left, test_right) dicts.
+    """
+    rng = np.random.default_rng(random_state)
+    channels = list(left_pairs_by_channel.keys())
+
+    def _split_indices(n: int) -> tuple[np.ndarray, np.ndarray]:
+        n_test = max(1, int(n * test_fraction))
+        indices = rng.permutation(n)
+        return indices[n_test:], indices[:n_test]
+
+    n_left = len(left_pairs_by_channel[channels[0]])
+    n_right = len(right_pairs_by_channel[channels[0]])
+
+    left_train_idx, left_test_idx = _split_indices(n_left)
+    right_train_idx, right_test_idx = _split_indices(n_right)
+
+    def _select(pairs_by_ch: dict, indices: np.ndarray) -> dict:
+        return {ch: [pairs_by_ch[ch][i] for i in indices] for ch in channels}
+
+    return (
+        _select(left_pairs_by_channel, left_train_idx),
+        _select(right_pairs_by_channel, right_train_idx),
+        _select(left_pairs_by_channel, left_test_idx),
+        _select(right_pairs_by_channel, right_test_idx),
+    )
+
+
+def _pairs_to_features(
+    left_pairs: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    right_pairs: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    sfreq: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert cleaned epoch pairs to feature arrays and labels.
+
+    Returns:
+        (X_features, X_multichannel, y)
+    """
+    n_left = len(left_pairs[CHANNELS[0]])
+    n_right = len(right_pairs[CHANNELS[0]])
+
+    left_features = extract_lateralization_features(left_pairs, sfreq)
+    right_features = extract_lateralization_features(right_pairs, sfreq)
+
+    X_multichannel = np.vstack([_task_epochs(left_pairs), _task_epochs(right_pairs)])
+    X_features = np.vstack([left_features, right_features])
+    y = np.array([0] * n_left + [1] * n_right)
+    return X_features, X_multichannel, y
+
+
+def run_pipeline(
+    data_dir: Path,
+    output_dir: Path,
+    holdout_fraction: float = 0.0,
+) -> dict:
     """Run the full training pipeline for left/right motor imagery classification.
 
     Args:
-        data_dir: Path to unicorn-data directory
-        output_dir: Path to save models and results
+        data_dir: Path to unicorn-data directory.
+        output_dir: Path to save models and results.
+        holdout_fraction: Fraction of trials per subject to hold out as an
+            independent test set (0.0 = disabled, existing behaviour).
+            When > 0, epochs are split *before* artifact rejection.  The
+            rejection threshold is computed from the training portion only
+            and applied to both splits.
 
     Returns:
-        Dictionary with results
+        Dictionary with results.
     """
     print("=" * 60)
     print("Left/Right Motor Imagery Classifier - Training Pipeline")
     print("=" * 60)
 
     # Step 1: Find complete recordings
-    print("\n[1/4] Finding complete recordings...")
+    print("\n[1/5] Finding complete recordings...")
     recordings = get_complete_recordings(data_dir)
     print(f"Found {len(recordings)} complete recordings")
 
+    if holdout_fraction > 0:
+        print(f"  Held-out fraction: {holdout_fraction:.0%}")
+
     # Step 2: Load and preprocess data for each subject
-    print("\n[2/4] Loading and preprocessing data...")
+    print("\n[2/5] Loading and preprocessing data...")
     X_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_by_subject: list[np.ndarray] = []
     subject_ids: list[str] = []
 
-    def _task_epochs(pairs_by_ch):
-        # (n_channels, n_trials, n_samples) -> (n_trials, n_channels, n_samples)
-        return np.array(
-            [[trial[1] for trial in pairs_by_ch[ch]] for ch in CHANNELS]
-        ).transpose(1, 0, 2)
+    # Held-out data (only populated when holdout_fraction > 0)
+    X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
+    y_holdout_by_subject: list[np.ndarray] = []
 
     for rec_path in recordings:
         subject_id = rec_path.parent.parent.name
@@ -58,8 +237,9 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
         data, events, sfreq = load_recording(rec_path)
 
-        left_pairs_by_channel = {}
-        right_pairs_by_channel = {}
+        # Extract epochs per channel (before artifact rejection)
+        left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+        right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
         for ch_idx, ch_name in enumerate(CHANNELS):
             signal = preprocess_eeg(data[ch_idx], sfreq)
             left, right = extract_left_right_epochs(
@@ -76,37 +256,78 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
         n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
 
-        # Artifact rejection
-        left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = reject_bad_epochs(
-            left_pairs_by_channel, right_pairs_by_channel
-        )
+        if holdout_fraction > 0:
+            # Split before artifact rejection
+            train_left, train_right, test_left, test_right = _split_epoch_pairs(
+                left_pairs_by_channel,
+                right_pairs_by_channel,
+                test_fraction=holdout_fraction,
+            )
 
-        n_left = len(left_pairs_by_channel[CHANNELS[0]])
-        n_right = len(right_pairs_by_channel[CHANNELS[0]])
-        print(
-            f"    Epochs: {n_left_raw}L/{n_right_raw}R → "
-            f"rejected {rej_l}L/{rej_r}R → kept {n_left}L/{n_right}R"
-        )
+            # Compute threshold from training data only
+            threshold = compute_rejection_threshold(train_left, train_right)
 
-        if n_left == 0 or n_right == 0:
-            print(f"    Skipping {subject_id} - no epochs after rejection")
-            continue
+            # Apply same threshold to both splits
+            train_left, train_right, rej_l_tr, rej_r_tr = reject_bad_epochs(
+                train_left, train_right, threshold_uv=threshold
+            )
+            test_left, test_right, rej_l_te, rej_r_te = reject_bad_epochs(
+                test_left, test_right, threshold_uv=threshold
+            )
 
-        left_features = extract_lateralization_features(left_pairs_by_channel, sfreq)
-        right_features = extract_lateralization_features(right_pairs_by_channel, sfreq)
+            n_train_l = len(train_left[CHANNELS[0]])
+            n_train_r = len(train_right[CHANNELS[0]])
+            n_test_l = len(test_left[CHANNELS[0]])
+            n_test_r = len(test_right[CHANNELS[0]])
 
-        X_multichannel = np.vstack(
-            [
-                _task_epochs(left_pairs_by_channel),
-                _task_epochs(right_pairs_by_channel),
-            ]
-        )
-        X_features = np.vstack([left_features, right_features])
-        y = np.array([0] * n_left + [1] * n_right)
+            print(
+                f"    Epochs: {n_left_raw}L/{n_right_raw}R → "
+                f"train {n_train_l}L/{n_train_r}R (rej {rej_l_tr}/{rej_r_tr}), "
+                f"holdout {n_test_l}L/{n_test_r}R (rej {rej_l_te}/{rej_r_te})"
+            )
 
-        X_by_subject.append((X_features, X_multichannel))
-        y_by_subject.append(y)
-        subject_ids.append(subject_id)
+            if n_train_l == 0 or n_train_r == 0:
+                print(f"    Skipping {subject_id} - no training epochs after rejection")
+                continue
+
+            X_feat, X_mc, y = _pairs_to_features(train_left, train_right, sfreq)
+            X_by_subject.append((X_feat, X_mc))
+            y_by_subject.append(y)
+            subject_ids.append(subject_id)
+
+            if n_test_l > 0 and n_test_r > 0:
+                X_feat_ho, X_mc_ho, y_ho = _pairs_to_features(
+                    test_left, test_right, sfreq
+                )
+                X_holdout_by_subject.append((X_feat_ho, X_mc_ho))
+                y_holdout_by_subject.append(y_ho)
+            else:
+                # Empty holdout — still track so indices match
+                X_holdout_by_subject.append((np.empty((0, 0)), np.empty((0, 0, 0))))
+                y_holdout_by_subject.append(np.array([]))
+        else:
+            # Original path: no holdout
+            left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = (
+                reject_bad_epochs(left_pairs_by_channel, right_pairs_by_channel)
+            )
+
+            n_left = len(left_pairs_by_channel[CHANNELS[0]])
+            n_right = len(right_pairs_by_channel[CHANNELS[0]])
+            print(
+                f"    Epochs: {n_left_raw}L/{n_right_raw}R → "
+                f"rejected {rej_l}L/{rej_r}R → kept {n_left}L/{n_right}R"
+            )
+
+            if n_left == 0 or n_right == 0:
+                print(f"    Skipping {subject_id} - no epochs after rejection")
+                continue
+
+            X_feat, X_mc, y = _pairs_to_features(
+                left_pairs_by_channel, right_pairs_by_channel, sfreq
+            )
+            X_by_subject.append((X_feat, X_mc))
+            y_by_subject.append(y)
+            subject_ids.append(subject_id)
 
     if not X_by_subject:
         raise ValueError("No valid subjects found")
@@ -114,8 +335,8 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     # Separate multichannel arrays for Riemannian pipeline
     X_multi_by_subject = [X_mc for _, X_mc in X_by_subject]
 
-    # Step 3: Cross-validation (four classifiers + ensemble)
-    print("\n[3/4] Running cross-validation...")
+    # Step 3: Cross-validation (four classifiers + nested model selection)
+    print("\n[3/5] Running cross-validation...")
     print("(10-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
 
     fbcsp_scores, fbcsp_mean, fbcsp_std = train_within_subject_cv(
@@ -131,51 +352,133 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         X_by_subject, y_by_subject, sfreq=sfreq
     )
 
-    # Per-subject best score across all four classifiers
+    # Per-subject best score across all four classifiers (optimistic)
     best_scores = []
-    best_methods = []
+    best_methods_posthoc = []
     for fs, rs, ss, es in zip(
         fbcsp_scores, riemann_scores, svm_scores, ensemble_scores
     ):
         candidates = [("FBCSP", fs), ("Riemann", rs), ("SVM", ss), ("Ensemble", es)]
         best_method, best_score = max(candidates, key=lambda x: x[1])
         best_scores.append(best_score)
-        best_methods.append(best_method)
+        best_methods_posthoc.append(best_method)
 
     best_mean = float(np.mean(best_scores))
     best_std = float(np.std(best_scores))
 
-    print(
-        f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} {'Ensemble':>10} {'Best':>10}"
+    # Nested model selection CV (unbiased)
+    print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
+    nested_scores, nested_mean, nested_std, nested_methods = (
+        train_nested_model_selection_cv(X_by_subject, y_by_subject, sfreq=sfreq)
     )
-    print("-" * 74)
-    for sid, fs, rs, ss, es, bs, bm in zip(
+    # Convert nested method names to display names for model saving
+    nested_methods_display = [_NESTED_TO_DISPLAY[m] for m in nested_methods]
+
+    print(
+        f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} "
+        f"{'Ensemble':>10} {'Best':>10} {'Nested':>10}"
+    )
+    print("-" * 84)
+    for sid, fs, rs, ss, es, bs, bm, ns, nm in zip(
         subject_ids,
         fbcsp_scores,
         riemann_scores,
         svm_scores,
         ensemble_scores,
         best_scores,
-        best_methods,
+        best_methods_posthoc,
+        nested_scores,
+        nested_methods_display,
     ):
-        status = "signal" if bs >= 0.60 else "chance"
+        status = "signal" if ns >= 0.60 else "chance"
         print(
-            f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {es:>9.1%} {bs:>9.1%}  [{bm}, {status}]"
+            f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {es:>9.1%} "
+            f"{bs:>9.1%} {ns:>9.1%}  [{nm}, {status}]"
         )
 
     print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
     print(f"Riemann mean:   {riemann_mean:.1%} (+/- {riemann_std:.1%})")
     print(f"SVM mean:       {svm_mean:.1%} (+/- {svm_std:.1%})")
     print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
-    print(f"Best-of mean:   {best_mean:.1%} (+/- {best_std:.1%})")
+    print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
+    print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
 
-    # Step 4: Train & save per-subject models (best method per subject)
-    print("\n[4/4] Training and saving per-subject models...")
+    # Held-out evaluation (when enabled)
+    holdout_results: dict[str, float] = {}
+    if holdout_fraction > 0 and X_holdout_by_subject:
+        print("\n[3b/5] Evaluating on held-out test sets...")
+        from src.train import _evaluate_classifier
+
+        for i, (sid, (X_feat, X_mc), y_tr) in enumerate(
+            zip(subject_ids, X_by_subject, y_by_subject)
+        ):
+            X_feat_ho, X_mc_ho = X_holdout_by_subject[i]
+            y_ho = y_holdout_by_subject[i]
+            if len(y_ho) == 0:
+                print(f"  {sid}: no held-out trials")
+                continue
+            method_name = nested_methods[i]
+            acc = _evaluate_classifier(
+                method_name,
+                X_feat,
+                X_feat_ho,
+                y_tr,
+                y_ho,
+                X_mc,
+                X_mc_ho,
+                sfreq,
+                k_best=10,
+            )
+            holdout_results[sid] = acc
+            print(
+                f"  {sid}: holdout acc = {acc:.1%} "
+                f"({len(y_ho)} trials, method={nested_methods_display[i]})"
+            )
+
+        if holdout_results:
+            ho_mean = float(np.mean(list(holdout_results.values())))
+            print(f"\n  Held-out mean: {ho_mean:.1%}")
+
+    # Step 4: Cross-session evaluation
+    print("\n[4/5] Cross-session evaluation...")
+    recordings_by_subject = get_recordings_by_subject(data_dir)
+    multi_session_subjects = {
+        sid: paths for sid, paths in recordings_by_subject.items() if len(paths) > 1
+    }
+
+    cross_session_results: dict[str, dict[str, float]] = {}
+    if multi_session_subjects:
+        for sid, paths in multi_session_subjects.items():
+            print(f"  {sid}: {len(paths)} sessions, evaluating cross-session...")
+            # Use first two sessions: train on A, test on B
+            result_a = _process_recording(paths[0], sfreq)
+            result_b = _process_recording(paths[1], sfreq)
+            if result_a is None or result_b is None:
+                print(f"    Skipping {sid} — insufficient epochs in one session")
+                continue
+            left_a, right_a, *_ = result_a
+            left_b, right_b, *_ = result_b
+            X_feat_a, X_mc_a, y_a = _pairs_to_features(left_a, right_a, sfreq)
+            X_feat_b, X_mc_b, y_b = _pairs_to_features(left_b, right_b, sfreq)
+            cs_results = cross_session_evaluate(
+                (X_feat_a, X_mc_a), y_a, (X_feat_b, X_mc_b), y_b, sfreq=sfreq
+            )
+            cross_session_results[sid] = cs_results
+            for method, acc in cs_results.items():
+                print(f"    {method}: {acc:.1%}")
+    else:
+        print(
+            "  WARNING: All subjects have a single recording. "
+            "Cross-session evaluation requires >=2 recordings per subject."
+        )
+
+    # Step 5: Train & save per-subject models (nested CV method)
+    print("\n[5/5] Training and saving per-subject models...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
     for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
-        zip(subject_ids, X_by_subject, y_by_subject, best_methods)
+        zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
     ):
         if method == "SVM":
             model = train_final_model_svm(X_features, X_multichannel, y, sfreq=sfreq)
@@ -195,7 +498,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         print(f"  Saved {model_path} ({method})")
 
     above_chance, at_chance = [], []
-    for sid, s in zip(subject_ids, best_scores):
+    for sid, s in zip(subject_ids, nested_scores):
         (above_chance if s >= 0.60 else at_chance).append(sid)
 
     print("\n" + "=" * 60)
@@ -203,11 +506,14 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("=" * 60)
     print(f"Subjects with signal (>=60%): {', '.join(above_chance) or 'none'}")
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
-    print(f"Ensemble mean accuracy: {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
-    print(f"Best-of mean accuracy:  {best_mean:.1%} (+/- {best_std:.1%})")
+    print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
+    print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
+    if holdout_results:
+        ho_mean = float(np.mean(list(holdout_results.values())))
+        print(f"Held-out mean:                 {ho_mean:.1%}")
 
     # Save results
-    results = {
+    results: dict = {
         "task": "left_right_motor_imagery",
         "models": [
             "FBCSP+LDA (nested k)",
@@ -225,17 +531,32 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             sid: float(s) for sid, s in zip(subject_ids, ensemble_scores)
         },
         "best_scores": {sid: float(s) for sid, s in zip(subject_ids, best_scores)},
-        "best_methods": {sid: m for sid, m in zip(subject_ids, best_methods)},
+        "best_methods_posthoc": {
+            sid: m for sid, m in zip(subject_ids, best_methods_posthoc)
+        },
+        "nested_scores": {sid: float(s) for sid, s in zip(subject_ids, nested_scores)},
+        "nested_methods": {
+            sid: m for sid, m in zip(subject_ids, nested_methods_display)
+        },
         "fbcsp_mean_accuracy": float(fbcsp_mean),
         "riemann_mean_accuracy": float(riemann_mean),
         "svm_mean_accuracy": float(svm_mean),
         "ensemble_mean_accuracy": float(ensemble_mean),
         "best_mean_accuracy": float(best_mean),
         "best_std_accuracy": float(best_std),
+        "nested_mean_accuracy": float(nested_mean),
+        "nested_std_accuracy": float(nested_std),
         "subjects_with_signal": above_chance,
         "subjects_at_chance": at_chance,
         "model_paths": model_paths,
     }
+
+    if holdout_fraction > 0:
+        results["holdout_fraction"] = holdout_fraction
+        results["holdout_scores"] = holdout_results
+
+    if cross_session_results:
+        results["cross_session_results"] = cross_session_results
 
     results_path = output_dir / "training_results.json"
     with open(results_path, "w") as f:

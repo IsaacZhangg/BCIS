@@ -1,5 +1,7 @@
 """Training pipeline: FBCSP + LDA, FBCSP + SVM, and Riemannian classifiers for left/right MI."""
 
+from collections import Counter
+
 import mne
 import numpy as np
 from mne.decoding import CSP
@@ -401,6 +403,248 @@ def train_within_subject_cv_svm(
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
     return scores, mean_acc, std_acc
+
+
+# ---------------------------------------------------------------------------
+# Nested model selection CV (unbiased best-of-4 estimate)
+# ---------------------------------------------------------------------------
+
+
+def _evaluate_classifier(
+    name: str,
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    X_mc_train: np.ndarray,
+    X_mc_test: np.ndarray,
+    sfreq: float,
+    k_best: int,
+) -> float:
+    """Train and score a single classifier on pre-split data.
+
+    Used by :func:`train_nested_model_selection_cv` to evaluate each of the
+    four classifiers inside inner and outer CV folds.
+
+    Args:
+        name: One of 'lda', 'riemann', 'svm', 'ensemble'.
+        X_train: Handcrafted features for training trials.
+        X_test: Handcrafted features for test trials.
+        y_train: Training labels.
+        y_test: Test labels.
+        X_mc_train: Multichannel EEG for training trials.
+        X_mc_test: Multichannel EEG for test trials.
+        sfreq: Sampling frequency in Hz.
+        k_best: Number of features to select for FBCSP-based classifiers.
+
+    Returns:
+        Accuracy on the test split.
+    """
+    if name == "riemann":
+        pipe = make_pipeline(
+            Covariances(estimator="oas"),
+            TangentSpace(metric="riemann"),
+            LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+        )
+        pipe.fit(X_mc_train, y_train)
+        return float(pipe.score(X_mc_test, y_test))
+
+    # FBCSP-based classifiers (lda, svm, ensemble) share feature extraction
+    fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+        X_mc_train, X_mc_test, y_train, sfreq
+    )
+    X_train_combined = np.hstack([fbcsp_train, X_train])
+    X_test_combined = np.hstack([fbcsp_test, X_test])
+
+    k = min(k_best, X_train_combined.shape[1])
+    selector = SelectKBest(f_classif, k=k)
+    X_train_sel = selector.fit_transform(X_train_combined, y_train)
+    X_test_sel = selector.transform(X_test_combined)
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_sel)
+    X_test_scaled = scaler.transform(X_test_sel)
+
+    if name == "lda":
+        classes, counts = np.unique(y_train, return_counts=True)
+        priors = counts / counts.sum()
+        clf = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
+        clf.fit(X_train_scaled, y_train)
+        return float(clf.score(X_test_scaled, y_test))
+
+    if name == "svm":
+        clf = SVC(kernel="rbf", C=1.0, gamma="scale")
+        clf.fit(X_train_scaled, y_train)
+        return float(clf.score(X_test_scaled, y_test))
+
+    # ensemble (lda + svm soft vote)
+    classes, counts = np.unique(y_train, return_counts=True)
+    priors = counts / counts.sum()
+    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
+    lda.fit(X_train_scaled, y_train)
+    proba_lda = lda.predict_proba(X_test_scaled)
+
+    svm = SVC(kernel="rbf", C=1.0, gamma="scale", probability=True)
+    svm.fit(X_train_scaled, y_train)
+    proba_svm = svm.predict_proba(X_test_scaled)
+
+    avg_proba = (proba_lda + proba_svm) / 2
+    preds = lda.classes_[np.argmax(avg_proba, axis=1)]
+    return float(np.mean(preds == y_test))
+
+
+def train_nested_model_selection_cv(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    sfreq: float = 250.0,
+    n_outer_folds: int = 10,
+    n_inner_folds: int = 5,
+    k_best: int = 10,
+) -> tuple[list[float], float, float, list[str]]:
+    """Nested model-selection CV that picks the best classifier per outer fold.
+
+    Outer loop: StratifiedKFold(n_outer_folds) per subject.
+    Inner loop: for each outer fold, evaluate all 4 classifiers via inner CV
+    on the outer-train split, pick the best, retrain on full outer-train, and
+    evaluate on outer-test.
+
+    This gives an unbiased estimate of the "pick the best classifier" strategy
+    because the classifier selection is done inside the CV loop.
+
+    Args:
+        X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
+        y_by_subject: List of label arrays per subject.
+        sfreq: Sampling frequency in Hz.
+        n_outer_folds: Number of outer CV folds.
+        n_inner_folds: Number of inner CV folds for model selection.
+        k_best: Number of features for FBCSP-based classifiers.
+
+    Returns:
+        Tuple of (per_subject_scores, mean, std, per_subject_best_methods).
+        per_subject_best_methods is the most frequent inner-CV winner per subject.
+    """
+    classifier_names = ["lda", "riemann", "svm", "ensemble"]
+    scores = []
+    best_methods = []
+
+    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
+        n_samples = len(y)
+        actual_outer = min(n_outer_folds, n_samples // 2)
+        if actual_outer < 2:
+            actual_outer = n_samples
+
+        outer_cv = StratifiedKFold(n_splits=actual_outer, shuffle=True, random_state=42)
+        fold_scores = []
+        fold_winners = []
+
+        for outer_train_idx, outer_test_idx in outer_cv.split(X_features, y):
+            X_feat_otrain = X_features[outer_train_idx]
+            X_feat_otest = X_features[outer_test_idx]
+            X_mc_otrain = X_multichannel[outer_train_idx]
+            X_mc_otest = X_multichannel[outer_test_idx]
+            y_otrain = y[outer_train_idx]
+            y_otest = y[outer_test_idx]
+
+            # Inner CV: evaluate each classifier on outer-train
+            actual_inner = min(n_inner_folds, len(y_otrain) // 2)
+            if actual_inner < 2:
+                actual_inner = len(y_otrain)
+
+            inner_cv = StratifiedKFold(
+                n_splits=actual_inner, shuffle=True, random_state=42
+            )
+            inner_means: dict[str, float] = {}
+
+            for clf_name in classifier_names:
+                inner_scores = []
+                for inner_train_idx, inner_val_idx in inner_cv.split(
+                    X_feat_otrain, y_otrain
+                ):
+                    score = _evaluate_classifier(
+                        clf_name,
+                        X_feat_otrain[inner_train_idx],
+                        X_feat_otrain[inner_val_idx],
+                        y_otrain[inner_train_idx],
+                        y_otrain[inner_val_idx],
+                        X_mc_otrain[inner_train_idx],
+                        X_mc_otrain[inner_val_idx],
+                        sfreq,
+                        k_best,
+                    )
+                    inner_scores.append(score)
+                inner_means[clf_name] = float(np.mean(inner_scores))
+
+            # Pick best classifier by inner CV
+            best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+
+            # Retrain on full outer-train, evaluate on outer-test
+            outer_score = _evaluate_classifier(
+                best_clf,
+                X_feat_otrain,
+                X_feat_otest,
+                y_otrain,
+                y_otest,
+                X_mc_otrain,
+                X_mc_otest,
+                sfreq,
+                k_best,
+            )
+            fold_scores.append(outer_score)
+            fold_winners.append(best_clf)
+
+        scores.append(float(np.mean(fold_scores)))
+        # Most frequent inner-CV winner across outer folds
+        winner_counts = Counter(fold_winners)
+        best_methods.append(winner_counts.most_common(1)[0][0])
+
+    mean_acc = float(np.mean(scores))
+    std_acc = float(np.std(scores))
+    return scores, mean_acc, std_acc, best_methods
+
+
+# ---------------------------------------------------------------------------
+# Cross-session evaluation
+# ---------------------------------------------------------------------------
+
+
+def cross_session_evaluate(
+    train_data: tuple[np.ndarray, np.ndarray],
+    train_labels: np.ndarray,
+    test_data: tuple[np.ndarray, np.ndarray],
+    test_labels: np.ndarray,
+    sfreq: float = 250.0,
+    k_best: int = 10,
+) -> dict[str, float]:
+    """Train on one session, evaluate on another (no CV — independent test set).
+
+    Args:
+        train_data: (handcrafted_features, multichannel_eeg) from session A.
+        train_labels: Labels from session A.
+        test_data: (handcrafted_features, multichannel_eeg) from session B.
+        test_labels: Labels from session B.
+        sfreq: Sampling frequency in Hz.
+        k_best: Number of features for FBCSP-based classifiers.
+
+    Returns:
+        Dict mapping classifier name to accuracy on session B.
+    """
+    X_feat_train, X_mc_train = train_data
+    X_feat_test, X_mc_test = test_data
+
+    results = {}
+    for name in ["lda", "riemann", "svm", "ensemble"]:
+        results[name] = _evaluate_classifier(
+            name,
+            X_feat_train,
+            X_feat_test,
+            train_labels,
+            test_labels,
+            X_mc_train,
+            X_mc_test,
+            sfreq,
+            k_best,
+        )
+    return results
 
 
 def train_final_model_svm(

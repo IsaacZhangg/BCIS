@@ -1,5 +1,7 @@
 """Load and parse Unicorn EEG recordings."""
 
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -56,3 +58,22 @@ def get_complete_recordings(data_dir: Path) -> list[Path]:
         if phase3_count == 100:
             complete.append(csv_path)
     return complete
+
+
+def get_recordings_by_subject(data_dir: Path) -> dict[str, list[Path]]:
+    """Group complete recordings by subject ID.
+
+    Calls :func:`get_complete_recordings` and groups the resulting paths by
+    their parent subject directory name (e.g. ``"subject0001"``).
+
+    Args:
+        data_dir: Path to unicorn-data directory.
+
+    Returns:
+        Dict mapping subject ID strings to lists of recording paths.
+    """
+    grouped: dict[str, list[Path]] = defaultdict(list)
+    for rec_path in get_complete_recordings(data_dir):
+        subject_id = rec_path.parent.parent.name
+        grouped[subject_id].append(rec_path)
+    return dict(grouped)
