@@ -4,43 +4,45 @@ A brain-computer interface system that classifies left vs right hand motor image
 
 ## Results
 
-**87.6% mean accuracy** (within-subject 10-fold CV across 10 subjects, target: 90%)
+**57.2% mean accuracy** (within-subject 10-fold CV across 10 subjects using FBCSP + LDA)
 
-| Subject | Accuracy |
-|---------|----------|
-| subject0001 | 89% |
-| subject0002 | 83% |
-| subject0004 | 83% |
-| subject0005 | 84% |
-| subject0006 | **98%** |
-| subject0007 | 86% |
-| subject0008 | 86% |
-| subject0009 | 86% |
-| subject0010 | **95%** |
-| subject0011 | 86% |
+Only 2 of 10 subjects show above-chance signal — this is expected given consumer-grade EEG hardware and varying subject aptitude for motor imagery.
+
+| Subject | Accuracy | Status |
+|---------|----------|--------|
+| subject0001 | 54% | chance |
+| subject0002 | 51% | chance |
+| subject0004 | 42% | chance |
+| subject0005 | 45% | chance |
+| subject0006 | **88%** | signal |
+| subject0007 | 54% | chance |
+| subject0008 | 57% | chance |
+| subject0009 | 42% | chance |
+| subject0010 | **82%** | signal |
+| subject0011 | 57% | chance |
 
 ## How It Works
 
 1. **Data loading** - Parses Unicorn EEG headset recordings (8 channels, 250 Hz) from CSV files
 2. **Preprocessing** - Bandpass filter (1-40 Hz) and 60 Hz notch filter
-3. **Epoch extraction** - Extracts paired baseline (1.0s) and task (1.5s) windows around motor imagery events
-4. **Feature extraction** - Computes lateralization indices (C3 vs C4 power asymmetry) across mu (8-12 Hz) and beta (13-30 Hz) bands, plus CSP spatial filters, Hjorth parameters, and frontal theta
-5. **Classification** - Ensemble of 40+ classifiers (Filter-Bank CSP, Riemannian geometry, LDA, Random Forest) with multiple aggregation strategies; best ensemble selected per subject
+3. **Epoch extraction** - Extracts paired baseline (1.0s) and task (1.8s) windows around motor imagery events
+4. **Feature extraction** - FBCSP (Filter-Bank CSP across 10 frequency bands, 4 components each = 40 features) + 39 handcrafted features (lateralization indices, ERD asymmetry, Hjorth parameters, frontal theta)
+5. **Feature selection** - SelectKBest (f_classif, k=20) picks the most discriminative features
+6. **Classification** - LDA with automatic shrinkage (per-subject models)
 
 ## Project Structure
 
 ```
 src/
   pipeline.py      # Main pipeline orchestrator
-  train.py         # Training & cross-validation
+  train.py         # FBCSP + LDA training & cross-validation
   data_loader.py   # EEG CSV loading & event parsing
   preprocess.py    # Signal filtering
   epochs.py        # Epoch extraction
   features.py      # Feature computation
 tests/             # pytest test suite
-models/            # Trained model & scaler (joblib)
+models/            # Per-subject trained models (joblib)
 unicorn-data/      # EEG recordings (not in repo)
-docs/plans/        # Design & implementation docs
 ```
 
 ## Setup
@@ -67,7 +69,6 @@ uv run pytest tests/ -v
 
 ## Key Dependencies
 
-- **MNE-Python** - EEG signal processing
-- **pyRiemann** - Riemannian geometry classifiers
-- **scikit-learn** - ML classifiers, cross-validation, scaling
+- **MNE-Python** - EEG signal processing and CSP implementation
+- **scikit-learn** - LDA classifier, feature selection, cross-validation, scaling
 - **NumPy / SciPy / pandas** - Numerical computing and data handling

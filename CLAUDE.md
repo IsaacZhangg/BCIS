@@ -30,15 +30,15 @@ This is a left/right motor imagery BCI classifier for controlling a robotic 6th 
 CSV files (8ch, 250Hz Unicorn headset)
   → data_loader.py: parse recordings, extract events
   → preprocess.py: bandpass (1-40Hz) + notch (60Hz) filtering via MNE
-  → epochs.py: extract paired baseline (1.0s) / task (1.5s) windows from phase-3 imagery events
-  → features.py: lateralization indices (C3 vs C4), CSP, Hjorth params, frontal theta
-  → train.py: 40+ classifier ensemble with multiple aggregation strategies
-  → pipeline.py: orchestrates the above, runs within-subject 10-fold CV, saves model
+  → epochs.py: extract paired baseline (1.0s) / task (1.8s) windows from phase-3 imagery events
+  → features.py: lateralization indices (C3 vs C4), CSP, Hjorth params, frontal theta (39 features)
+  → train.py: FBCSP (10 bands × 4 CSP components = 40 features) + handcrafted features → SelectKBest(k=20) → StandardScaler → LDA
+  → pipeline.py: orchestrates the above, runs within-subject 10-fold CV, saves per-subject models
 ```
 
 **Event encoding**: stim value = `phase * 10 + movement` (phase 3 only; movement 1=left, 2=right). Each complete recording has exactly 100 phase-3 trials (50 left, 50 right).
 
-**Ensemble approach**: `train.py` builds 40+ classifiers per fold (Filter-Bank CSP, Riemannian geometry via pyRiemann, SVM variants, Random Forest, LDA, Gradient Boosting, MLP, k-NN) and aggregates their predicted probabilities via simple mean with threshold 0.5. No test-set oracle selection. The final saved model is an LGBMClassifier trained on handcrafted features from `features.py`, with a separate `train_final_model_cv()` providing an honest CV estimate for that specific model.
+**FBCSP + LDA pipeline**: `train.py` uses Filter-Bank CSP across 10 frequency bands [(4,8), (8,10), ..., (30,40)] with 4 CSP components each, producing up to 40 spatial features. These are concatenated with 39 handcrafted features from `features.py`, reduced to 20 via SelectKBest(f_classif), scaled, and classified with shrinkage LDA. Per-subject models are saved as `models/{subject_id}_fbcsp_lda.joblib`.
 
 **Key channels**: C3 and C4 (motor cortex, primary discriminative pair), Cz (supplementary motor area), Fz (frontal theta/attention).
 
@@ -48,4 +48,4 @@ EEG recordings live in `unicorn-data/` (gitignored). Structure: `unicorn-data/su
 
 ## Current Status
 
-Data leakage fix applied: removed oracle selection (max over ~25 aggregation strategies evaluated on test set) and replaced with simple probability mean. Reported accuracy will be lower but reflects true generalization. Pipeline now reports both ensemble CV accuracy and LGBMClassifier CV accuracy. Git branch `P3LR` with PR base `P3P5`.
+Consolidated from a 40+ classifier ensemble + separate LGBM to a single clean FBCSP + LDA pipeline. Only 2/10 subjects (subject0006: 88%, subject0010: 82%) show above-chance accuracy; the other 8 are at chance level (~42-57%). Mean accuracy: 57.2%. This is honest reporting — signal quality varies by subject with consumer-grade EEG. Git branch `P3LR` with PR base `P3P5`.
