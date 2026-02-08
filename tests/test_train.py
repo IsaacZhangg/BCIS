@@ -1,17 +1,16 @@
-"""Tests for FBCSP + LDA training pipeline."""
+"""Tests for FBCSP + LDA, FBCSP + SVM, and Riemannian training pipelines."""
 
 import numpy as np
 
 from src.train import (
     predict,
     predict_riemann,
-    predict_transfer,
     train_final_model,
     train_final_model_riemann,
-    train_final_model_transfer,
-    train_transfer_cv,
+    train_final_model_svm,
     train_within_subject_cv,
     train_within_subject_cv_riemann,
+    train_within_subject_cv_svm,
 )
 
 N_EPOCHS = 40
@@ -148,22 +147,19 @@ def test_riemann_final_model_and_predict():
     assert set(np.unique(preds)).issubset({0, 1})
 
 
-# ---------- Transfer learning classifier tests ----------
+# ---------- FBCSP + SVM classifier tests ----------
 
 
-def test_transfer_cv_returns_scores():
-    """Transfer CV returns per-subject scores with correct shape and range."""
+def test_svm_cv_returns_scores():
+    """SVM CV returns per-subject scores with correct shape and range."""
     n_subjects = 3
-    rng = np.random.default_rng(42)
     X_by_subject = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
+        _make_subject_data(np.random.default_rng(42 + i)) for i in range(n_subjects)
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
-    subject_ids = [f"sub{i:04d}" for i in range(n_subjects)]
 
-    scores, mean_acc, std_acc = train_transfer_cv(
-        X_by_subject, y_by_subject, subject_ids, n_folds=5
+    scores, mean_acc, std_acc = train_within_subject_cv_svm(
+        X_by_subject, y_by_subject, n_folds=5
     )
 
     assert len(scores) == n_subjects
@@ -173,43 +169,40 @@ def test_transfer_cv_returns_scores():
         assert 0 <= s <= 1
 
 
-def test_transfer_no_leakage():
-    """On pure random data, transfer accuracy should be near chance (~50%)."""
-    n_subjects = 3
+def test_svm_no_leakage_on_random_data():
+    """On pure random data, FBCSP + SVM accuracy should be near chance (~50%)."""
+    n_subjects = 2
     rng = np.random.default_rng(123)
-    X_by_subject = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
-    ]
+    X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
-    subject_ids = [f"sub{i:04d}" for i in range(n_subjects)]
 
-    _, mean_acc, _ = train_transfer_cv(
-        X_by_subject, y_by_subject, subject_ids, n_folds=5
-    )
+    _, mean_acc, _ = train_within_subject_cv_svm(X_by_subject, y_by_subject, n_folds=5)
 
     assert mean_acc < 0.70, (
         f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
     )
 
 
-def test_transfer_final_model_predict():
-    """Round-trip: train a transfer model, then predict with it."""
-    n_subjects = 3
+def test_svm_final_model_and_predict():
+    """Round-trip: train an SVM model, then predict with it."""
     rng = np.random.default_rng(42)
-    X_all = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
-    ]
-    y_all = [LABELS for _ in range(n_subjects)]
-    subject_ids = [f"sub{i:04d}" for i in range(n_subjects)]
+    X_features, X_multichannel = _make_subject_data(rng)
 
-    model = train_final_model_transfer(X_all, y_all, subject_ids, target_idx=0)
-    assert "cov_estimator" in model
-    assert "tlc" in model
-    assert "ts" in model
-    assert "classifier" in model
+    model = train_final_model_svm(X_features, X_multichannel, LABELS)
 
-    preds = predict_transfer(model, X_all[0])
+    assert set(model.keys()) == {
+        "csp_models",
+        "selector",
+        "scaler",
+        "classifier",
+        "sfreq",
+        "k_best",
+    }
+    assert model["sfreq"] == 250.0
+    assert isinstance(model["k_best"], int)
+    assert model["k_best"] > 0
+
+    # predict() works with SVM models since SVC has .predict()
+    preds = predict(model, X_features, X_multichannel)
     assert preds.shape == (N_EPOCHS,)
     assert set(np.unique(preds)).issubset({0, 1})

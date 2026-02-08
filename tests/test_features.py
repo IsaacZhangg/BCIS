@@ -142,14 +142,8 @@ def test_extract_lateralization_features_expected_count():
     # - 2 bands x 2 features per band = 4 (Cz features: mu and beta)
     # - 1 feature (Fz theta ratio)
     # - 2 channels x 3 Hjorth params = 6 (C3 and C4 time-domain features)
-    # - 2 channels x 2 bands spectral entropy = 4
-    # - 2 channels peak frequency in mu = 2
-    # - C3-C4 coherence in mu + beta = 2
-    # - PO7/PO8 lateralization (2 bands x 2 features) = 4
-    # - C3 band power ratios = 2
-    # - 2 channels x 3 statistical features = 6
-    # Total = 28 + 4 + 1 + 6 + 4 + 2 + 2 + 4 + 2 + 6 = 59
-    expected_feature_count = 59
+    # Total = 28 + 4 + 1 + 6 = 39
+    expected_feature_count = 39
     assert features.shape == (n_epochs, expected_feature_count)
 
 

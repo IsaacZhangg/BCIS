@@ -209,7 +209,7 @@ def extract_lateralization_features(
         ValueError: If required channels (C3, C4, Cz, Fz) are missing from input
     """
     # Validate required channels exist
-    required_channels = {"C3", "C4", "Cz", "Fz", "PO7", "PO8"}
+    required_channels = {"C3", "C4", "Cz", "Fz"}
     available_channels = set(epoch_pairs_by_channel.keys())
     missing_channels = required_channels - available_channels
     if missing_channels:
@@ -296,41 +296,6 @@ def extract_lateralization_features(
         for signal in [c3_task, c4_task]:
             activity, mobility, complexity = compute_hjorth_parameters(signal)
             epoch_features.extend([activity, mobility, complexity])
-
-        # --- NEW: Spectral entropy for C3/C4 in mu and beta (4 features) ---
-        for sig, _name in [(c3_task, "C3"), (c4_task, "C4")]:
-            epoch_features.append(compute_spectral_entropy(sig, sfreq, 8, 12))
-            epoch_features.append(compute_spectral_entropy(sig, sfreq, 13, 30))
-
-        # --- NEW: Peak frequency for C3/C4 in mu band (2 features) ---
-        epoch_features.append(compute_peak_frequency(c3_task, sfreq, 8, 12))
-        epoch_features.append(compute_peak_frequency(c4_task, sfreq, 8, 12))
-
-        # --- NEW: C3-C4 coherence in mu and beta (2 features) ---
-        epoch_features.append(compute_c3c4_coherence(c3_task, c4_task, sfreq, 8, 12))
-        epoch_features.append(compute_c3c4_coherence(c3_task, c4_task, sfreq, 13, 30))
-
-        # --- NEW: Posterior lateralization (PO7/PO8) (4 features) ---
-        po7_task = epoch_pairs_by_channel["PO7"][epoch_idx][1]
-        po8_task = epoch_pairs_by_channel["PO8"][epoch_idx][1]
-        for low, high in [(8, 12), (13, 30)]:
-            po7_power = compute_band_power(po7_task, sfreq, low, high)
-            po8_power = compute_band_power(po8_task, sfreq, low, high)
-            lat_po = (po8_power - po7_power) / (po8_power + po7_power + 1e-10)
-            epoch_features.append(lat_po)
-            epoch_features.append(np.log(po7_power + po8_power + 1e-10))
-
-        # --- NEW: Band power ratios for C3 (2 features) ---
-        c3_theta = compute_band_power(c3_task, sfreq, 4, 8)
-        c3_mu = compute_band_power(c3_task, sfreq, 8, 12)
-        c3_beta = compute_band_power(c3_task, sfreq, 13, 30)
-        epoch_features.append(np.log((c3_mu + 1e-10) / (c3_theta + 1e-10)))
-        epoch_features.append(np.log((c3_beta + 1e-10) / (c3_mu + 1e-10)))
-
-        # --- NEW: Statistical features for C3/C4 (6 features) ---
-        for sig in [c3_task, c4_task]:
-            sk, ku, zcr = compute_statistical_features(sig)
-            epoch_features.extend([sk, ku, zcr])
 
         all_features.append(epoch_features)
 
