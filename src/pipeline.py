@@ -13,6 +13,8 @@ from src.preprocess import preprocess_eeg
 from src.train import (
     train_final_model,
     train_final_model_riemann,
+    train_final_model_transfer,
+    train_transfer_cv,
     train_within_subject_cv,
     train_within_subject_cv_riemann,
 )
@@ -75,7 +77,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
 
         # Artifact rejection
         left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = reject_bad_epochs(
-            left_pairs_by_channel, right_pairs_by_channel
+            left_pairs_by_channel, right_pairs_by_channel, sfreq=sfreq
         )
 
         n_left = len(left_pairs_by_channel[CHANNELS[0]])
@@ -111,9 +113,9 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     # Separate multichannel arrays for Riemannian pipeline
     X_multi_by_subject = [X_mc for _, X_mc in X_by_subject]
 
-    # Step 3: Within-Subject Cross-validation (both classifiers)
-    print("\n[3/4] Running within-subject cross-validation...")
-    print("(10-fold CV per subject, FBCSP+LDA and Riemannian)")
+    # Step 3: Cross-validation (three classifiers)
+    print("\n[3/4] Running cross-validation...")
+    print("(10-fold CV per subject: FBCSP+LDA, Riemannian, Transfer)")
 
     fbcsp_scores, fbcsp_mean, fbcsp_std = train_within_subject_cv(
         X_by_subject, y_by_subject, sfreq=sfreq
@@ -121,31 +123,42 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
         X_multi_by_subject, y_by_subject
     )
+    transfer_scores, transfer_mean, transfer_std = train_transfer_cv(
+        X_multi_by_subject, y_by_subject, subject_ids
+    )
 
-    # Per-subject best score
+    # Per-subject best score across all three classifiers
     best_scores = []
     best_methods = []
-    for fs, rs in zip(fbcsp_scores, riemann_scores):
-        if rs >= fs:
-            best_scores.append(rs)
-            best_methods.append("Riemann")
-        else:
-            best_scores.append(fs)
-            best_methods.append("FBCSP")
+    for fs, rs, ts in zip(fbcsp_scores, riemann_scores, transfer_scores):
+        candidates = [("FBCSP", fs), ("Riemann", rs), ("Transfer", ts)]
+        best_method, best_score = max(candidates, key=lambda x: x[1])
+        best_scores.append(best_score)
+        best_methods.append(best_method)
 
     best_mean = float(np.mean(best_scores))
     best_std = float(np.std(best_scores))
 
-    print(f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'Best':>10}")
-    print("-" * 48)
-    for sid, fs, rs, bs, bm in zip(
-        subject_ids, fbcsp_scores, riemann_scores, best_scores, best_methods
+    print(
+        f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'Transfer':>10} {'Best':>10}"
+    )
+    print("-" * 60)
+    for sid, fs, rs, ts, bs, bm in zip(
+        subject_ids,
+        fbcsp_scores,
+        riemann_scores,
+        transfer_scores,
+        best_scores,
+        best_methods,
     ):
         status = "signal" if bs >= 0.60 else "chance"
-        print(f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {bs:>9.1%}  [{bm}, {status}]")
+        print(
+            f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ts:>9.1%} {bs:>9.1%}  [{bm}, {status}]"
+        )
 
     print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
     print(f"Riemann mean:   {riemann_mean:.1%} (+/- {riemann_std:.1%})")
+    print(f"Transfer mean:  {transfer_mean:.1%} (+/- {transfer_std:.1%})")
     print(f"Best-of mean:   {best_mean:.1%} (+/- {best_std:.1%})")
 
     # Step 4: Train & save per-subject models (best method per subject)
@@ -153,10 +166,15 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
-    for sid, (X_features, X_multichannel), y, method in zip(
-        subject_ids, X_by_subject, y_by_subject, best_methods
+    for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
+        zip(subject_ids, X_by_subject, y_by_subject, best_methods)
     ):
-        if method == "Riemann":
+        if method == "Transfer":
+            model = train_final_model_transfer(
+                X_multi_by_subject, y_by_subject, subject_ids, target_idx=i
+            )
+            model_path = output_dir / f"{sid}_transfer.joblib"
+        elif method == "Riemann":
             model = train_final_model_riemann(X_multichannel, y)
             model_path = output_dir / f"{sid}_riemann.joblib"
         else:
@@ -180,16 +198,24 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     # Save results
     results = {
         "task": "left_right_motor_imagery",
-        "models": ["FBCSP+LDA (k=10)", "Riemannian (OAS+TangentSpace+LR)"],
+        "models": [
+            "FBCSP+LDA (k=15)",
+            "Riemannian (OAS+TangentSpace+LR)",
+            "Transfer (TLCenter+TangentSpace+LR)",
+        ],
         "n_subjects": len(subject_ids),
         "fbcsp_scores": {sid: float(s) for sid, s in zip(subject_ids, fbcsp_scores)},
         "riemann_scores": {
             sid: float(s) for sid, s in zip(subject_ids, riemann_scores)
         },
+        "transfer_scores": {
+            sid: float(s) for sid, s in zip(subject_ids, transfer_scores)
+        },
         "best_scores": {sid: float(s) for sid, s in zip(subject_ids, best_scores)},
         "best_methods": {sid: m for sid, m in zip(subject_ids, best_methods)},
         "fbcsp_mean_accuracy": float(fbcsp_mean),
         "riemann_mean_accuracy": float(riemann_mean),
+        "transfer_mean_accuracy": float(transfer_mean),
         "best_mean_accuracy": float(best_mean),
         "best_std_accuracy": float(best_std),
         "subjects_with_signal": above_chance,

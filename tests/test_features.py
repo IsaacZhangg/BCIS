@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from src.features import (
+    compute_c3c4_coherence,
     compute_lateralization_index,
+    compute_peak_frequency,
+    compute_spectral_entropy,
+    compute_statistical_features,
     compute_theta_power,
     extract_csp_features,
     extract_features,
@@ -138,8 +142,14 @@ def test_extract_lateralization_features_expected_count():
     # - 2 bands x 2 features per band = 4 (Cz features: mu and beta)
     # - 1 feature (Fz theta ratio)
     # - 2 channels x 3 Hjorth params = 6 (C3 and C4 time-domain features)
-    # Total = 28 + 4 + 1 + 6 = 39
-    expected_feature_count = 39
+    # - 2 channels x 2 bands spectral entropy = 4
+    # - 2 channels peak frequency in mu = 2
+    # - C3-C4 coherence in mu + beta = 2
+    # - PO7/PO8 lateralization (2 bands x 2 features) = 4
+    # - C3 band power ratios = 2
+    # - 2 channels x 3 statistical features = 6
+    # Total = 28 + 4 + 1 + 6 + 4 + 2 + 2 + 4 + 2 + 6 = 59
+    expected_feature_count = 59
     assert features.shape == (n_epochs, expected_feature_count)
 
 
@@ -148,7 +158,7 @@ def test_extract_lateralization_features_missing_channels():
     sfreq = 250.0
     n_epochs = 2
 
-    # Missing C4 and Fz channels
+    # Missing C4, Fz, PO7, PO8 channels
     epoch_pairs_by_channel = {
         ch: [(np.random.randn(250), np.random.randn(375)) for _ in range(n_epochs)]
         for ch in ["C3", "Cz"]
@@ -174,3 +184,56 @@ def test_extract_csp_features_correct_shape():
     # Should return (n_epochs, n_components) features
     assert features.shape == (n_epochs, 4)
     assert csp_model is not None
+
+
+# ---------- New feature function tests ----------
+
+
+def test_spectral_entropy_normalized():
+    """Spectral entropy is in [0, 1] and a sinusoid has lower entropy than noise."""
+    sfreq = 250.0
+    t = np.arange(0, 1.5, 1 / sfreq)
+
+    sinusoid = np.sin(2 * np.pi * 10 * t)
+    noise = np.random.default_rng(42).standard_normal(len(t))
+
+    se_sin = compute_spectral_entropy(sinusoid, sfreq, 8, 12)
+    se_noise = compute_spectral_entropy(noise, sfreq, 8, 12)
+
+    assert 0 <= se_sin <= 1
+    assert 0 <= se_noise <= 1
+    assert se_sin < se_noise
+
+
+def test_peak_frequency_known_peak():
+    """Peak frequency of a 10 Hz sinusoid should be near 10 Hz."""
+    sfreq = 250.0
+    t = np.arange(0, 1.5, 1 / sfreq)
+    signal = np.sin(2 * np.pi * 10 * t)
+
+    pf = compute_peak_frequency(signal, sfreq, 8, 12)
+
+    assert abs(pf - 10.0) < 1.0
+
+
+def test_c3c4_coherence_range():
+    """Identical signals should have coherence near 1.0."""
+    sfreq = 250.0
+    t = np.arange(0, 1.5, 1 / sfreq)
+    signal = np.sin(2 * np.pi * 10 * t)
+
+    coh = compute_c3c4_coherence(signal, signal, sfreq, 8, 12)
+
+    assert 0.9 <= coh <= 1.0
+
+
+def test_statistical_features_gaussian():
+    """Gaussian noise should have skewness ~0 and kurtosis ~0 (Fisher)."""
+    rng = np.random.default_rng(42)
+    signal = rng.standard_normal(10000)
+
+    sk, ku, zcr = compute_statistical_features(signal)
+
+    assert abs(sk) < 0.1
+    assert abs(ku) < 0.2
+    assert 0 < zcr < 1

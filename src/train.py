@@ -100,7 +100,7 @@ def train_within_subject_cv(
     y_by_subject: list[np.ndarray],
     sfreq: float = 250.0,
     n_folds: int = 10,
-    k_best: int = 10,
+    k_best: int = 15,
 ) -> tuple[list[float], float, float]:
     """Within-subject stratified k-fold CV using FBCSP + LDA.
 
@@ -167,7 +167,7 @@ def train_final_model(
     X_multichannel: np.ndarray,
     y: np.ndarray,
     sfreq: float = 250.0,
-    k_best: int = 10,
+    k_best: int = 15,
 ) -> dict:
     """Train a deployable FBCSP + LDA model on all data for a single subject.
 
@@ -292,6 +292,176 @@ def train_final_model_riemann(
     )
     pipe.fit(X_multichannel, y)
     return {"pipeline": pipe}
+
+
+# ---------------------------------------------------------------------------
+# Transfer learning: Riemannian domain adaptation across subjects
+# ---------------------------------------------------------------------------
+
+
+def train_transfer_cv(
+    X_by_subject: list[np.ndarray],
+    y_by_subject: list[np.ndarray],
+    subject_ids: list[str],
+    n_folds: int = 10,
+) -> tuple[list[float], float, float]:
+    """Leave-one-subject-out CV with Riemannian domain adaptation.
+
+    For each target subject, all other subjects serve as source data.
+    Covariances are computed, domains are encoded, and TLCenter re-centers
+    each subject's covariances to identity in Riemannian space before
+    projecting to tangent space and classifying with Logistic Regression.
+
+    Within each target subject, k-fold CV is applied (source data is always
+    fully included in the training set).
+
+    Args:
+        X_by_subject: List of multichannel EEG arrays (n_trials, n_channels, n_samples).
+        y_by_subject: List of label arrays per subject.
+        subject_ids: List of subject identifier strings.
+        n_folds: Number of CV folds within each target subject.
+
+    Returns:
+        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
+    """
+    from pyriemann.transfer import TLCenter, encode_domains
+
+    # Pre-compute covariances per subject
+    cov_estimator = Covariances(estimator="oas")
+    covs_by_subject = [cov_estimator.fit_transform(X) for X in X_by_subject]
+
+    scores = []
+
+    for target_idx in range(len(subject_ids)):
+        target_covs = covs_by_subject[target_idx]
+        target_y = y_by_subject[target_idx]
+        n_target = len(target_y)
+
+        # Pool source subjects
+        source_covs = np.concatenate(
+            [covs_by_subject[j] for j in range(len(subject_ids)) if j != target_idx]
+        )
+        source_y = np.concatenate(
+            [y_by_subject[j] for j in range(len(subject_ids)) if j != target_idx]
+        )
+
+        actual_folds = min(n_folds, n_target // 2)
+        if actual_folds < 2:
+            actual_folds = n_target
+
+        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+        fold_scores = []
+
+        for train_idx, test_idx in skf.split(target_covs, target_y):
+            # Combine source + target train
+            train_covs = np.concatenate([source_covs, target_covs[train_idx]])
+            train_y = np.concatenate([source_y, target_y[train_idx]])
+
+            # Domain labels
+            source_domain = np.array(["source"] * len(source_covs))
+            target_train_domain = np.array(["target"] * len(train_idx))
+            train_domain = np.concatenate([source_domain, target_train_domain])
+
+            test_covs = target_covs[test_idx]
+            test_domain = np.array(["target"] * len(test_idx))
+            test_y = target_y[test_idx]
+
+            # Encode domains
+            X_train_enc, y_train_enc = encode_domains(train_covs, train_y, train_domain)
+            X_test_enc, _y_test_enc = encode_domains(test_covs, test_y, test_domain)
+
+            # Re-center to target domain
+            tlc = TLCenter(target_domain="target")
+            X_train_centered = tlc.fit_transform(X_train_enc, y_train_enc)
+            X_test_centered = tlc.transform(X_test_enc)
+
+            # Tangent space projection
+            ts = TangentSpace(metric="riemann")
+            X_train_ts = ts.fit_transform(X_train_centered)
+            X_test_ts = ts.transform(X_test_centered)
+
+            # Classify with original numeric labels (not encoded domain/label strings)
+            clf = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+            clf.fit(X_train_ts, train_y)
+            fold_scores.append(clf.score(X_test_ts, test_y))
+
+        scores.append(float(np.mean(fold_scores)))
+
+    mean_acc = float(np.mean(scores))
+    std_acc = float(np.std(scores))
+    return scores, mean_acc, std_acc
+
+
+def train_final_model_transfer(
+    X_all: list[np.ndarray],
+    y_all: list[np.ndarray],
+    subject_ids: list[str],
+    target_idx: int,
+) -> dict:
+    """Train a deployable transfer-learning Riemannian model for a target subject.
+
+    Uses all subjects' data (source + target) to fit the pipeline.
+
+    Returns:
+        Dict with keys: cov_estimator, tlc, ts, classifier.
+    """
+    from pyriemann.transfer import TLCenter, encode_domains
+
+    cov_estimator = Covariances(estimator="oas")
+    covs_list = [cov_estimator.fit_transform(X) for X in X_all]
+
+    all_covs = np.concatenate(covs_list)
+    all_y = np.concatenate(y_all)
+    all_domain = np.concatenate(
+        [
+            np.array(["target" if i == target_idx else "source"] * len(y_all[i]))
+            for i in range(len(subject_ids))
+        ]
+    )
+
+    X_enc, y_enc = encode_domains(all_covs, all_y, all_domain)
+
+    tlc = TLCenter(target_domain="target")
+    X_centered = tlc.fit_transform(X_enc, y_enc)
+
+    ts = TangentSpace(metric="riemann")
+    X_ts = ts.fit_transform(X_centered)
+
+    clf = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+    clf.fit(X_ts, all_y)
+
+    return {
+        "cov_estimator": cov_estimator,
+        "tlc": tlc,
+        "ts": ts,
+        "classifier": clf,
+    }
+
+
+def predict_transfer(
+    model: dict,
+    X_multichannel: np.ndarray,
+) -> np.ndarray:
+    """Run inference with a saved transfer-learning model.
+
+    Args:
+        model: Dict returned by train_final_model_transfer.
+        X_multichannel: Multichannel EEG of shape (n_trials, n_channels, n_samples).
+
+    Returns:
+        Predicted class labels.
+    """
+    from pyriemann.transfer import encode_domains
+
+    covs = model["cov_estimator"].transform(X_multichannel)
+    # Encode as target domain for centering
+    dummy_y = np.zeros(len(covs))
+    domain = np.array(["target"] * len(covs))
+    X_enc, _y_enc = encode_domains(covs, dummy_y, domain)
+
+    X_centered = model["tlc"].transform(X_enc)
+    X_ts = model["ts"].transform(X_centered)
+    return model["classifier"].predict(X_ts)
 
 
 def predict_riemann(

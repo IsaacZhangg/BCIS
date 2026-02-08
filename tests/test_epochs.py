@@ -239,3 +239,97 @@ def test_reject_bad_epochs_adaptive_drops_outlier():
     assert rej_l == 1  # only the outlier rejected
     assert rej_r == 0
     assert len(cleaned_l["C3"]) == 9
+
+
+def test_reject_drops_high_gradient():
+    """Trials with a large sample-to-sample jump are rejected by gradient criterion."""
+    channels = ("C3", "C4")
+    left = _make_pairs(10, amplitude=10.0, channels=channels)
+    right = _make_pairs(10, amplitude=10.0, channels=channels)
+
+    # Inject a massive jump into left trial 0 — far beyond any adaptive threshold
+    task = left["C3"][0][1].copy()
+    task[100] = task[99] + 5000.0
+    left["C3"][0] = (left["C3"][0][0], task)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
+        left, right, sfreq=250.0, gradient_n_mad=3.0
+    )
+
+    assert rej_l >= 1
+    assert len(cleaned_l["C3"]) <= 9
+
+
+def test_reject_drops_high_freq_power():
+    """Trials with injected 35 Hz sinusoid are rejected by HF power criterion."""
+    channels = ("C3", "C4")
+    left = _make_pairs(10, amplitude=5.0, channels=channels)
+    right = _make_pairs(10, amplitude=5.0, channels=channels)
+
+    # Inject a strong 35 Hz sinusoid into left trial 0 on both channels
+    sfreq = 250.0
+    t = np.arange(375) / sfreq
+    hf_sinusoid = np.sin(2 * np.pi * 35 * t) * 200.0
+
+    for ch in channels:
+        left[ch][0] = (left[ch][0][0], left[ch][0][1] + hf_sinusoid)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
+        left, right, sfreq=sfreq, hf_power_n_mad=3.0
+    )
+
+    # The HF-injected trial should be rejected
+    assert rej_l >= 1
+
+
+def test_reject_tighter_n_mad():
+    """An outlier that passes n_mad=4 but fails n_mad=3 is correctly rejected."""
+    channels = ("C3", "C4")
+    # 20 uniform trials at amplitude=10
+    left = _make_pairs(10, amplitude=10.0, channels=channels)
+    right = _make_pairs(10, amplitude=10.0, channels=channels)
+
+    # Find the current max ptp across all trials to craft a moderate outlier
+    all_ptps = []
+    for i in range(10):
+        for ch in channels:
+            all_ptps.append(float(np.ptp(left[ch][i][1])))
+            all_ptps.append(float(np.ptp(right[ch][i][1])))
+    ptps_arr = np.array(all_ptps)
+    median = float(np.median(ptps_arr))
+    mad = float(np.median(np.abs(ptps_arr - median)))
+
+    # Craft a trial that exceeds median + 3*MAD but not median + 4*MAD
+    target_ptp = median + 3.5 * mad
+    bad_task = np.zeros(375)
+    bad_task[0] = target_ptp
+    left["C3"][0] = (left["C3"][0][0], bad_task)
+
+    # With n_mad=4 (old default), should pass
+    _, _, rej_l_loose, _ = reject_bad_epochs(
+        left, right, n_mad=4.0, gradient_n_mad=None, hf_power_n_mad=None
+    )
+
+    # With n_mad=3 (new default), should be rejected
+    _, _, rej_l_tight, _ = reject_bad_epochs(
+        left, right, n_mad=3.0, gradient_n_mad=None, hf_power_n_mad=None
+    )
+
+    assert rej_l_tight > rej_l_loose
+
+
+def test_reject_all_criteria_disabled():
+    """Regression: with gradient and HF disabled, behaves like old ptp-only rejection."""
+    channels = ("C3", "C4")
+    left = _make_pairs(5, amplitude=10.0, channels=channels)
+    right = _make_pairs(5, amplitude=10.0, channels=channels)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
+        left, right, n_mad=4.0, gradient_n_mad=None, hf_power_n_mad=None
+    )
+
+    # All clean data should pass
+    assert rej_l == 0
+    assert rej_r == 0
+    assert len(cleaned_l["C3"]) == 5
+    assert len(cleaned_r["C3"]) == 5

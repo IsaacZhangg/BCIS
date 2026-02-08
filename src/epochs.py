@@ -1,6 +1,7 @@
 """Extract epochs from continuous EEG data."""
 
 import numpy as np
+from scipy.signal import welch
 
 
 def extract_epochs(
@@ -135,22 +136,45 @@ def extract_left_right_epochs(
     return left_pairs, right_pairs
 
 
+def _compute_max_gradient(task: np.ndarray) -> float:
+    """Return the maximum absolute sample-to-sample voltage difference."""
+    return float(np.max(np.abs(np.diff(task))))
+
+
+def _compute_hf_power(task: np.ndarray, sfreq: float, low: float, high: float) -> float:
+    """Return mean spectral power in [low, high] Hz using Welch's method."""
+    nperseg = min(int(sfreq / 2), len(task) // 2)
+    nperseg = max(nperseg, 64)
+    freqs, psd = welch(task, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
+    mask = (freqs >= low) & (freqs <= high)
+    return float(np.mean(psd[mask]))
+
+
 def reject_bad_epochs(
     left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     threshold_uv: float | None = None,
     flat_uv: float = 1.0,
     n_mad: float = 4.0,
+    sfreq: float | None = None,
+    gradient_n_mad: float | None = 3.0,
+    hf_power_n_mad: float | None = 3.0,
+    hf_band: tuple[float, float] = (30.0, 45.0),
 ) -> tuple[dict, dict, int, int]:
-    """Drop trials where any channel's task epoch exceeds amplitude thresholds.
+    """Drop trials where any channel's task epoch exceeds rejection criteria.
 
-    When *threshold_uv* is ``None`` (default), the threshold is computed
-    adaptively as ``median + n_mad * MAD`` of peak-to-peak amplitudes across
-    **all** trials and channels.  This adapts to each subject's signal
-    characteristics rather than assuming a fixed scale.
+    Three rejection criteria are applied (any channel triggers rejection):
 
-    A trial is rejected if any channel has peak-to-peak amplitude above the
-    threshold or below *flat_uv* in the task epoch.
+    1. **Peak-to-peak amplitude**: Adaptive (median + n_mad * MAD) or fixed
+       threshold.  Also rejects flat trials (ptp < flat_uv).
+    2. **Gradient**: Maximum sample-to-sample voltage jump exceeds adaptive
+       threshold (median + gradient_n_mad * MAD).  Catches electrode pops and
+       movement artifacts.  Disabled when *gradient_n_mad* is ``None`` or
+       *sfreq* is ``None``.
+    3. **High-frequency power**: Trials with abnormally high power in
+       *hf_band* (EMG contamination).  Uses adaptive median + hf_power_n_mad *
+       MAD threshold.  Requires *sfreq*.  Disabled when *hf_power_n_mad* is
+       ``None``.
 
     Args:
         left_pairs_by_channel: Dict mapping channel names to (baseline, task) pairs for left trials.
@@ -160,13 +184,20 @@ def reject_bad_epochs(
         flat_uv: Minimum peak-to-peak amplitude in µV (flat signal rejection).
         n_mad: Number of MADs above the median to set the adaptive threshold.
             Only used when *threshold_uv* is ``None``.
+        sfreq: Sampling frequency in Hz.  Required for gradient and HF power
+            rejection.
+        gradient_n_mad: Number of MADs above the median max-gradient for adaptive
+            gradient rejection.  Set to ``None`` to disable.
+        hf_power_n_mad: Number of MADs above the median HF power for adaptive
+            HF rejection.  Set to ``None`` to disable.
+        hf_band: Frequency band for HF power rejection (default 30-45 Hz).
 
     Returns:
         Tuple of (cleaned_left, cleaned_right, n_rejected_left, n_rejected_right).
     """
     channels = list(left_pairs_by_channel.keys())
 
-    # Collect all per-trial max-across-channels ptp values for adaptive threshold
+    # --- Criterion 1: Peak-to-peak amplitude (adaptive or fixed) ---
     def _trial_ptps(pairs_by_channel: dict) -> list[float]:
         n_trials = len(pairs_by_channel[channels[0]])
         ptps = []
@@ -183,6 +214,53 @@ def reject_bad_epochs(
         mad = float(np.median(np.abs(all_ptps - median)))
         threshold_uv = median + n_mad * mad
 
+    # --- Criterion 2: Gradient adaptive threshold ---
+    gradient_threshold: float | None = None
+    if gradient_n_mad is not None and sfreq is not None:
+
+        def _trial_gradients(pairs_by_channel: dict) -> list[float]:
+            n_trials = len(pairs_by_channel[channels[0]])
+            grad_vals = []
+            for i in range(n_trials):
+                max_grad = max(
+                    _compute_max_gradient(pairs_by_channel[ch][i][1]) for ch in channels
+                )
+                grad_vals.append(max_grad)
+            return grad_vals
+
+        all_grads = np.array(
+            _trial_gradients(left_pairs_by_channel)
+            + _trial_gradients(right_pairs_by_channel)
+        )
+        grad_median = float(np.median(all_grads))
+        grad_mad = float(np.median(np.abs(all_grads - grad_median)))
+        gradient_threshold = grad_median + gradient_n_mad * grad_mad
+
+    # --- Criterion 3: HF power adaptive threshold ---
+    hf_threshold: float | None = None
+    if hf_power_n_mad is not None and sfreq is not None:
+
+        def _trial_hf(pairs_by_channel: dict) -> list[float]:
+            n_trials = len(pairs_by_channel[channels[0]])
+            hf_vals = []
+            for i in range(n_trials):
+                max_hf = max(
+                    _compute_hf_power(
+                        pairs_by_channel[ch][i][1], sfreq, hf_band[0], hf_band[1]
+                    )
+                    for ch in channels
+                )
+                hf_vals.append(max_hf)
+            return hf_vals
+
+        all_hf = np.array(
+            _trial_hf(left_pairs_by_channel) + _trial_hf(right_pairs_by_channel)
+        )
+        hf_median = float(np.median(all_hf))
+        hf_mad = float(np.median(np.abs(all_hf - hf_median)))
+        hf_threshold = hf_median + hf_power_n_mad * hf_mad
+
+    # --- Apply all criteria ---
     def _good_indices(pairs_by_channel: dict) -> list[int]:
         n_trials = len(pairs_by_channel[channels[0]])
         good = []
@@ -191,9 +269,23 @@ def reject_bad_epochs(
             for ch in channels:
                 task = pairs_by_channel[ch][i][1]
                 ptp = float(np.ptp(task))
+                # Criterion 1: amplitude
                 if ptp > threshold_uv or ptp < flat_uv:
                     ok = False
                     break
+                # Criterion 2: gradient
+                if gradient_threshold is not None:
+                    if _compute_max_gradient(task) > gradient_threshold:
+                        ok = False
+                        break
+                # Criterion 3: HF power
+                if hf_threshold is not None:
+                    if (
+                        _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
+                        > hf_threshold
+                    ):
+                        ok = False
+                        break
             if ok:
                 good.append(i)
         return good
