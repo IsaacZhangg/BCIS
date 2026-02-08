@@ -38,7 +38,7 @@ CSV files (8ch, 250Hz Unicorn headset)
 
 **Event encoding**: stim value = `phase * 10 + movement` (phase 3 only; movement 1=left, 2=right). Each complete recording has exactly 100 phase-3 trials (50 left, 50 right).
 
-**Ensemble approach**: `train.py` builds 40+ classifiers per fold (Filter-Bank CSP, Riemannian geometry via pyRiemann, SVM variants, Random Forest, LDA, Gradient Boosting, MLP, k-NN) and selects the best aggregation strategy (average, median, weighted, voting, Borda count, etc.) per subject. The final saved model is a Random Forest trained on handcrafted features from `features.py`.
+**Ensemble approach**: `train.py` builds 40+ classifiers per fold (Filter-Bank CSP, Riemannian geometry via pyRiemann, SVM variants, Random Forest, LDA, Gradient Boosting, MLP, k-NN) and aggregates their predicted probabilities via simple mean with threshold 0.5. No test-set oracle selection. The final saved model is an LGBMClassifier trained on handcrafted features from `features.py`, with a separate `train_final_model_cv()` providing an honest CV estimate for that specific model.
 
 **Key channels**: C3 and C4 (motor cortex, primary discriminative pair), Cz (supplementary motor area), Fz (frontal theta/attention).
 
@@ -48,4 +48,4 @@ EEG recordings live in `unicorn-data/` (gitignored). Structure: `unicorn-data/su
 
 ## Current Status
 
-87.6% mean accuracy across 10 subjects (target: 90%). High variance across subjects (83-98%). Git branch `P3LR` with PR base `P3P5`.
+Data leakage fix applied: removed oracle selection (max over ~25 aggregation strategies evaluated on test set) and replaced with simple probability mean. Reported accuracy will be lower but reflects true generalization. Pipeline now reports both ensemble CV accuracy and LGBMClassifier CV accuracy. Git branch `P3LR` with PR base `P3P5`.

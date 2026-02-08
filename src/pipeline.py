@@ -10,7 +10,11 @@ from src.data_loader import load_recording, get_complete_recordings, CHANNELS
 from src.preprocess import preprocess_eeg
 from src.epochs import extract_left_right_epochs
 from src.features import extract_lateralization_features
-from src.train import train_left_right_within_subject, train_final_model
+from src.train import (
+    train_left_right_within_subject,
+    train_final_model,
+    train_final_model_cv,
+)
 
 
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
@@ -93,32 +97,44 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         raise ValueError("No valid subjects found")
 
     # Step 3: Within-Subject Cross-validation
-    print("\n[3/5] Running within-subject cross-validation...")
-    print("(10-fold CV per subject with optimized ensemble)")
+    print("\n[3/6] Running ensemble within-subject cross-validation...")
+    print("(10-fold CV per subject with probability-averaged ensemble)")
     scores, mean_acc, std_acc = train_left_right_within_subject(
         X_by_subject, y_by_subject
     )
 
-    print("\nPer-subject accuracy (Within-Subject 10-fold CV):")
+    print("\nPer-subject accuracy (Ensemble 10-fold CV):")
     for sid, score in zip(subject_ids, scores):
-        status = "PASS" if score >= 0.9 else "FAIL"
-        print(f"  {sid}: {score:.1%} [{status}]")
+        print(f"  {sid}: {score:.1%}")
 
-    print(f"\nMean accuracy: {mean_acc:.1%} (+/- {std_acc:.1%})")
+    print(f"\nEnsemble mean accuracy: {mean_acc:.1%} (+/- {std_acc:.1%})")
 
-    # Step 4: Check if target met
-    target_met = mean_acc >= 0.90
-    print(f"\nTarget (>90%): {'MET' if target_met else 'NOT MET'}")
+    # Step 4: Final model CV (LGBMClassifier on handcrafted features)
+    print("\n[4/6] Running final-model within-subject cross-validation...")
+    print("(10-fold CV per subject with LGBMClassifier on handcrafted features)")
+    fm_scores, fm_mean_acc, fm_std_acc = train_final_model_cv(
+        X_by_subject, y_by_subject
+    )
 
-    # Step 5: Train final model on all data
-    print("\n[4/5] Training final model on all data...")
+    print("\nPer-subject accuracy (LGBMClassifier 10-fold CV):")
+    for sid, score in zip(subject_ids, fm_scores):
+        print(f"  {sid}: {score:.1%}")
+
+    print(f"\nLGBMClassifier mean accuracy: {fm_mean_acc:.1%} (+/- {fm_std_acc:.1%})")
+
+    # Step 5: Check if target met (using final model accuracy)
+    target_met = fm_mean_acc >= 0.90
+    print(f"\nTarget (>90% final model): {'MET' if target_met else 'NOT MET'}")
+
+    # Step 6: Train final model on all data
+    print("\n[5/6] Training final model on all data...")
     X_all_features = np.vstack([x[0] for x in X_by_subject])
     y_all = np.concatenate(y_by_subject)
 
     final_model, scaler = train_final_model(X_all_features, y_all)
 
-    # Step 6: Save model and scaler
-    print("\n[5/5] Saving model...")
+    # Step 7: Save model and scaler
+    print("\n[6/6] Saving model...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = output_dir / "left_right_classifier_model.joblib"
@@ -134,9 +150,16 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     results = {
         "task": "left_right_motor_imagery",
         "n_subjects": len(subject_ids),
-        "per_subject_scores": dict(zip(subject_ids, [float(s) for s in scores])),
-        "mean_accuracy": float(mean_acc),
-        "std_accuracy": float(std_acc),
+        "ensemble_per_subject_scores": dict(
+            zip(subject_ids, [float(s) for s in scores])
+        ),
+        "ensemble_mean_accuracy": float(mean_acc),
+        "ensemble_std_accuracy": float(std_acc),
+        "final_model_per_subject_scores": dict(
+            zip(subject_ids, [float(s) for s in fm_scores])
+        ),
+        "final_model_mean_accuracy": float(fm_mean_acc),
+        "final_model_std_accuracy": float(fm_std_acc),
         "target_met": bool(target_met),
         "model_path": str(model_path),
         "scaler_path": str(scaler_path),

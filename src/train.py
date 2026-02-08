@@ -2,6 +2,7 @@
 
 import mne
 import numpy as np
+from lightgbm import LGBMClassifier
 from scipy.signal import welch as scipy_welch
 from sklearn.decomposition import KernelPCA
 from sklearn.discriminant_analysis import (
@@ -177,7 +178,7 @@ def train_within_subject_cv_riemannian(
             X_train_mc, X_test_mc = X_multichannel[train_idx], X_multichannel[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            all_accuracies = []
+            all_probs = []
 
             # Riemannian approaches
             for cov_est in ["lwf", "oas", "scm"]:
@@ -188,7 +189,7 @@ def train_within_subject_cv_riemannian(
 
                     mdm = MDM(metric="riemann")
                     mdm.fit(X_train_cov, y_train)
-                    all_accuracies.append(mdm.score(X_test_cov, y_test))
+                    all_probs.append(mdm.predict_proba(X_test_cov)[:, 1])
 
                     ts = TangentSpace(metric="riemann")
                     X_train_ts = ts.fit_transform(X_train_cov, y_train)
@@ -196,17 +197,18 @@ def train_within_subject_cv_riemannian(
 
                     lda_ts = _make_lda()
                     lda_ts.fit(X_train_ts, y_train)
-                    all_accuracies.append(lda_ts.score(X_test_ts, y_test))
+                    all_probs.append(lda_ts.predict_proba(X_test_ts)[:, 1])
 
                     svm_ts = SVC(
                         kernel="rbf",
                         C=1.0,
                         gamma="scale",
                         class_weight="balanced",
+                        probability=True,
                         random_state=42,
                     )
                     svm_ts.fit(X_train_ts, y_train)
-                    all_accuracies.append(svm_ts.score(X_test_ts, y_test))
+                    all_probs.append(svm_ts.predict_proba(X_test_ts)[:, 1])
                 except Exception:
                     pass
 
@@ -231,7 +233,7 @@ def train_within_subject_cv_riemannian(
                     n_jobs=-1,
                 )
                 rf.fit(X_train_selected, y_train)
-                all_accuracies.append(rf.score(X_test_selected, y_test))
+                all_probs.append(rf.predict_proba(X_test_selected)[:, 1])
 
                 et = ExtraTreesClassifier(
                     n_estimators=300,
@@ -242,13 +244,13 @@ def train_within_subject_cv_riemannian(
                     n_jobs=-1,
                 )
                 et.fit(X_train_selected, y_train)
-                all_accuracies.append(et.score(X_test_selected, y_test))
+                all_probs.append(et.predict_proba(X_test_selected)[:, 1])
 
                 gb = GradientBoostingClassifier(
                     n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42
                 )
                 gb.fit(X_train_selected, y_train)
-                all_accuracies.append(gb.score(X_test_selected, y_test))
+                all_probs.append(gb.predict_proba(X_test_selected)[:, 1])
 
                 for C in [0.1, 1.0, 10.0]:
                     svm = SVC(
@@ -256,14 +258,15 @@ def train_within_subject_cv_riemannian(
                         C=C,
                         gamma="scale",
                         class_weight="balanced",
+                        probability=True,
                         random_state=42,
                     )
                     svm.fit(X_train_selected, y_train)
-                    all_accuracies.append(svm.score(X_test_selected, y_test))
+                    all_probs.append(svm.predict_proba(X_test_selected)[:, 1])
 
                 lda = _make_lda()
                 lda.fit(X_train_selected, y_train)
-                all_accuracies.append(lda.score(X_test_selected, y_test))
+                all_probs.append(lda.predict_proba(X_test_selected)[:, 1])
 
             # Combined features (traditional + tangent space from best cov)
             try:
@@ -292,7 +295,7 @@ def train_within_subject_cv_riemannian(
                     n_jobs=-1,
                 )
                 et.fit(X_train_comb_sel, y_train)
-                all_accuracies.append(et.score(X_test_comb_sel, y_test))
+                all_probs.append(et.predict_proba(X_test_comb_sel)[:, 1])
 
                 rf = RandomForestClassifier(
                     n_estimators=300,
@@ -303,12 +306,15 @@ def train_within_subject_cv_riemannian(
                     n_jobs=-1,
                 )
                 rf.fit(X_train_comb_sel, y_train)
-                all_accuracies.append(rf.score(X_test_comb_sel, y_test))
+                all_probs.append(rf.predict_proba(X_test_comb_sel)[:, 1])
             except Exception:
                 pass
 
-            accuracy = max(all_accuracies) if all_accuracies else 0.5
-            fold_scores.append(accuracy)
+            if all_probs:
+                preds = _aggregate_ensemble(all_probs)
+                fold_scores.append(np.mean(preds == y_test))
+            else:
+                fold_scores.append(0.5)
 
         scores.append(np.mean(fold_scores))
 
@@ -320,7 +326,7 @@ def train_within_subject_cv_riemannian(
 def train_final_model(
     X: np.ndarray,
     y: np.ndarray,
-) -> tuple[RandomForestClassifier, StandardScaler]:
+) -> tuple[LGBMClassifier, StandardScaler]:
     """
     Train final model on all data.
 
@@ -334,16 +340,76 @@ def train_final_model(
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    model = RandomForestClassifier(
+    model = LGBMClassifier(
         n_estimators=200,
         max_depth=10,
-        min_samples_split=5,
-        min_samples_leaf=2,
+        min_child_samples=5,
+        num_leaves=31,
         random_state=42,
         n_jobs=-1,
+        verbose=-1,
     )
     model.fit(X_scaled, y)
     return model, scaler
+
+
+def train_final_model_cv(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    n_folds: int = 10,
+) -> tuple[list[float], float, float]:
+    """
+    Within-subject CV using the same model type as the deployed model (LGBMClassifier
+    on handcrafted features). Gives an honest accuracy estimate for the saved model.
+
+    Args:
+        X_by_subject: List of (features, multichannel) tuples per subject
+        y_by_subject: List of label arrays per subject
+        n_folds: Number of cross-validation folds
+
+    Returns:
+        Tuple of (per_subject_scores, mean_accuracy, std_accuracy)
+    """
+    n_subjects = len(X_by_subject)
+    scores = []
+
+    for subj_idx in range(n_subjects):
+        X_features = X_by_subject[subj_idx][0]
+        y = y_by_subject[subj_idx]
+
+        n_samples = len(y)
+        actual_folds = min(n_folds, n_samples // 2)
+        if actual_folds < 2:
+            actual_folds = n_samples
+
+        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+        fold_scores = []
+
+        for train_idx, test_idx in skf.split(X_features, y):
+            X_train, X_test = X_features[train_idx], X_features[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+
+            model = LGBMClassifier(
+                n_estimators=200,
+                max_depth=10,
+                min_child_samples=5,
+                num_leaves=31,
+                random_state=42,
+                n_jobs=-1,
+                verbose=-1,
+            )
+            model.fit(X_train_scaled, y_train)
+            fold_scores.append(model.score(X_test_scaled, y_test))
+
+        scores.append(np.mean(fold_scores))
+
+    mean_acc = np.mean(scores)
+    std_acc = np.std(scores)
+    return scores, mean_acc, std_acc
 
 
 def train_left_right_within_subject(
@@ -1195,18 +1261,8 @@ def train_left_right_within_subject(
 
             # --- Ensemble aggregation ---
             if all_probs:
-                fold_scores.append(
-                    _aggregate_ensemble(
-                        all_probs,
-                        y_test,
-                        X_train,
-                        X_test,
-                        y_train,
-                        X_train_fbcsp if fbcsp_train else None,
-                        X_test_fbcsp if fbcsp_train else None,
-                        sfreq,
-                    )
-                )
+                preds = _aggregate_ensemble(all_probs)
+                fold_scores.append(np.mean(preds == y_test))
             else:
                 fold_scores.append(0.5)
 
@@ -1296,155 +1352,14 @@ def _extract_band_power_features(data, sfreq, bands):
     return np.array(features)
 
 
-def _aggregate_ensemble(
-    all_probs, y_test, X_train, X_test, y_train, X_train_fbcsp, X_test_fbcsp, sfreq
-):
-    """Aggregate ensemble predictions using multiple strategies and return best accuracy."""
-    all_probs = np.array(all_probs)
+def _aggregate_ensemble(all_probs: list[np.ndarray]) -> np.ndarray:
+    """Aggregate ensemble predictions by averaging probabilities.
 
-    # Inner CV for stacking
-    inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-    for inner_train, inner_val in inner_cv.split(X_train, y_train):
-        X_inner_train, X_inner_val = X_train[inner_train], X_train[inner_val]
-        y_inner_train = y_train[inner_train]
+    Args:
+        all_probs: List of predicted probability arrays from individual models.
 
-        for band in [(8, 30), (12, 30)]:
-            try:
-                X_train_filt = mne.filter.filter_data(
-                    X_inner_train, sfreq, band[0], band[1], verbose=False
-                )
-                X_val_filt = mne.filter.filter_data(
-                    X_inner_val, sfreq, band[0], band[1], verbose=False
-                )
-                csp = CSP(n_components=4, reg="ledoit_wolf", log=True, norm_trace=True)
-                X_train_csp = csp.fit_transform(X_train_filt, y_inner_train)
-                csp.transform(X_val_filt)
-                lda = _make_lda()
-                lda.fit(X_train_csp, y_inner_train)
-            except (ValueError, np.linalg.LinAlgError, RuntimeError):
-                continue
-
-    # Probability-based aggregations
-    avg_prob = np.mean(all_probs, axis=0)
-    median_prob = np.median(all_probs, axis=0)
-
-    weights = np.abs(all_probs - 0.5).mean(axis=1) + 0.01
-    weights = weights / weights.sum()
-    weighted_prob = np.average(all_probs, axis=0, weights=weights)
-
-    sorted_probs = np.sort(all_probs, axis=0)
-    trim_k = max(1, len(all_probs) // 10)
-    trimmed_prob = np.mean(sorted_probs[trim_k:-trim_k], axis=0)
-
-    geo_prob = np.exp(np.mean(np.log(all_probs + 1e-10), axis=0))
-
-    individual_accs = [np.mean((p > 0.5).astype(int) == y_test) for p in all_probs]
-    top_k = max(3, len(all_probs) // 5)
-    top_indices = np.argsort(individual_accs)[-top_k:]
-    top_k_prob = np.mean(all_probs[top_indices], axis=0)
-
-    # Evaluate all strategies
-    accs = []
-    for prob in [
-        avg_prob,
-        median_prob,
-        weighted_prob,
-        trimmed_prob,
-        geo_prob,
-        top_k_prob,
-    ]:
-        for thresh in [0.45, 0.5, 0.55]:
-            accs.append(np.mean((prob > thresh).astype(int) == y_test))
-
-    # Best individual model
-    accs.append(max(individual_accs))
-
-    # Majority voting
-    hard_votes = (all_probs > 0.5).astype(int)
-    majority_pred = (hard_votes.mean(axis=0) > 0.5).astype(int)
-    accs.append(np.mean(majority_pred == y_test))
-
-    # Diversity-weighted
-    conf_variance = np.var(all_probs, axis=1)
-    div_weights = conf_variance + 0.01
-    div_weights = div_weights / div_weights.sum()
-    div_prob = np.average(all_probs, axis=0, weights=div_weights)
-    for thresh in [0.45, 0.5, 0.55]:
-        accs.append(np.mean((div_prob > thresh).astype(int) == y_test))
-
-    # Adaptive threshold
-    agreement = np.abs(all_probs.mean(axis=0) - 0.5)
-    adaptive_thresh = 0.5 - 0.1 * (1 - agreement)
-    accs.append(np.mean((avg_prob > adaptive_thresh).astype(int) == y_test))
-
-    # Product rule
-    prod_prob = np.prod(all_probs, axis=0) ** (1.0 / len(all_probs))
-    accs.append(np.mean((prod_prob > 0.5).astype(int) == y_test))
-
-    # Min-max normalized average
-    all_probs_norm = (all_probs - all_probs.min(axis=1, keepdims=True)) / (
-        all_probs.max(axis=1, keepdims=True)
-        - all_probs.min(axis=1, keepdims=True)
-        + 1e-10
-    )
-    accs.append(np.mean((np.mean(all_probs_norm, axis=0) > 0.5).astype(int) == y_test))
-
-    # Low-variance model average
-    model_variance = np.var(all_probs, axis=1)
-    low_var_mask = model_variance < np.median(model_variance)
-    if low_var_mask.sum() > 0:
-        accs.append(
-            np.mean(
-                (np.mean(all_probs[low_var_mask], axis=0) > 0.5).astype(int) == y_test
-            )
-        )
-
-    # Rank-based aggregation
-    ranks = np.argsort(np.argsort(all_probs, axis=1), axis=1)
-    rank_prob = np.mean(ranks, axis=0) / len(y_test)
-    accs.append(np.mean((rank_prob > 0.5).astype(int) == y_test))
-
-    # Borda count
-    borda_scores = np.zeros(len(y_test))
-    for model_probs in all_probs:
-        for rank, idx in enumerate(np.argsort(model_probs)):
-            borda_scores[idx] += rank
-    accs.append(
-        np.mean((borda_scores > len(y_test) * len(all_probs) / 2).astype(int) == y_test)
-    )
-
-    # Agreement-based ensemble
-    hard_preds = (all_probs > 0.5).astype(int)
-    agreement_matrix = np.nan_to_num(np.corrcoef(hard_preds), nan=0.0)
-    avg_agreement = agreement_matrix.mean(axis=1)
-    top_agreeing = np.argsort(avg_agreement)[-max(5, len(all_probs) // 3) :]
-    accs.append(
-        np.mean((np.mean(all_probs[top_agreeing], axis=0) > 0.5).astype(int) == y_test)
-    )
-
-    # Power-weighted
-    power_weights = np.power(np.abs(all_probs - 0.5) + 0.01, 2).mean(axis=1)
-    power_weights = power_weights / power_weights.sum()
-    accs.append(
-        np.mean(
-            (np.average(all_probs, axis=0, weights=power_weights) > 0.5).astype(int)
-            == y_test
-        )
-    )
-
-    # Low-entropy model average
-    def _entropy(p):
-        p = np.clip(p, 1e-10, 1 - 1e-10)
-        return -(p * np.log(p) + (1 - p) * np.log(1 - p))
-
-    model_entropy = np.mean([_entropy(p) for p in all_probs], axis=1)
-    low_entropy_mask = model_entropy < np.median(model_entropy)
-    if low_entropy_mask.sum() > 0:
-        accs.append(
-            np.mean(
-                (np.mean(all_probs[low_entropy_mask], axis=0) > 0.5).astype(int)
-                == y_test
-            )
-        )
-
-    return max(accs)
+    Returns:
+        Predicted class labels (0 or 1) as np.ndarray.
+    """
+    avg_prob = np.mean(np.array(all_probs), axis=0)
+    return (avg_prob > 0.5).astype(int)
