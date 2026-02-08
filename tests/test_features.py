@@ -1,6 +1,7 @@
 """Tests for feature extraction functionality."""
 
 import numpy as np
+import pytest
 
 from src.features import (
     compute_theta_power,
@@ -14,7 +15,7 @@ from src.features import (
 def test_compute_theta_power_detects_theta():
     """Test that theta power is higher for theta-dominant signal."""
     sfreq = 250.0
-    t = np.arange(0, 2, 1/sfreq)  # 2 seconds
+    t = np.arange(0, 2, 1 / sfreq)  # 2 seconds
 
     # Signal with strong 6 Hz (theta) component
     theta_signal = np.sin(2 * np.pi * 6 * t)
@@ -85,15 +86,13 @@ def test_extract_lateralization_features_correct_shape():
     n_samples_baseline = 250
     n_samples_task = 375
 
-    # Create fake epoch pairs for each channel
-    epoch_pairs_by_channel = {}
-    for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]:
-        pairs = []
-        for _ in range(n_epochs):
-            baseline = np.random.randn(n_samples_baseline)
-            task = np.random.randn(n_samples_task)
-            pairs.append((baseline, task))
-        epoch_pairs_by_channel[ch] = pairs
+    epoch_pairs_by_channel = {
+        ch: [
+            (np.random.randn(n_samples_baseline), np.random.randn(n_samples_task))
+            for _ in range(n_epochs)
+        ]
+        for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
+    }
 
     features = extract_lateralization_features(epoch_pairs_by_channel, sfreq)
 
@@ -124,15 +123,13 @@ def test_extract_lateralization_features_expected_count():
     n_samples_baseline = 250
     n_samples_task = 375
 
-    # Create fake epoch pairs for each channel
-    epoch_pairs_by_channel = {}
-    for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]:
-        pairs = []
-        for _ in range(n_epochs):
-            baseline = np.random.randn(n_samples_baseline)
-            task = np.random.randn(n_samples_task)
-            pairs.append((baseline, task))
-        epoch_pairs_by_channel[ch] = pairs
+    epoch_pairs_by_channel = {
+        ch: [
+            (np.random.randn(n_samples_baseline), np.random.randn(n_samples_task))
+            for _ in range(n_epochs)
+        ]
+        for ch in ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
+    }
 
     features = extract_lateralization_features(epoch_pairs_by_channel, sfreq)
 
@@ -152,12 +149,10 @@ def test_extract_lateralization_features_missing_channels():
     n_epochs = 2
 
     # Missing C4 and Fz channels
-    epoch_pairs_by_channel = {}
-    for ch in ["C3", "Cz"]:  # Missing C4 and Fz
-        pairs = [(np.random.randn(250), np.random.randn(375)) for _ in range(n_epochs)]
-        epoch_pairs_by_channel[ch] = pairs
-
-    import pytest
+    epoch_pairs_by_channel = {
+        ch: [(np.random.randn(250), np.random.randn(375)) for _ in range(n_epochs)]
+        for ch in ["C3", "Cz"]
+    }
 
     with pytest.raises(ValueError, match="Missing required channels"):
         extract_lateralization_features(epoch_pairs_by_channel, sfreq)

@@ -47,9 +47,7 @@ def notch_filter(
         Filtered signal
     """
     data_2d = data.reshape(1, -1)
-    filtered = mne.filter.notch_filter(
-        data_2d, sfreq, freqs=freq, verbose=False
-    )
+    filtered = mne.filter.notch_filter(data_2d, sfreq, freqs=freq, verbose=False)
     return filtered.flatten()
 
 

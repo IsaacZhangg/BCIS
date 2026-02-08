@@ -47,23 +47,19 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         data, events, sfreq = load_recording(rec_path)
 
         # Process ALL channels
-        processed_channels = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            processed_channels[ch_name] = preprocess_eeg(data[ch_idx], sfreq)
+        processed_channels = {
+            ch_name: preprocess_eeg(data[ch_idx], sfreq)
+            for ch_idx, ch_name in enumerate(CHANNELS)
+        }
 
         # Extract left/right epochs from phase 3
-        left_pairs_by_channel = {}
-        right_pairs_by_channel = {}
-
-        for ch_name, signal in processed_channels.items():
-            left_pairs, right_pairs = extract_left_right_epochs(
-                signal, events, sfreq,
-                task_duration=1.8,
-                baseline_duration=1.0,
-                skip_duration=0.5,
-            )
-            left_pairs_by_channel[ch_name] = left_pairs
-            right_pairs_by_channel[ch_name] = right_pairs
+        epoch_kwargs = dict(task_duration=1.8, baseline_duration=1.0, skip_duration=0.5)
+        epoch_pairs = {
+            ch_name: extract_left_right_epochs(signal, events, sfreq, **epoch_kwargs)
+            for ch_name, signal in processed_channels.items()
+        }
+        left_pairs_by_channel = {ch: pairs[0] for ch, pairs in epoch_pairs.items()}
+        right_pairs_by_channel = {ch: pairs[1] for ch, pairs in epoch_pairs.items()}
 
         n_left = len(left_pairs_by_channel[CHANNELS[0]])
         n_right = len(right_pairs_by_channel[CHANNELS[0]])
@@ -78,17 +74,12 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         right_features = extract_lateralization_features(right_pairs_by_channel, sfreq)
 
         # Create multichannel arrays for CSP/Riemannian
-        n_channels = len(CHANNELS)
-        n_samples = left_pairs_by_channel[CHANNELS[0]][0][1].shape[0]
-
-        left_multichannel = np.zeros((n_left, n_channels, n_samples))
-        right_multichannel = np.zeros((n_right, n_channels, n_samples))
-
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            for trial_idx in range(n_left):
-                left_multichannel[trial_idx, ch_idx, :] = left_pairs_by_channel[ch_name][trial_idx][1]
-            for trial_idx in range(n_right):
-                right_multichannel[trial_idx, ch_idx, :] = right_pairs_by_channel[ch_name][trial_idx][1]
+        left_multichannel = np.array(
+            [[trial[1] for trial in left_pairs_by_channel[ch]] for ch in CHANNELS]
+        ).transpose(1, 0, 2)  # (n_trials, n_channels, n_samples)
+        right_multichannel = np.array(
+            [[trial[1] for trial in right_pairs_by_channel[ch]] for ch in CHANNELS]
+        ).transpose(1, 0, 2)
 
         X_multichannel = np.vstack([left_multichannel, right_multichannel])
         X_features = np.vstack([left_features, right_features])
@@ -98,13 +89,15 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         y_by_subject.append(y)
         subject_ids.append(subject_id)
 
-    if len(X_by_subject) == 0:
+    if not X_by_subject:
         raise ValueError("No valid subjects found")
 
     # Step 3: Within-Subject Cross-validation
     print("\n[3/5] Running within-subject cross-validation...")
     print("(10-fold CV per subject with optimized ensemble)")
-    scores, mean_acc, std_acc = train_left_right_within_subject(X_by_subject, y_by_subject)
+    scores, mean_acc, std_acc = train_left_right_within_subject(
+        X_by_subject, y_by_subject
+    )
 
     print("\nPer-subject accuracy (Within-Subject 10-fold CV):")
     for sid, score in zip(subject_ids, scores):

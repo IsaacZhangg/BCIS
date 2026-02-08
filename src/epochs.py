@@ -22,15 +22,11 @@ def extract_epochs(
         List of epoch arrays
     """
     n_samples = int(duration * sfreq)
-    epochs = []
-
-    for sample_idx, phase, movement in events:
-        # Check if epoch would extend past end of signal
-        if sample_idx + n_samples <= len(signal):
-            epoch = signal[sample_idx : sample_idx + n_samples]
-            epochs.append(epoch)
-
-    return epochs
+    return [
+        signal[idx : idx + n_samples]
+        for idx, _, _ in events
+        if idx + n_samples <= len(signal)
+    ]
 
 
 def extract_labeled_epochs(
@@ -65,21 +61,17 @@ def extract_labeled_epochs(
     focused = []
     baseline = []
 
-    for sample_idx, phase, movement in events:
-        # Apply offset
+    for sample_idx, phase, _movement in events:
         start_idx = sample_idx + offset_samples
-
-        # Check if epoch would extend past end of signal
         if start_idx + n_samples > len(signal):
             continue
 
         epoch = signal[start_idx : start_idx + n_samples]
 
-        if phase == focused_phase:  # Imagery = Focused
+        if phase == focused_phase:
             focused.append(epoch)
-        elif phase == baseline_phase:  # Prepare or Rest = Baseline
+        elif phase == baseline_phase:
             baseline.append(epoch)
-        # Other phases are ignored
 
     return focused, baseline
 
@@ -115,32 +107,29 @@ def extract_erd_epochs(
     task_samples = int(task_duration * sfreq)
     baseline_samples = int(baseline_duration * sfreq)
 
+    skip_samples = int(0.5 * sfreq)
     class1_pairs = []
     class2_pairs = []
 
-    for sample_idx, phase, movement in events:
-        if phase not in [class1_phase, class2_phase]:
+    for sample_idx, phase, _movement in events:
+        if phase not in (class1_phase, class2_phase):
             continue
 
-        # Extract baseline from immediately before event
-        baseline_end = sample_idx
-        baseline_start = baseline_end - baseline_samples
+        baseline_start = sample_idx - baseline_samples
         if baseline_start < 0:
             continue
 
-        baseline = signal[baseline_start:baseline_end]
-
-        # Extract task epoch (skip first 0.5s to capture developed ERD)
-        task_start = sample_idx + int(0.5 * sfreq)
+        task_start = sample_idx + skip_samples
         task_end = task_start + task_samples
         if task_end > len(signal):
             continue
 
+        baseline = signal[baseline_start:sample_idx]
         task = signal[task_start:task_end]
 
         if phase == class1_phase:
             class1_pairs.append((baseline, task))
-        elif phase == class2_phase:
+        else:
             class2_pairs.append((baseline, task))
 
     return class1_pairs, class2_pairs
@@ -182,24 +171,19 @@ def extract_left_right_epochs(
     right_pairs = []
 
     for sample_idx, event_phase, movement in events:
-        # Only extract from specified phase
         if event_phase != phase:
             continue
 
-        # Extract baseline from immediately before event
-        baseline_end = sample_idx
-        baseline_start = baseline_end - baseline_samples
+        baseline_start = sample_idx - baseline_samples
         if baseline_start < 0:
             continue
 
-        baseline = signal[baseline_start:baseline_end]
-
-        # Extract task epoch (skip initial period to capture developed response)
         task_start = sample_idx + skip_samples
         task_end = task_start + task_samples
         if task_end > len(signal):
             continue
 
+        baseline = signal[baseline_start:sample_idx]
         task = signal[task_start:task_end]
 
         if movement == left_movement:

@@ -1,18 +1,8 @@
 """Feature extraction: multi-channel, multi-band power computation with ERD."""
 
 import numpy as np
-from scipy.signal import welch, hilbert
+from scipy.signal import welch
 from mne.decoding import CSP
-
-
-# Frequency bands for feature extraction
-FREQUENCY_BANDS = {
-    "delta": (1, 4),
-    "theta": (4, 8),
-    "alpha": (8, 13),
-    "low_beta": (13, 20),
-    "high_beta": (20, 30),
-}
 
 
 def compute_band_power(
@@ -78,20 +68,6 @@ def compute_hjorth_parameters(epoch: np.ndarray) -> tuple[float, float, float]:
     return activity, mobility, complexity
 
 
-def compute_envelope_features(epoch: np.ndarray) -> tuple[float, float, float]:
-    """
-    Compute features from the signal envelope using Hilbert transform.
-    """
-    analytic_signal = hilbert(epoch)
-    envelope = np.abs(analytic_signal)
-
-    env_mean = np.mean(envelope)
-    env_std = np.std(envelope)
-    env_max = np.max(envelope)
-
-    return env_mean, env_std, env_max
-
-
 def extract_features(
     epochs: list[np.ndarray],
     sfreq: float,
@@ -117,124 +93,6 @@ def extract_features(
         features.append([theta_power])
 
     return np.array(features)
-
-
-def extract_erd_features(
-    epoch_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    sfreq: float,
-) -> np.ndarray:
-    """
-    Extract comprehensive ERD features from all motor cortex channels.
-
-    ERD = (baseline_power - task_power) / baseline_power * 100
-
-    Args:
-        epoch_pairs_by_channel: Dict mapping channel names to list of (baseline, task) pairs
-        sfreq: Sampling frequency in Hz
-
-    Returns:
-        Feature array of shape (n_epochs, n_features)
-    """
-    # More bands for better discrimination
-    bands = {
-        "theta": (4, 8),
-        "low_alpha": (8, 10),
-        "high_alpha": (10, 13),
-        "mu": (8, 12),
-        "low_beta": (13, 20),
-        "high_beta": (20, 30),
-        "beta": (13, 30),
-        "gamma": (30, 40),
-    }
-
-    # All relevant channels
-    motor_channels = ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
-
-    channel_names = list(epoch_pairs_by_channel.keys())
-    n_epochs = len(epoch_pairs_by_channel[channel_names[0]])
-
-    all_features = []
-
-    for epoch_idx in range(n_epochs):
-        epoch_features = []
-        channel_powers = {}
-
-        for ch_name in motor_channels:
-            if ch_name not in epoch_pairs_by_channel:
-                continue
-
-            baseline, task = epoch_pairs_by_channel[ch_name][epoch_idx]
-            channel_powers[ch_name] = {}
-
-            # Compute total power for normalization
-            baseline_total = compute_band_power(baseline, sfreq, 1, 40)
-            task_total = compute_band_power(task, sfreq, 1, 40)
-
-            for band_name, (low, high) in bands.items():
-                baseline_power = compute_band_power(baseline, sfreq, low, high)
-                task_power = compute_band_power(task, sfreq, low, high)
-
-                # ERD percentage
-                erd = (baseline_power - task_power) / (baseline_power + 1e-10) * 100
-                epoch_features.append(erd)
-
-                # Log power ratio
-                log_ratio = np.log((task_power + 1e-10) / (baseline_power + 1e-10))
-                epoch_features.append(log_ratio)
-
-                # Relative power (normalized)
-                baseline_rel = baseline_power / (baseline_total + 1e-10)
-                task_rel = task_power / (task_total + 1e-10)
-                epoch_features.append(task_rel - baseline_rel)
-
-                # Absolute log power (often more discriminative)
-                epoch_features.append(np.log(task_power + 1e-10))
-                epoch_features.append(np.log(baseline_power + 1e-10))
-
-                # Store for inter-channel features
-                channel_powers[ch_name][band_name] = {
-                    'baseline': baseline_power,
-                    'task': task_power,
-                    'erd': erd,
-                }
-
-            # Add time-domain features from task epoch
-            activity, mobility, complexity = compute_hjorth_parameters(task)
-            epoch_features.extend([activity, mobility, complexity])
-
-            # Envelope features
-            env_mean, env_std, env_max = compute_envelope_features(task)
-            epoch_features.extend([env_mean, env_std, env_max])
-
-        # Inter-channel features: C3-C4 asymmetry for each band
-        if "C3" in channel_powers and "C4" in channel_powers:
-            for band_name in bands:
-                c3_erd = channel_powers["C3"][band_name]['erd']
-                c4_erd = channel_powers["C4"][band_name]['erd']
-                epoch_features.append(c3_erd - c4_erd)
-
-                # Power ratio
-                c3_task = channel_powers["C3"][band_name]['task']
-                c4_task = channel_powers["C4"][band_name]['task']
-                epoch_features.append(np.log((c3_task + 1e-10) / (c4_task + 1e-10)))
-
-        # Frontal-Parietal connectivity proxy (Fz vs Pz)
-        if "Fz" in channel_powers and "Pz" in channel_powers:
-            for band_name in ["theta", "mu", "beta"]:
-                fz_task = channel_powers["Fz"][band_name]['task']
-                pz_task = channel_powers["Pz"][band_name]['task']
-                epoch_features.append(np.log((fz_task + 1e-10) / (pz_task + 1e-10)))
-
-        # Central vs occipital (Cz vs Oz)
-        if "Cz" in channel_powers and "Oz" in channel_powers:
-            for band_name in ["mu", "beta"]:
-                cz_task = channel_powers["Cz"][band_name]['task']
-                oz_task = channel_powers["Oz"][band_name]['task']
-                epoch_features.append(np.log((cz_task + 1e-10) / (oz_task + 1e-10)))
-
-        all_features.append(epoch_features)
-
-    return np.array(all_features)
 
 
 def compute_lateralization_index(
@@ -305,8 +163,7 @@ def extract_lateralization_features(
         "beta": (13, 30),
     }
 
-    channel_names = list(epoch_pairs_by_channel.keys())
-    n_epochs = len(epoch_pairs_by_channel[channel_names[0]])
+    n_epochs = len(epoch_pairs_by_channel["C3"])
 
     all_features = []
 
@@ -320,11 +177,15 @@ def extract_lateralization_features(
         # PRIMARY: Lateralization features (C3 vs C4)
         for band_name, (low, high) in bands.items():
             # Task lateralization index
-            lat_idx_task = compute_lateralization_index(c3_task, c4_task, sfreq, low, high)
+            lat_idx_task = compute_lateralization_index(
+                c3_task, c4_task, sfreq, low, high
+            )
             epoch_features.append(lat_idx_task)
 
             # Baseline lateralization index
-            lat_idx_baseline = compute_lateralization_index(c3_baseline, c4_baseline, sfreq, low, high)
+            lat_idx_baseline = compute_lateralization_index(
+                c3_baseline, c4_baseline, sfreq, low, high
+            )
             epoch_features.append(lat_idx_baseline)
 
             # Change in lateralization (task - baseline)
@@ -336,12 +197,18 @@ def extract_lateralization_features(
             c4_baseline_power = compute_band_power(c4_baseline, sfreq, low, high)
             c4_task_power = compute_band_power(c4_task, sfreq, low, high)
 
-            c3_erd = (c3_baseline_power - c3_task_power) / (c3_baseline_power + 1e-10) * 100
-            c4_erd = (c4_baseline_power - c4_task_power) / (c4_baseline_power + 1e-10) * 100
+            c3_erd = (
+                (c3_baseline_power - c3_task_power) / (c3_baseline_power + 1e-10) * 100
+            )
+            c4_erd = (
+                (c4_baseline_power - c4_task_power) / (c4_baseline_power + 1e-10) * 100
+            )
             epoch_features.append(c3_erd - c4_erd)  # Asymmetry
 
             # Log power ratio (C3/C4) during task
-            epoch_features.append(np.log((c3_task_power + 1e-10) / (c4_task_power + 1e-10)))
+            epoch_features.append(
+                np.log((c3_task_power + 1e-10) / (c4_task_power + 1e-10))
+            )
 
             # Individual channel ERDs
             epoch_features.append(c3_erd)
@@ -356,7 +223,9 @@ def extract_lateralization_features(
         for band_name, (low, high) in [("mu", (8, 12)), ("beta", (13, 30))]:
             cz_baseline_power = compute_band_power(cz_baseline, sfreq, low, high)
             cz_task_power = compute_band_power(cz_task, sfreq, low, high)
-            cz_erd = (cz_baseline_power - cz_task_power) / (cz_baseline_power + 1e-10) * 100
+            cz_erd = (
+                (cz_baseline_power - cz_task_power) / (cz_baseline_power + 1e-10) * 100
+            )
             epoch_features.append(cz_erd)
             epoch_features.append(np.log(cz_task_power + 1e-10))
 
@@ -368,7 +237,9 @@ def extract_lateralization_features(
         fz_baseline, fz_task = epoch_pairs_by_channel["Fz"][epoch_idx]
         fz_theta_baseline = compute_band_power(fz_baseline, sfreq, 4, 8)
         fz_theta_task = compute_band_power(fz_task, sfreq, 4, 8)
-        epoch_features.append(np.log((fz_theta_task + 1e-10) / (fz_theta_baseline + 1e-10)))
+        epoch_features.append(
+            np.log((fz_theta_task + 1e-10) / (fz_theta_baseline + 1e-10))
+        )
 
         # Time-domain features from C3 and C4
         for signal in [c3_task, c4_task]:
@@ -408,18 +279,15 @@ def extract_csp_features(
 
     # Bandpass filter to mu+beta range before CSP
     X_filtered = mne.filter.filter_data(
-        X, sfreq,
-        l_freq=freq_band[0],
-        h_freq=freq_band[1],
-        verbose=False
+        X, sfreq, l_freq=freq_band[0], h_freq=freq_band[1], verbose=False
     )
 
     # Fit CSP - finds spatial filters maximizing class separability
     csp = CSP(
         n_components=n_components,
         reg="ledoit_wolf",  # Regularization for robust covariance estimation
-        log=True,           # Log-transform variance features
-        norm_trace=True,    # Normalize for scale invariance
+        log=True,  # Log-transform variance features
+        norm_trace=True,  # Normalize for scale invariance
     )
     features = csp.fit_transform(X_filtered, y)
 

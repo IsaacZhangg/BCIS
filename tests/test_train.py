@@ -7,24 +7,19 @@ from src.train import train_loso_cv, train_final_model, train_left_right_within_
 
 def test_train_loso_cv_returns_scores():
     """Test that LOSO CV returns accuracy scores for each subject."""
-    # Simulated data: 5 subjects, 20 epochs each
     np.random.seed(42)
     n_subjects = 5
-    n_epochs_per_class = 10
+    n_per_class = 10
 
-    X_by_subject = []
-    y_by_subject = []
-
-    for i in range(n_subjects):
-        # Create separable data: focused has higher feature values
-        focused = np.random.randn(n_epochs_per_class, 1) + 2
-        not_focused = np.random.randn(n_epochs_per_class, 1) - 2
-
-        X = np.vstack([focused, not_focused])
-        y = np.array([1] * n_epochs_per_class + [0] * n_epochs_per_class)
-
-        X_by_subject.append(X)
-        y_by_subject.append(y)
+    X_by_subject = [
+        np.vstack(
+            [np.random.randn(n_per_class, 1) + 2, np.random.randn(n_per_class, 1) - 2]
+        )
+        for _ in range(n_subjects)
+    ]
+    y_by_subject = [
+        np.array([1] * n_per_class + [0] * n_per_class) for _ in range(n_subjects)
+    ]
 
     scores, mean_acc, std_acc = train_loso_cv(X_by_subject, y_by_subject)
 
@@ -68,18 +63,19 @@ def test_train_left_right_within_subject_returns_scores():
     n_channels = 8
     n_samples = 625  # 2.5 seconds at 250Hz
 
-    X_by_subject = []
-    y_by_subject = []
-
-    for _ in range(n_subjects):
-        X_feat = np.random.randn(n_epochs_per_subject, n_features)
-        X_mc = np.random.randn(n_epochs_per_subject, n_channels, n_samples)
-        y = np.array([0] * 20 + [1] * 20)
-        X_by_subject.append((X_feat, X_mc))
-        y_by_subject.append(y)
+    X_by_subject = [
+        (
+            np.random.randn(n_epochs_per_subject, n_features),
+            np.random.randn(n_epochs_per_subject, n_channels, n_samples),
+        )
+        for _ in range(n_subjects)
+    ]
+    y_by_subject = [np.array([0] * 20 + [1] * 20) for _ in range(n_subjects)]
 
     scores, mean_acc, std_acc = train_left_right_within_subject(
-        X_by_subject, y_by_subject, n_folds=5  # Use fewer folds for speed
+        X_by_subject,
+        y_by_subject,
+        n_folds=5,  # Use fewer folds for speed
     )
 
     assert len(scores) == n_subjects

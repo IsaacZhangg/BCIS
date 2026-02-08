@@ -10,7 +10,9 @@ CHANNELS = ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
 SFREQ = 250.0  # Sampling frequency in Hz
 
 
-def load_recording(csv_path: Path) -> tuple[np.ndarray, list[tuple[int, int, int]], float]:
+def load_recording(
+    csv_path: Path,
+) -> tuple[np.ndarray, list[tuple[int, int, int]], float]:
     """
     Load a single recording from CSV.
 

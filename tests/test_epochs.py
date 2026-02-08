@@ -42,14 +42,16 @@ def test_extract_labeled_epochs_separates_classes():
 
     # Phase 3 = focused, Phase 5 = not focused
     events = [
-        (100, 3, 1),   # focused
+        (100, 3, 1),  # focused
         (1000, 5, 1),  # not focused
         (2000, 3, 2),  # focused
         (3000, 5, 2),  # not focused
         (4000, 1, 1),  # other phase - should be ignored
     ]
 
-    focused, not_focused = extract_labeled_epochs(signal, events, sfreq, baseline_phase=5)
+    focused, not_focused = extract_labeled_epochs(
+        signal, events, sfreq, baseline_phase=5
+    )
 
     assert len(focused) == 2
     assert len(not_focused) == 2
@@ -62,11 +64,11 @@ def test_extract_left_right_epochs_separates_by_movement():
 
     # Phase 3 events with movement 1 (left) and 2 (right)
     events = [
-        (500, 3, 1),    # left
-        (2000, 3, 2),   # right
-        (4000, 3, 1),   # left
-        (6000, 3, 2),   # right
-        (8000, 4, 1),   # phase 4 - should be ignored
+        (500, 3, 1),  # left
+        (2000, 3, 2),  # right
+        (4000, 3, 1),  # left
+        (6000, 3, 2),  # right
+        (8000, 4, 1),  # phase 4 - should be ignored
         (10000, 3, 1),  # left
     ]
 
@@ -87,9 +89,7 @@ def test_extract_left_right_epochs_correct_durations():
     events = [(2000, 3, 1), (5000, 3, 2)]
 
     left_pairs, right_pairs = extract_left_right_epochs(
-        signal, events, sfreq,
-        task_duration=1.5,
-        baseline_duration=1.0
+        signal, events, sfreq, task_duration=1.5, baseline_duration=1.0
     )
 
     # Baseline should be 1.0s * 250Hz = 250 samples
@@ -107,13 +107,12 @@ def test_extract_left_right_epochs_skips_baseline_before_signal_start():
     # Event at sample 100 with baseline_duration=1.0s (250 samples)
     # Baseline would need to start at sample -150, so should be skipped
     events = [
-        (100, 3, 1),    # baseline would start at -150, skipped
-        (2000, 3, 1),   # valid left
+        (100, 3, 1),  # baseline would start at -150, skipped
+        (2000, 3, 1),  # valid left
     ]
 
     left_pairs, right_pairs = extract_left_right_epochs(
-        signal, events, sfreq,
-        baseline_duration=1.0
+        signal, events, sfreq, baseline_duration=1.0
     )
 
     # Only second event should produce an epoch
@@ -130,15 +129,17 @@ def test_extract_left_right_epochs_skips_task_past_signal_end():
     # Task needs 375 + 125 = 500 samples after event
     # Event at 4600: task_end = 4600 + 125 + 375 = 5100 > 5000, skipped
     events = [
-        (2000, 3, 2),   # valid right
-        (4600, 3, 2),   # task would extend past signal end, skipped
+        (2000, 3, 2),  # valid right
+        (4600, 3, 2),  # task would extend past signal end, skipped
     ]
 
     left_pairs, right_pairs = extract_left_right_epochs(
-        signal, events, sfreq,
+        signal,
+        events,
+        sfreq,
         task_duration=1.5,
         baseline_duration=1.0,
-        skip_duration=0.5
+        skip_duration=0.5,
     )
 
     # Only first event should produce an epoch
