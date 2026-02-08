@@ -1,11 +1,15 @@
-"""Training pipeline: FBCSP + LDA for left/right motor imagery classification."""
+"""Training pipeline: FBCSP + LDA and Riemannian classifiers for left/right MI."""
 
 import mne
 import numpy as np
 from mne.decoding import CSP
+from pyriemann.estimation import Covariances
+from pyriemann.tangentspace import TangentSpace
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 FBCSP_BANDS = [
@@ -96,7 +100,7 @@ def train_within_subject_cv(
     y_by_subject: list[np.ndarray],
     sfreq: float = 250.0,
     n_folds: int = 10,
-    k_best: int = 20,
+    k_best: int = 10,
 ) -> tuple[list[float], float, float]:
     """Within-subject stratified k-fold CV using FBCSP + LDA.
 
@@ -163,7 +167,7 @@ def train_final_model(
     X_multichannel: np.ndarray,
     y: np.ndarray,
     sfreq: float = 250.0,
-    k_best: int = 20,
+    k_best: int = 10,
 ) -> dict:
     """Train a deployable FBCSP + LDA model on all data for a single subject.
 
@@ -218,3 +222,89 @@ def predict(
     X_selected = model["selector"].transform(X_combined)
     X_scaled = model["scaler"].transform(X_selected)
     return model["classifier"].predict(X_scaled)
+
+
+# ---------------------------------------------------------------------------
+# Riemannian geometry classifier (Covariances → TangentSpace → LogisticRegression)
+# ---------------------------------------------------------------------------
+
+
+def train_within_subject_cv_riemann(
+    X_by_subject: list[np.ndarray],
+    y_by_subject: list[np.ndarray],
+    n_folds: int = 10,
+) -> tuple[list[float], float, float]:
+    """Within-subject stratified k-fold CV using Riemannian tangent-space classifier.
+
+    Per fold:
+    1. Covariances(estimator='oas') — shrinkage covariance estimation
+    2. TangentSpace(metric='riemann') — project SPD matrices to tangent space
+    3. LogisticRegression(C=1.0, solver='lbfgs') — classify
+
+    Args:
+        X_by_subject: List of multichannel EEG arrays (n_trials, n_channels, n_samples).
+        y_by_subject: List of label arrays per subject.
+        n_folds: Number of CV folds.
+
+    Returns:
+        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
+    """
+    scores = []
+
+    for X_multichannel, y in zip(X_by_subject, y_by_subject):
+        n_samples = len(y)
+        actual_folds = min(n_folds, n_samples // 2)
+        if actual_folds < 2:
+            actual_folds = n_samples
+
+        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+        fold_scores = []
+
+        for train_idx, test_idx in skf.split(X_multichannel, y):
+            pipe = make_pipeline(
+                Covariances(estimator="oas"),
+                TangentSpace(metric="riemann"),
+                LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+            )
+            pipe.fit(X_multichannel[train_idx], y[train_idx])
+            fold_scores.append(pipe.score(X_multichannel[test_idx], y[test_idx]))
+
+        scores.append(float(np.mean(fold_scores)))
+
+    mean_acc = float(np.mean(scores))
+    std_acc = float(np.std(scores))
+    return scores, mean_acc, std_acc
+
+
+def train_final_model_riemann(
+    X_multichannel: np.ndarray,
+    y: np.ndarray,
+) -> dict:
+    """Train a deployable Riemannian model on all data for a single subject.
+
+    Returns:
+        Dict with key 'pipeline' containing the fitted sklearn Pipeline.
+    """
+    pipe = make_pipeline(
+        Covariances(estimator="oas"),
+        TangentSpace(metric="riemann"),
+        LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+    )
+    pipe.fit(X_multichannel, y)
+    return {"pipeline": pipe}
+
+
+def predict_riemann(
+    model: dict,
+    X_multichannel: np.ndarray,
+) -> np.ndarray:
+    """Run inference with a saved Riemannian model.
+
+    Args:
+        model: Dict returned by train_final_model_riemann.
+        X_multichannel: Multichannel EEG of shape (n_trials, n_channels, n_samples).
+
+    Returns:
+        Predicted class labels.
+    """
+    return model["pipeline"].predict(X_multichannel)

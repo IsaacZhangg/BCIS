@@ -2,7 +2,14 @@
 
 import numpy as np
 
-from src.train import predict, train_final_model, train_within_subject_cv
+from src.train import (
+    predict,
+    predict_riemann,
+    train_final_model,
+    train_final_model_riemann,
+    train_within_subject_cv,
+    train_within_subject_cv_riemann,
+)
 
 N_EPOCHS = 40
 N_FEATURES = 10
@@ -78,5 +85,61 @@ def test_predict_with_saved_model():
     model = train_final_model(X_features, X_multichannel, LABELS)
     preds = predict(model, X_features, X_multichannel)
 
+    assert preds.shape == (N_EPOCHS,)
+    assert set(np.unique(preds)).issubset({0, 1})
+
+
+# ---------- Riemannian classifier tests ----------
+
+
+def test_riemann_cv_returns_scores():
+    """Riemannian CV returns per-subject scores with correct shape and range."""
+    n_subjects = 3
+    rng = np.random.default_rng(42)
+    X_by_subject = [
+        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
+        for _ in range(n_subjects)
+    ]
+    y_by_subject = [LABELS for _ in range(n_subjects)]
+
+    scores, mean_acc, std_acc = train_within_subject_cv_riemann(
+        X_by_subject, y_by_subject, n_folds=5
+    )
+
+    assert len(scores) == n_subjects
+    assert 0 <= mean_acc <= 1
+    assert std_acc >= 0
+    for s in scores:
+        assert 0 <= s <= 1
+
+
+def test_riemann_no_leakage_on_random_data():
+    """On pure random data, Riemannian accuracy should be near chance (~50%)."""
+    n_subjects = 2
+    rng = np.random.default_rng(123)
+    X_by_subject = [
+        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
+        for _ in range(n_subjects)
+    ]
+    y_by_subject = [LABELS for _ in range(n_subjects)]
+
+    _, mean_acc, _ = train_within_subject_cv_riemann(
+        X_by_subject, y_by_subject, n_folds=5
+    )
+
+    assert mean_acc < 0.70, (
+        f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
+    )
+
+
+def test_riemann_final_model_and_predict():
+    """Round-trip: train a Riemannian model, then predict with it."""
+    rng = np.random.default_rng(42)
+    X_multichannel = rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
+
+    model = train_final_model_riemann(X_multichannel, LABELS)
+    assert "pipeline" in model
+
+    preds = predict_riemann(model, X_multichannel)
     assert preds.shape == (N_EPOCHS,)
     assert set(np.unique(preds)).issubset({0, 1})

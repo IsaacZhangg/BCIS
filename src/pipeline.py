@@ -7,10 +7,15 @@ import joblib
 import numpy as np
 
 from src.data_loader import CHANNELS, get_complete_recordings, load_recording
-from src.epochs import extract_left_right_epochs
+from src.epochs import extract_left_right_epochs, reject_bad_epochs
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_eeg
-from src.train import train_final_model, train_within_subject_cv
+from src.train import (
+    train_final_model,
+    train_final_model_riemann,
+    train_within_subject_cv,
+    train_within_subject_cv_riemann,
+)
 
 
 def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
@@ -65,12 +70,23 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
             left_pairs_by_channel[ch_name] = left
             right_pairs_by_channel[ch_name] = right
 
+        n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
+        n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
+
+        # Artifact rejection
+        left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = reject_bad_epochs(
+            left_pairs_by_channel, right_pairs_by_channel
+        )
+
         n_left = len(left_pairs_by_channel[CHANNELS[0]])
         n_right = len(right_pairs_by_channel[CHANNELS[0]])
-        print(f"    Left epochs: {n_left}, Right epochs: {n_right}")
+        print(
+            f"    Epochs: {n_left_raw}L/{n_right_raw}R → "
+            f"rejected {rej_l}L/{rej_r}R → kept {n_left}L/{n_right}R"
+        )
 
         if n_left == 0 or n_right == 0:
-            print(f"    Skipping {subject_id} - no epochs")
+            print(f"    Skipping {subject_id} - no epochs after rejection")
             continue
 
         left_features = extract_lateralization_features(left_pairs_by_channel, sfreq)
@@ -92,36 +108,66 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     if not X_by_subject:
         raise ValueError("No valid subjects found")
 
-    # Step 3: Within-Subject Cross-validation
-    print("\n[3/4] Running FBCSP + LDA within-subject cross-validation...")
-    print("(10-fold CV per subject)")
-    scores, mean_acc, std_acc = train_within_subject_cv(
+    # Separate multichannel arrays for Riemannian pipeline
+    X_multi_by_subject = [X_mc for _, X_mc in X_by_subject]
+
+    # Step 3: Within-Subject Cross-validation (both classifiers)
+    print("\n[3/4] Running within-subject cross-validation...")
+    print("(10-fold CV per subject, FBCSP+LDA and Riemannian)")
+
+    fbcsp_scores, fbcsp_mean, fbcsp_std = train_within_subject_cv(
         X_by_subject, y_by_subject, sfreq=sfreq
     )
+    riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
+        X_multi_by_subject, y_by_subject
+    )
 
-    print("\nPer-subject accuracy (FBCSP + LDA 10-fold CV):")
-    for sid, score in zip(subject_ids, scores):
-        status = "signal" if score >= 0.60 else "chance"
-        print(f"  {sid}: {score:.1%}  [{status}]")
+    # Per-subject best score
+    best_scores = []
+    best_methods = []
+    for fs, rs in zip(fbcsp_scores, riemann_scores):
+        if rs >= fs:
+            best_scores.append(rs)
+            best_methods.append("Riemann")
+        else:
+            best_scores.append(fs)
+            best_methods.append("FBCSP")
 
-    print(f"\nMean accuracy: {mean_acc:.1%} (+/- {std_acc:.1%})")
+    best_mean = float(np.mean(best_scores))
+    best_std = float(np.std(best_scores))
 
-    # Step 4: Train & save per-subject models
+    print(f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'Best':>10}")
+    print("-" * 48)
+    for sid, fs, rs, bs, bm in zip(
+        subject_ids, fbcsp_scores, riemann_scores, best_scores, best_methods
+    ):
+        status = "signal" if bs >= 0.60 else "chance"
+        print(f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {bs:>9.1%}  [{bm}, {status}]")
+
+    print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
+    print(f"Riemann mean:   {riemann_mean:.1%} (+/- {riemann_std:.1%})")
+    print(f"Best-of mean:   {best_mean:.1%} (+/- {best_std:.1%})")
+
+    # Step 4: Train & save per-subject models (best method per subject)
     print("\n[4/4] Training and saving per-subject models...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
-    for sid, (X_features, X_multichannel), y in zip(
-        subject_ids, X_by_subject, y_by_subject
+    for sid, (X_features, X_multichannel), y, method in zip(
+        subject_ids, X_by_subject, y_by_subject, best_methods
     ):
-        model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
-        model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
+        if method == "Riemann":
+            model = train_final_model_riemann(X_multichannel, y)
+            model_path = output_dir / f"{sid}_riemann.joblib"
+        else:
+            model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
+            model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
         joblib.dump(model, model_path)
         model_paths[sid] = str(model_path)
-        print(f"  Saved {model_path}")
+        print(f"  Saved {model_path} ({method})")
 
     above_chance, at_chance = [], []
-    for sid, s in zip(subject_ids, scores):
+    for sid, s in zip(subject_ids, best_scores):
         (above_chance if s >= 0.60 else at_chance).append(sid)
 
     print("\n" + "=" * 60)
@@ -129,16 +175,23 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     print("=" * 60)
     print(f"Subjects with signal (>=60%): {', '.join(above_chance) or 'none'}")
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
-    print(f"Mean accuracy: {mean_acc:.1%} (+/- {std_acc:.1%})")
+    print(f"Best-of mean accuracy: {best_mean:.1%} (+/- {best_std:.1%})")
 
     # Save results
     results = {
         "task": "left_right_motor_imagery",
-        "model": "FBCSP + LDA",
+        "models": ["FBCSP+LDA (k=10)", "Riemannian (OAS+TangentSpace+LR)"],
         "n_subjects": len(subject_ids),
-        "per_subject_scores": {sid: float(s) for sid, s in zip(subject_ids, scores)},
-        "mean_accuracy": float(mean_acc),
-        "std_accuracy": float(std_acc),
+        "fbcsp_scores": {sid: float(s) for sid, s in zip(subject_ids, fbcsp_scores)},
+        "riemann_scores": {
+            sid: float(s) for sid, s in zip(subject_ids, riemann_scores)
+        },
+        "best_scores": {sid: float(s) for sid, s in zip(subject_ids, best_scores)},
+        "best_methods": {sid: m for sid, m in zip(subject_ids, best_methods)},
+        "fbcsp_mean_accuracy": float(fbcsp_mean),
+        "riemann_mean_accuracy": float(riemann_mean),
+        "best_mean_accuracy": float(best_mean),
+        "best_std_accuracy": float(best_std),
         "subjects_with_signal": above_chance,
         "subjects_at_chance": at_chance,
         "model_paths": model_paths,

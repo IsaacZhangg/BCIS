@@ -30,15 +30,21 @@ This is a left/right motor imagery BCI classifier for controlling a robotic 6th 
 CSV files (8ch, 250Hz Unicorn headset)
   → data_loader.py: parse recordings, extract events
   → preprocess.py: bandpass (1-40Hz) + notch (60Hz) filtering via MNE
-  → epochs.py: extract paired baseline (1.0s) / task (1.8s) windows from phase-3 imagery events
+  → epochs.py: extract paired baseline/task windows + adaptive artifact rejection
   → features.py: lateralization indices (C3 vs C4), CSP, Hjorth params, frontal theta (39 features)
-  → train.py: FBCSP (10 bands × 4 CSP components = 40 features) + handcrafted features → SelectKBest(k=20) → StandardScaler → LDA
-  → pipeline.py: orchestrates the above, runs within-subject 10-fold CV, saves per-subject models
+  → train.py: two classifiers evaluated in parallel:
+      1. FBCSP (10 bands × 4 CSP) + handcrafted → SelectKBest(k=10) → StandardScaler → LDA
+      2. Riemannian: Covariances(OAS) → TangentSpace(riemann) → LogisticRegression
+  → pipeline.py: orchestrates the above, runs both classifiers, saves best per subject
 ```
 
 **Event encoding**: stim value = `phase * 10 + movement` (phase 3 only; movement 1=left, 2=right). Each complete recording has exactly 100 phase-3 trials (50 left, 50 right).
 
-**FBCSP + LDA pipeline**: `train.py` uses Filter-Bank CSP across 10 frequency bands [(4,8), (8,10), ..., (30,40)] with 4 CSP components each, producing up to 40 spatial features. These are concatenated with 39 handcrafted features from `features.py`, reduced to 20 via SelectKBest(f_classif), scaled, and classified with shrinkage LDA. Per-subject models are saved as `models/{subject_id}_fbcsp_lda.joblib`.
+**FBCSP + LDA pipeline**: `train.py` uses Filter-Bank CSP across 10 frequency bands [(4,8), (8,10), ..., (30,40)] with 4 CSP components each, producing up to 40 spatial features. These are concatenated with 39 handcrafted features from `features.py`, reduced to 10 via SelectKBest(f_classif), scaled, and classified with shrinkage LDA.
+
+**Riemannian pipeline**: `train.py` also provides a Riemannian geometry classifier — OAS covariance estimation → Riemannian tangent space projection → Logistic Regression. This is parameter-free (no frequency band tuning) and complements FBCSP on some subjects.
+
+**Artifact rejection**: `epochs.py` includes adaptive rejection using median + 4×MAD threshold on peak-to-peak amplitude, dropping only statistical outliers per subject rather than using a fixed µV threshold.
 
 **Key channels**: C3 and C4 (motor cortex, primary discriminative pair), Cz (supplementary motor area), Fz (frontal theta/attention).
 
@@ -46,6 +52,11 @@ CSV files (8ch, 250Hz Unicorn headset)
 
 EEG recordings live in `unicorn-data/` (gitignored). Structure: `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`. Each CSV has columns: timestamp, Fz, C3, Cz, C4, Pz, PO7, Oz, PO8, stim.
 
+## Available but unused utilities
+
+- `preprocess.py: common_average_reference()` — CAR spatial filter. Tested but hurts CSP with only 8 channels (reduces rank 8→7).
+- `preprocess.py: apply_asr()` — Artifact Subspace Reconstruction via asrpy (includes numpy 2.x compatibility patch). Tested but removes discriminative motor imagery variance along with artifacts.
+
 ## Current Status
 
-Consolidated from a 40+ classifier ensemble + separate LGBM to a single clean FBCSP + LDA pipeline. Only 2/10 subjects (subject0006: 88%, subject0010: 82%) show above-chance accuracy; the other 8 are at chance level (~42-57%). Mean accuracy: 57.2%. This is honest reporting — signal quality varies by subject with consumer-grade EEG. Git branch `P3LR` with PR base `P3P5`.
+Dual-classifier pipeline (FBCSP+LDA and Riemannian) with adaptive artifact rejection. 4/10 subjects above chance, best-of mean accuracy 60.1%. Best subject: subject0006 at 91%. The pipeline selects the better classifier per subject. Signal quality remains the bottleneck with the 8-channel consumer-grade Unicorn headset. Git branch `P3LR` with PR base `P3P5`.

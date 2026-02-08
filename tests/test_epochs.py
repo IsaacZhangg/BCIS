@@ -2,7 +2,12 @@
 
 import numpy as np
 
-from src.epochs import extract_epochs, extract_labeled_epochs, extract_left_right_epochs
+from src.epochs import (
+    extract_epochs,
+    extract_labeled_epochs,
+    extract_left_right_epochs,
+    reject_bad_epochs,
+)
 
 
 def test_extract_epochs_correct_shape():
@@ -145,3 +150,92 @@ def test_extract_left_right_epochs_skips_task_past_signal_end():
     # Only first event should produce an epoch
     assert len(left_pairs) == 0
     assert len(right_pairs) == 1
+
+
+# ---------- reject_bad_epochs tests ----------
+
+
+def _make_pairs(n_trials, amplitude=10.0, channels=("C3", "C4")):
+    """Helper: create pairs_by_channel dicts with controlled amplitude."""
+    rng = np.random.default_rng(0)
+    pairs_by_ch = {}
+    for ch in channels:
+        pairs = []
+        for _ in range(n_trials):
+            baseline = rng.standard_normal(250) * amplitude
+            task = rng.standard_normal(375) * amplitude
+            pairs.append((baseline, task))
+        pairs_by_ch[ch] = pairs
+    return pairs_by_ch
+
+
+def test_reject_bad_epochs_drops_high_amplitude():
+    """Trials with peak-to-peak > fixed threshold_uv are rejected."""
+    channels = ("C3", "C4")
+    left = _make_pairs(3, amplitude=10.0, channels=channels)
+    right = _make_pairs(2, amplitude=10.0, channels=channels)
+
+    # Inject one bad left trial (index 1) with extreme amplitude
+    bad_task = np.zeros(375)
+    bad_task[0] = 200.0  # ptp = 200 > 150
+    left["C3"][1] = (left["C3"][1][0], bad_task)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
+        left, right, threshold_uv=150.0
+    )
+
+    assert rej_l == 1
+    assert rej_r == 0
+    assert len(cleaned_l["C3"]) == 2
+    assert len(cleaned_r["C3"]) == 2
+
+
+def test_reject_bad_epochs_drops_flat_trials():
+    """Flat trials (ptp < flat_uv) are rejected."""
+    channels = ("C3", "C4")
+    left = _make_pairs(2, amplitude=10.0, channels=channels)
+    right = _make_pairs(2, amplitude=10.0, channels=channels)
+
+    # Make one right trial flat on one channel
+    flat_task = np.ones(375) * 5.0  # ptp = 0 < 1
+    right["C4"][0] = (right["C4"][0][0], flat_task)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
+        left, right, threshold_uv=150.0
+    )
+
+    assert rej_l == 0
+    assert rej_r == 1
+
+
+def test_reject_bad_epochs_keeps_clean_data():
+    """All-clean data passes through unchanged (adaptive threshold)."""
+    channels = ("C3", "C4")
+    left = _make_pairs(5, amplitude=10.0, channels=channels)
+    right = _make_pairs(5, amplitude=10.0, channels=channels)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(left, right)
+
+    assert rej_l == 0
+    assert rej_r == 0
+    assert len(cleaned_l["C3"]) == 5
+    assert len(cleaned_r["C3"]) == 5
+
+
+def test_reject_bad_epochs_adaptive_drops_outlier():
+    """Adaptive threshold (median + n_mad * MAD) drops only extreme outliers."""
+    channels = ("C3", "C4")
+    # 20 uniform trials at amplitude=10 → typical ptp ~60-70
+    left = _make_pairs(10, amplitude=10.0, channels=channels)
+    right = _make_pairs(10, amplitude=10.0, channels=channels)
+
+    # Inject one massive outlier into left trial 0
+    bad_task = np.zeros(375)
+    bad_task[0] = 1000.0  # ptp = 1000, far above any adaptive threshold
+    left["C3"][0] = (left["C3"][0][0], bad_task)
+
+    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(left, right)
+
+    assert rej_l == 1  # only the outlier rejected
+    assert rej_r == 0
+    assert len(cleaned_l["C3"]) == 9

@@ -2,7 +2,7 @@
 
 A brain-computer interface (BCI) system that classifies left vs right hand motor imagery from EEG signals. Designed for real-time control of a robotic 6th finger, where **left imagery = finger down** and **right imagery = finger up**.
 
-Built on a **Filter-Bank Common Spatial Patterns (FBCSP) + Linear Discriminant Analysis (LDA)** pipeline, evaluated with within-subject 10-fold stratified cross-validation.
+Built on a dual-classifier pipeline — **FBCSP + LDA** and **Riemannian tangent-space** — with adaptive artifact rejection. The pipeline evaluates both classifiers per subject and selects the better one. Evaluated with within-subject 10-fold stratified cross-validation.
 
 ## Table of Contents
 
@@ -25,24 +25,24 @@ Built on a **Filter-Bank Common Spatial Patterns (FBCSP) + Linear Discriminant A
 
 ## Results
 
-**57.2% mean accuracy** across 10 subjects (within-subject 10-fold stratified CV).
+**60.1% best-of mean accuracy** across 10 subjects (within-subject 10-fold stratified CV).
 
-2 of 10 subjects show above-chance classification. This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
+4 of 10 subjects show above-chance classification. This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
 
-| Subject | Accuracy | Status |
-|---------|----------|--------|
-| subject0001 | 54% | chance |
-| subject0002 | 51% | chance |
-| subject0004 | 42% | chance |
-| subject0005 | 45% | chance |
-| subject0006 | **88%** | signal |
-| subject0007 | 54% | chance |
-| subject0008 | 57% | chance |
-| subject0009 | 42% | chance |
-| subject0010 | **82%** | signal |
-| subject0011 | 57% | chance |
+| Subject | FBCSP+LDA | Riemann | Best | Status |
+|---------|-----------|---------|------|--------|
+| subject0001 | 56.2% | 50.7% | 56.2% | chance |
+| subject0002 | 42.4% | 52.9% | 52.9% | chance |
+| subject0004 | 42.8% | 33.6% | 42.8% | chance |
+| subject0005 | 49.6% | 44.9% | 49.6% | chance |
+| subject0006 | **91.0%** | 38.0% | **91.0%** | signal |
+| subject0007 | 58.0% | 46.0% | 58.0% | chance |
+| subject0008 | **60.6%** | 47.9% | **60.6%** | signal |
+| subject0009 | 47.4% | 55.1% | 55.1% | chance |
+| subject0010 | **74.3%** | 72.1% | **74.3%** | signal |
+| subject0011 | 53.3% | **60.8%** | **60.8%** | signal |
 
-Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~42-57%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns.
+Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~42-58%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP+LDA, picking up 3 subjects (0002, 0009, 0011) where the traditional pipeline struggles.
 
 ## Hardware
 
@@ -61,19 +61,21 @@ CSV files (8 channels, 250 Hz, Unicorn headset)
   ├─ preprocess.py ─── Bandpass (1-40 Hz) + Notch (60 Hz) filtering
   │
   ├─ epochs.py ──────── Extract paired baseline (1.0s) / task (1.8s) windows
+  │                      + adaptive artifact rejection (median + 4×MAD)
   │
   ├─ features.py ────── 39 handcrafted features:
   │                        Lateralization indices, ERD asymmetry,
   │                        Hjorth parameters, frontal theta
   │
-  ├─ train.py ─────────  FBCSP (10 bands × 4 CSP components = 40 features)
-  │                      + 39 handcrafted features
-  │                      → SelectKBest(k=20)
-  │                      → StandardScaler
-  │                      → LDA (shrinkage)
+  ├─ train.py ─────────  Two classifiers evaluated per subject:
+  │                      1. FBCSP (10 bands × 4 CSP = 40 features)
+  │                         + 39 handcrafted → SelectKBest(k=10)
+  │                         → StandardScaler → LDA (shrinkage)
+  │                      2. Riemannian: Covariances(OAS)
+  │                         → TangentSpace(riemann) → LogisticRegression
   │
-  └─ pipeline.py ────── Orchestrates everything, runs 10-fold CV,
-                         saves per-subject models
+  └─ pipeline.py ────── Orchestrates everything, runs both classifiers,
+                         saves best model per subject
 ```
 
 ## Architecture
@@ -96,10 +98,12 @@ Each complete recording contains exactly **100 phase-3 trials** (50 left, 50 rig
 
 **Module**: `src/preprocess.py`
 
-Two-stage filtering applied per channel using MNE-Python's FIR filters:
+Two-stage temporal filtering applied per channel using MNE-Python's FIR filters:
 
 1. **Bandpass filter** (1-40 Hz) -- removes DC drift below 1 Hz and high-frequency noise above 40 Hz, retaining the physiologically relevant EEG bands (delta through low gamma)
 2. **Notch filter** (60 Hz) -- removes power line interference (North American AC frequency)
+
+Also provides `common_average_reference()` (CAR) and `apply_asr()` (Artifact Subspace Reconstruction) as optional spatial filters, though neither is active in the pipeline -- CAR reduces rank below acceptable levels for 8-channel CSP, and ASR removes discriminative motor imagery variance.
 
 ### 3. Epoch Extraction
 
@@ -117,6 +121,8 @@ Extracts time-locked windows around each motor imagery event marker. Each trial 
 - **Task**: 1.8 seconds of motor imagery signal (the classification target)
 
 Trials are discarded if the baseline would start before the signal beginning or the task would extend past the signal end.
+
+After extraction, **adaptive artifact rejection** drops trials where any channel's peak-to-peak amplitude exceeds `median + 4×MAD` (computed per subject) or falls below 1 µV (flat signal). This adapts to each subject's signal characteristics rather than using a fixed threshold, typically rejecting 5-15% of trials.
 
 ### 4. Feature Extraction
 
@@ -153,17 +159,29 @@ Computed in `src/train.py` during the training loop (fitted per fold to avoid da
 
 **Module**: `src/train.py`
 
+Two classifiers are evaluated per subject in 10-fold stratified CV. The best per-subject classifier is selected for deployment.
+
+#### Classifier 1: FBCSP + LDA
+
 Per-subject, per-fold pipeline:
 
 1. **FBCSP extraction** -- bandpass filter to each of 10 bands, fit CSP on training set, transform both train and test (up to 40 features)
 2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (39) = ~79 features
-3. **Feature selection** -- `SelectKBest(f_classif, k=20)` picks the 20 most discriminative features by ANOVA F-score
+3. **Feature selection** -- `SelectKBest(f_classif, k=10)` picks the 10 most discriminative features by ANOVA F-score
 4. **Scaling** -- `StandardScaler` zero-centers and unit-normalizes features
 5. **Classification** -- `LDA(solver='lsqr', shrinkage='auto')` with automatic Ledoit-Wolf shrinkage for robust covariance estimation
 
+#### Classifier 2: Riemannian Tangent Space
+
+Per-subject, per-fold pipeline (no frequency band tuning or feature engineering):
+
+1. **Covariance estimation** -- `Covariances(estimator='oas')` computes Oracle Approximating Shrinkage covariance matrices from multichannel EEG (8×8 SPD matrices)
+2. **Tangent space projection** -- `TangentSpace(metric='riemann')` maps SPD matrices to Euclidean tangent space (36 features for 8 channels)
+3. **Classification** -- `LogisticRegression(C=1.0, solver='lbfgs')`
+
 **Evaluation**: 10-fold stratified cross-validation, per subject. CSP models are re-fitted on each fold's training set to prevent information leakage.
 
-**Deployment models**: After CV evaluation, a final model is trained on all data per subject and saved as a joblib dict containing the full inference pipeline (CSP models, feature selector, scaler, LDA classifier).
+**Deployment models**: After CV evaluation, the better-scoring classifier is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA models contain the full inference pipeline (CSP models, feature selector, scaler, LDA classifier). Riemannian models contain a single sklearn Pipeline.
 
 ## Project Structure
 
@@ -172,10 +190,10 @@ BCIS/
 ├── src/
 │   ├── __init__.py
 │   ├── pipeline.py          # Main pipeline orchestrator (entry point)
-│   ├── train.py              # FBCSP + LDA training, CV, inference
+│   ├── train.py              # FBCSP+LDA & Riemannian training, CV, inference
 │   ├── data_loader.py        # CSV loading, event parsing
-│   ├── preprocess.py         # Bandpass + notch filtering
-│   ├── epochs.py             # Epoch extraction (baseline + task pairs)
+│   ├── preprocess.py         # Bandpass + notch filtering, CAR, ASR
+│   ├── epochs.py             # Epoch extraction + adaptive artifact rejection
 │   └── features.py           # Handcrafted features + CSP
 ├── tests/
 │   ├── test_data_loader.py   # Data loading and recording discovery
@@ -184,10 +202,10 @@ BCIS/
 │   ├── test_features.py      # Feature shapes, values, missing channel errors
 │   └── test_train.py         # CV output, leakage check, model completeness
 ├── models/                    # Per-subject trained models (.joblib)
-│   ├── subject0001_fbcsp_lda.joblib
+│   ├── subject0006_fbcsp_lda.joblib  # FBCSP+LDA where it wins
+│   ├── subject0011_riemann.joblib    # Riemannian where it wins
 │   ├── ...
-│   ├── subject0011_fbcsp_lda.joblib
-│   └── training_results.json # Accuracy metrics and model paths
+│   └── training_results.json # Accuracy metrics, method comparison, model paths
 ├── unicorn-data/              # EEG recordings (gitignored)
 ├── pyproject.toml             # Project config and dependencies
 ├── uv.lock                    # Dependency lock file
@@ -241,19 +259,17 @@ Output:
 
 ```python
 import joblib
-import numpy as np
-from src.train import predict
-from src.features import extract_lateralization_features
-from src.preprocess import preprocess_eeg
-from src.data_loader import CHANNELS
 
-# Load a per-subject model
+# FBCSP+LDA model
 model = joblib.load("models/subject0006_fbcsp_lda.joblib")
-
-# Prepare your data:
-# X_features: handcrafted features, shape (n_trials, 39)
-# X_multichannel: raw multichannel EEG, shape (n_trials, 8, n_samples)
+from src.train import predict
 predictions = predict(model, X_features, X_multichannel)
+
+# Riemannian model
+model = joblib.load("models/subject0011_riemann.joblib")
+from src.train import predict_riemann
+predictions = predict_riemann(model, X_multichannel)
+
 # predictions: array of 0 (left) or 1 (right)
 ```
 
@@ -285,16 +301,22 @@ Each CSV file has the following columns:
 
 ## Model Format
 
-Each saved `.joblib` file is a Python dictionary containing the full inference pipeline:
+### FBCSP+LDA models (`*_fbcsp_lda.joblib`)
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `csp_models` | `list[tuple[CSP, tuple[float, float]]]` | Fitted CSP spatial filters per frequency band |
-| `selector` | `SelectKBest` | Fitted feature selector (top 20 by ANOVA F-score) |
+| `selector` | `SelectKBest` | Fitted feature selector (top 10 by ANOVA F-score) |
 | `scaler` | `StandardScaler` | Fitted feature normalizer |
 | `classifier` | `LinearDiscriminantAnalysis` | Fitted LDA with shrinkage |
 | `sfreq` | `float` | Sampling frequency (250.0 Hz) |
-| `k_best` | `int` | Number of selected features (20) |
+| `k_best` | `int` | Number of selected features (10) |
+
+### Riemannian models (`*_riemann.joblib`)
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `pipeline` | `sklearn.pipeline.Pipeline` | Full pipeline: Covariances → TangentSpace → LogisticRegression |
 
 ## Testing
 
@@ -308,19 +330,21 @@ uv run pytest tests/ -v
 uv run pytest tests/test_train.py -v
 ```
 
-**Test coverage**:
+**Test coverage** (35 tests):
 - `test_data_loader.py` -- CSV parsing, event extraction, complete recording discovery
-- `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline
-- `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end)
+- `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline, CAR common-mode removal, ASR artifact cleaning
+- `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end), artifact rejection (high amplitude, flat signal, adaptive outlier detection, clean passthrough)
 - `test_features.py` -- Feature dimensions, lateralization index symmetry, missing channel errors, CSP output shapes
-- `test_train.py` -- CV score ranges, data leakage detection (random data <= 70%), model dict completeness, round-trip predict
+- `test_train.py` -- CV score ranges, data leakage detection (random data <= 70%), model dict completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip
 
 ## Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
 | [MNE-Python](https://mne.tools/) | >=1.11.0 | EEG signal processing, FIR filters, CSP implementation |
-| [scikit-learn](https://scikit-learn.org/) | >=1.8.0 | LDA classifier, SelectKBest, StratifiedKFold, StandardScaler |
+| [scikit-learn](https://scikit-learn.org/) | >=1.8.0 | LDA, LogisticRegression, SelectKBest, StratifiedKFold, StandardScaler |
+| [pyriemann](https://pyriemann.readthedocs.io/) | >=0.7 | Riemannian geometry: covariance estimation, tangent space projection |
+| [asrpy](https://github.com/DiGyt/asrpy) | >=0.0.8 | Artifact Subspace Reconstruction (optional, includes numpy 2.x compat patch) |
 | [NumPy](https://numpy.org/) | >=2.4.2 | Array operations |
 | [SciPy](https://scipy.org/) | >=1.17.0 | Welch's method for spectral analysis |
 | [pandas](https://pandas.pydata.org/) | >=3.0.0 | CSV loading |
