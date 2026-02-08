@@ -22,12 +22,9 @@ def bandpass_filter(
     Returns:
         Filtered signal
     """
-    # MNE filter expects 2D array (n_channels, n_samples)
-    data_2d = data.reshape(1, -1)
-    filtered = mne.filter.filter_data(
-        data_2d, sfreq, l_freq=l_freq, h_freq=h_freq, verbose=False
-    )
-    return filtered.flatten()
+    return mne.filter.filter_data(
+        data.reshape(1, -1), sfreq, l_freq=l_freq, h_freq=h_freq, verbose=False
+    ).flatten()
 
 
 def notch_filter(
@@ -46,9 +43,9 @@ def notch_filter(
     Returns:
         Filtered signal
     """
-    data_2d = data.reshape(1, -1)
-    filtered = mne.filter.notch_filter(data_2d, sfreq, freqs=freq, verbose=False)
-    return filtered.flatten()
+    return mne.filter.notch_filter(
+        data.reshape(1, -1), sfreq, freqs=freq, verbose=False
+    ).flatten()
 
 
 def preprocess_eeg(data: np.ndarray, sfreq: float) -> np.ndarray:
@@ -62,8 +59,5 @@ def preprocess_eeg(data: np.ndarray, sfreq: float) -> np.ndarray:
     Returns:
         Preprocessed signal
     """
-    # Bandpass filter (1-40 Hz)
-    filtered = bandpass_filter(data, sfreq, l_freq=1.0, h_freq=40.0)
-    # Notch filter (60 Hz)
-    filtered = notch_filter(filtered, sfreq, freq=60.0)
-    return filtered
+    filtered = bandpass_filter(data, sfreq)
+    return notch_filter(filtered, sfreq)

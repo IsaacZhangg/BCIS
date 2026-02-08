@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 
 from src.features import (
+    compute_lateralization_index,
     compute_theta_power,
+    extract_csp_features,
     extract_features,
     extract_lateralization_features,
-    compute_lateralization_index,
-    extract_csp_features,
 )
 
 

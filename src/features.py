@@ -1,8 +1,14 @@
 """Feature extraction: multi-channel, multi-band power computation with ERD."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 from scipy.signal import welch
-from mne.decoding import CSP
+
+if TYPE_CHECKING:
+    from mne.decoding import CSP
 
 
 def compute_band_power(
@@ -84,15 +90,10 @@ def extract_features(
     Returns:
         Feature array of shape (n_epochs, 1)
     """
-    features = []
-
-    for epoch in epochs:
-        theta_power = compute_theta_power(epoch, sfreq)
-        if log_transform:
-            theta_power = np.log(theta_power + 1e-10)
-        features.append([theta_power])
-
-    return np.array(features)
+    powers = [compute_theta_power(epoch, sfreq) for epoch in epochs]
+    if log_transform:
+        powers = [np.log(p + 1e-10) for p in powers]
+    return np.array(powers).reshape(-1, 1)
 
 
 def compute_lateralization_index(
@@ -175,44 +176,32 @@ def extract_lateralization_features(
         c4_baseline, c4_task = epoch_pairs_by_channel["C4"][epoch_idx]
 
         # PRIMARY: Lateralization features (C3 vs C4)
-        for band_name, (low, high) in bands.items():
-            # Task lateralization index
-            lat_idx_task = compute_lateralization_index(
-                c3_task, c4_task, sfreq, low, high
+        for _band_name, (low, high) in bands.items():
+            # Compute powers once per band (avoids redundant Welch calls)
+            c3_bp = compute_band_power(c3_baseline, sfreq, low, high)
+            c3_tp = compute_band_power(c3_task, sfreq, low, high)
+            c4_bp = compute_band_power(c4_baseline, sfreq, low, high)
+            c4_tp = compute_band_power(c4_task, sfreq, low, high)
+
+            # Lateralization indices: (C4 - C3) / (C4 + C3)
+            lat_task = (c4_tp - c3_tp) / (c4_tp + c3_tp + 1e-10)
+            lat_baseline = (c4_bp - c3_bp) / (c4_bp + c3_bp + 1e-10)
+
+            # ERD per channel: % power decrease from baseline
+            c3_erd = (c3_bp - c3_tp) / (c3_bp + 1e-10) * 100
+            c4_erd = (c4_bp - c4_tp) / (c4_bp + 1e-10) * 100
+
+            epoch_features.extend(
+                [
+                    lat_task,
+                    lat_baseline,
+                    lat_task - lat_baseline,
+                    c3_erd - c4_erd,
+                    np.log((c3_tp + 1e-10) / (c4_tp + 1e-10)),
+                    c3_erd,
+                    c4_erd,
+                ]
             )
-            epoch_features.append(lat_idx_task)
-
-            # Baseline lateralization index
-            lat_idx_baseline = compute_lateralization_index(
-                c3_baseline, c4_baseline, sfreq, low, high
-            )
-            epoch_features.append(lat_idx_baseline)
-
-            # Change in lateralization (task - baseline)
-            epoch_features.append(lat_idx_task - lat_idx_baseline)
-
-            # ERD asymmetry: difference in ERD between C3 and C4
-            c3_baseline_power = compute_band_power(c3_baseline, sfreq, low, high)
-            c3_task_power = compute_band_power(c3_task, sfreq, low, high)
-            c4_baseline_power = compute_band_power(c4_baseline, sfreq, low, high)
-            c4_task_power = compute_band_power(c4_task, sfreq, low, high)
-
-            c3_erd = (
-                (c3_baseline_power - c3_task_power) / (c3_baseline_power + 1e-10) * 100
-            )
-            c4_erd = (
-                (c4_baseline_power - c4_task_power) / (c4_baseline_power + 1e-10) * 100
-            )
-            epoch_features.append(c3_erd - c4_erd)  # Asymmetry
-
-            # Log power ratio (C3/C4) during task
-            epoch_features.append(
-                np.log((c3_task_power + 1e-10) / (c4_task_power + 1e-10))
-            )
-
-            # Individual channel ERDs
-            epoch_features.append(c3_erd)
-            epoch_features.append(c4_erd)
 
         # SECONDARY: Cz features (supplementary motor area)
         # Note: Cz uses only mu and beta bands (not all 4 bands like C3/C4) because:
@@ -276,6 +265,7 @@ def extract_csp_features(
         Tuple of (features array of shape (n_epochs, n_components), fitted CSP model)
     """
     import mne
+    from mne.decoding import CSP
 
     # Bandpass filter to mu+beta range before CSP
     X_filtered = mne.filter.filter_data(

@@ -25,19 +25,15 @@ def load_recording(
         sfreq: Sampling frequency (250 Hz)
     """
     df = pd.read_csv(csv_path)
-
-    # Extract EEG channels (columns 1-8, excluding timestamps and stim)
-    data = df[CHANNELS].values.T  # Transpose to (n_channels, n_samples)
-
-    # Parse events from stim column
-    events = []
+    data = df[CHANNELS].values.T
     stim = df["stim"].values
-    for idx, val in enumerate(stim):
-        if val != 0:
-            stim_int = int(val)
-            phase = (stim_int // 10) % 10
-            movement = stim_int % 10
-            events.append((idx, phase, movement))
+
+    (nonzero_idx,) = np.nonzero(stim)
+    stim_vals = stim[nonzero_idx].astype(int)
+    events = [
+        (int(idx), (val // 10) % 10, val % 10)
+        for idx, val in zip(nonzero_idx, stim_vals)
+    ]
 
     return data, events, SFREQ
 
@@ -53,20 +49,10 @@ def get_complete_recordings(data_dir: Path) -> list[Path]:
         List of paths to complete recording CSVs
     """
     complete = []
-
     for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
-        df = pd.read_csv(csv_path)
-        stim = df["stim"].values
-
-        # Count phase 3 (imagery) events
-        phase3_count = 0
-        for val in stim:
-            if val != 0:
-                phase = (int(val) // 10) % 10
-                if phase == 3:
-                    phase3_count += 1
-
+        stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].values
+        nonzero = stim[stim != 0].astype(int)
+        phase3_count = np.sum((nonzero // 10) % 10 == 3)
         if phase3_count == 100:
             complete.append(csv_path)
-
     return complete

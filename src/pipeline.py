@@ -38,24 +38,32 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     y_by_subject: list[np.ndarray] = []
     subject_ids: list[str] = []
 
+    def _task_epochs(pairs_by_ch):
+        # (n_channels, n_trials, n_samples) -> (n_trials, n_channels, n_samples)
+        return np.array(
+            [[trial[1] for trial in pairs_by_ch[ch]] for ch in CHANNELS]
+        ).transpose(1, 0, 2)
+
     for rec_path in recordings:
         subject_id = rec_path.parent.parent.name
         print(f"  Processing {subject_id}...")
 
         data, events, sfreq = load_recording(rec_path)
 
-        processed_channels = {
-            ch_name: preprocess_eeg(data[ch_idx], sfreq)
-            for ch_idx, ch_name in enumerate(CHANNELS)
-        }
-
-        epoch_kwargs = dict(task_duration=1.8, baseline_duration=1.0, skip_duration=0.5)
-        epoch_pairs = {
-            ch_name: extract_left_right_epochs(signal, events, sfreq, **epoch_kwargs)
-            for ch_name, signal in processed_channels.items()
-        }
-        left_pairs_by_channel = {ch: pairs[0] for ch, pairs in epoch_pairs.items()}
-        right_pairs_by_channel = {ch: pairs[1] for ch, pairs in epoch_pairs.items()}
+        left_pairs_by_channel = {}
+        right_pairs_by_channel = {}
+        for ch_idx, ch_name in enumerate(CHANNELS):
+            signal = preprocess_eeg(data[ch_idx], sfreq)
+            left, right = extract_left_right_epochs(
+                signal,
+                events,
+                sfreq,
+                task_duration=1.8,
+                baseline_duration=1.0,
+                skip_duration=0.5,
+            )
+            left_pairs_by_channel[ch_name] = left
+            right_pairs_by_channel[ch_name] = right
 
         n_left = len(left_pairs_by_channel[CHANNELS[0]])
         n_right = len(right_pairs_by_channel[CHANNELS[0]])
@@ -68,14 +76,12 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         left_features = extract_lateralization_features(left_pairs_by_channel, sfreq)
         right_features = extract_lateralization_features(right_pairs_by_channel, sfreq)
 
-        left_multichannel = np.array(
-            [[trial[1] for trial in left_pairs_by_channel[ch]] for ch in CHANNELS]
-        ).transpose(1, 0, 2)
-        right_multichannel = np.array(
-            [[trial[1] for trial in right_pairs_by_channel[ch]] for ch in CHANNELS]
-        ).transpose(1, 0, 2)
-
-        X_multichannel = np.vstack([left_multichannel, right_multichannel])
+        X_multichannel = np.vstack(
+            [
+                _task_epochs(left_pairs_by_channel),
+                _task_epochs(right_pairs_by_channel),
+            ]
+        )
         X_features = np.vstack([left_features, right_features])
         y = np.array([0] * n_left + [1] * n_right)
 
@@ -105,19 +111,18 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
-    for subj_idx, sid in enumerate(subject_ids):
-        X_features, X_multichannel = X_by_subject[subj_idx]
-        y = y_by_subject[subj_idx]
-
+    for sid, (X_features, X_multichannel), y in zip(
+        subject_ids, X_by_subject, y_by_subject
+    ):
         model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
         model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
         joblib.dump(model, model_path)
         model_paths[sid] = str(model_path)
         print(f"  Saved {model_path}")
 
-    # Diagnostic summary
-    above_chance = [sid for sid, s in zip(subject_ids, scores) if s >= 0.60]
-    at_chance = [sid for sid, s in zip(subject_ids, scores) if s < 0.60]
+    above_chance, at_chance = [], []
+    for sid, s in zip(subject_ids, scores):
+        (above_chance if s >= 0.60 else at_chance).append(sid)
 
     print("\n" + "=" * 60)
     print("Diagnostic Summary")
@@ -131,7 +136,7 @@ def run_pipeline(data_dir: Path, output_dir: Path) -> dict:
         "task": "left_right_motor_imagery",
         "model": "FBCSP + LDA",
         "n_subjects": len(subject_ids),
-        "per_subject_scores": dict(zip(subject_ids, [float(s) for s in scores])),
+        "per_subject_scores": {sid: float(s) for sid, s in zip(subject_ids, scores)},
         "mean_accuracy": float(mean_acc),
         "std_accuracy": float(std_acc),
         "subjects_with_signal": above_chance,

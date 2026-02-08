@@ -44,8 +44,7 @@ def _extract_fbcsp_features(
     train_parts = []
     test_parts = []
 
-    for band in bands:
-        low, high = band
+    for low, high in bands:
         try:
             X_train_filt = mne.filter.filter_data(
                 X_train, sfreq, low, high, verbose=False
@@ -61,7 +60,7 @@ def _extract_fbcsp_features(
             )
             train_parts.append(csp.fit_transform(X_train_filt, y_train))
             test_parts.append(csp.transform(X_test_filt))
-            csp_models.append((csp, band))
+            csp_models.append((csp, (low, high)))
         except (ValueError, np.linalg.LinAlgError):
             continue
 
@@ -120,10 +119,7 @@ def train_within_subject_cv(
     """
     scores = []
 
-    for subj_idx in range(len(X_by_subject)):
-        X_features, X_multichannel = X_by_subject[subj_idx]
-        y = y_by_subject[subj_idx]
-
+    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
         n_samples = len(y)
         actual_folds = min(n_folds, n_samples // 2)
         if actual_folds < 2:
@@ -133,34 +129,24 @@ def train_within_subject_cv(
         fold_scores = []
 
         for train_idx, test_idx in skf.split(X_features, y):
-            X_train_feat = X_features[train_idx]
-            X_test_feat = X_features[test_idx]
-            X_train_mc = X_multichannel[train_idx]
-            X_test_mc = X_multichannel[test_idx]
-            y_train = y[train_idx]
-            y_test = y[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
 
-            # FBCSP features
             fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                X_train_mc, X_test_mc, y_train, sfreq
+                X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
             )
 
-            # Combine FBCSP + handcrafted features
-            X_train_combined = np.hstack([fbcsp_train, X_train_feat])
-            X_test_combined = np.hstack([fbcsp_test, X_test_feat])
+            X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
+            X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
-            # Feature selection
             k = min(k_best, X_train_combined.shape[1])
             selector = SelectKBest(f_classif, k=k)
             X_train_sel = selector.fit_transform(X_train_combined, y_train)
             X_test_sel = selector.transform(X_test_combined)
 
-            # Scale
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            # Classify
             lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
             lda.fit(X_train_scaled, y_train)
             fold_scores.append(lda.score(X_test_scaled, y_test))
@@ -184,31 +170,9 @@ def train_final_model(
     Returns:
         Dict with keys: csp_models, selector, scaler, classifier, sfreq, k_best.
     """
-    # FBCSP: fit on all data (no train/test split — this is the final model)
-    csp_models = []
-    fbcsp_parts = []
-
-    for band in FBCSP_BANDS:
-        low, high = band
-        try:
-            X_filt = mne.filter.filter_data(
-                X_multichannel, sfreq, low, high, verbose=False
-            )
-            csp = CSP(
-                n_components=N_CSP_COMPONENTS,
-                reg="ledoit_wolf",
-                log=True,
-                norm_trace=True,
-            )
-            fbcsp_parts.append(csp.fit_transform(X_filt, y))
-            csp_models.append((csp, band))
-        except (ValueError, np.linalg.LinAlgError):
-            continue
-
-    if fbcsp_parts:
-        fbcsp_features = np.hstack(fbcsp_parts)
-    else:
-        fbcsp_features = np.empty((X_multichannel.shape[0], 0))
+    fbcsp_features, _, csp_models = _extract_fbcsp_features(
+        X_multichannel, X_multichannel, y, sfreq
+    )
 
     X_combined = np.hstack([fbcsp_features, X_features])
 

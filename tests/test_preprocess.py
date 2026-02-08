@@ -1,6 +1,7 @@
 """Tests for preprocessing functionality."""
 
 import numpy as np
+from scipy.signal import welch
 
 from src.preprocess import bandpass_filter, notch_filter, preprocess_eeg
 
@@ -27,9 +28,6 @@ def test_notch_filter_removes_60hz():
     signal = np.sin(2 * np.pi * 10 * t) + 0.5 * np.sin(2 * np.pi * 60 * t)
 
     filtered = notch_filter(signal, sfreq, freq=60.0)
-
-    # Compute power at 60 Hz before and after
-    from scipy.signal import welch
 
     _, psd_before = welch(signal, sfreq, nperseg=250)
     _, psd_after = welch(filtered, sfreq, nperseg=250)
