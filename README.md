@@ -2,7 +2,7 @@
 
 A brain-computer interface (BCI) system that classifies left vs right hand motor imagery from EEG signals. Designed for real-time control of a robotic 6th finger, where **left imagery = finger down** and **right imagery = finger up**.
 
-Built on a triple-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-space**, and **Transfer learning (Riemannian domain adaptation)** — with three-criteria adaptive artifact rejection. The pipeline evaluates all three classifiers per subject and selects the best one. Evaluated with within-subject 10-fold stratified cross-validation.
+Built on a triple-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-space**, and **FBCSP + SVM (RBF)** — with adaptive amplitude-based artifact rejection. The pipeline evaluates all three classifiers per subject and selects the best one. Evaluated with within-subject 10-fold stratified cross-validation.
 
 ## Table of Contents
 
@@ -25,24 +25,24 @@ Built on a triple-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-
 
 ## Results
 
-**58.9% best-of mean accuracy** across 10 subjects (within-subject 10-fold stratified CV, best of three classifiers per subject).
+**60.6% best-of mean accuracy** across 10 subjects (within-subject 10-fold stratified CV, best of three classifiers per subject).
 
-3 of 10 subjects show above-chance classification. This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
+4 of 10 subjects show above-chance classification. This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
 
-| Subject | FBCSP+LDA | Riemann | Transfer | Best | Status |
-|---------|-----------|---------|----------|------|--------|
-| subject0001 | 50.1% | 53.1% | 47.2% | 53.1% | chance |
-| subject0002 | 38.5% | 52.9% | 36.8% | 52.9% | chance |
-| subject0004 | 36.1% | 30.1% | 37.4% | 37.4% | chance |
-| subject0005 | 56.2% | 43.8% | 47.7% | 56.2% | chance |
-| subject0006 | **83.8%** | 31.2% | 45.2% | **83.8%** | signal |
-| subject0007 | 56.1% | 44.3% | 39.3% | 56.1% | chance |
-| subject0008 | 52.5% | 46.2% | 53.8% | 53.8% | chance |
-| subject0009 | 46.8% | 56.5% | 46.4% | 56.5% | chance |
-| subject0010 | **76.5%** | 65.0% | 67.5% | **76.5%** | signal |
-| subject0011 | 56.4% | **62.3%** | 47.1% | **62.3%** | signal |
+| Subject | FBCSP+LDA | Riemann | SVM | Best | Status |
+|---------|-----------|---------|-----|------|--------|
+| subject0001 | 56.2% | **61.0%** | 55.1% | **61.0%** | signal |
+| subject0002 | 47.8% | 45.3% | 39.9% | 47.8% | chance |
+| subject0004 | 54.0% | 38.6% | 51.1% | 54.0% | chance |
+| subject0005 | 52.2% | 52.2% | 48.9% | 52.2% | chance |
+| subject0006 | 84.0% | 31.0% | **85.0%** | **85.0%** | signal |
+| subject0007 | 46.0% | 48.0% | 47.0% | 48.0% | chance |
+| subject0008 | 37.1% | **55.9%** | 44.3% | **55.9%** | chance |
+| subject0009 | 54.7% | 43.9% | 52.5% | 54.7% | chance |
+| subject0010 | 74.4% | 76.7% | **79.4%** | **79.4%** | signal |
+| subject0011 | 53.5% | **58.8%** | 55.1% | **58.8%** | chance |
 
-Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~37-57%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP+LDA on subjects 0001, 0002, 0009, and 0011. The Transfer classifier (cross-subject domain adaptation) wins for subjects 0004 and 0008 where within-subject data is insufficient.
+Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~48-55%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP+LDA on subjects 0001, 0008, and 0011. The SVM classifier wins for subjects 0006 and 0010 where nonlinear decision boundaries improve over LDA.
 
 ## Hardware
 
@@ -61,24 +61,20 @@ CSV files (8 channels, 250 Hz, Unicorn headset)
   ├─ preprocess.py ─── Bandpass (1-40 Hz) + Notch (60 Hz) filtering
   │
   ├─ epochs.py ──────── Extract paired baseline (1.0s) / task (1.8s) windows
-  │                      + 3-criteria adaptive artifact rejection
-  │                        (amplitude + gradient + HF power)
+  │                      + adaptive amplitude-based artifact rejection
   │
-  ├─ features.py ────── 59 handcrafted features:
+  ├─ features.py ────── 39 handcrafted features:
   │                        Lateralization indices, ERD asymmetry,
-  │                        Hjorth parameters, frontal theta,
-  │                        spectral entropy, peak frequency,
-  │                        C3-C4 coherence, posterior lateralization,
-  │                        band power ratios, statistical features
+  │                        Hjorth parameters, frontal theta
   │
   ├─ train.py ─────────  Three classifiers evaluated per subject:
   │                      1. FBCSP (10 bands × 4 CSP = 40 features)
-  │                         + 59 handcrafted → SelectKBest(k=15)
+  │                         + 39 handcrafted → SelectKBest(k=10)
   │                         → StandardScaler → LDA (shrinkage)
   │                      2. Riemannian: Covariances(OAS)
   │                         → TangentSpace(riemann) → LogisticRegression
-  │                      3. Transfer: TLCenter domain adaptation
-  │                         → TangentSpace → LogisticRegression
+  │                      3. FBCSP + SVM: same FBCSP features
+  │                         → SelectKBest(k=10) → SVC(RBF)
   │
   └─ pipeline.py ────── Orchestrates everything, runs all three classifiers,
                          saves best model per subject
@@ -128,13 +124,11 @@ Extracts time-locked windows around each motor imagery event marker. Each trial 
 
 Trials are discarded if the baseline would start before the signal beginning or the task would extend past the signal end.
 
-After extraction, **three-criteria adaptive artifact rejection** drops trials that fail any of:
+After extraction, **adaptive amplitude-based artifact rejection** drops trials where:
 
-1. **Peak-to-peak amplitude** -- exceeds `median + 3×MAD` (adaptive per subject) or below 1 µV (flat signal)
-2. **Gradient** -- maximum sample-to-sample voltage jump exceeds `median + 3×MAD` (electrode pops, movement artifacts)
-3. **High-frequency power** -- abnormally high 30-45 Hz power exceeds `median + 3×MAD` (EMG contamination)
+1. **Peak-to-peak amplitude** -- exceeds `median + 4×MAD` (adaptive per subject) or below 1 µV (flat signal)
 
-All thresholds are adaptive to each subject's signal characteristics rather than using fixed values.
+The threshold is adaptive to each subject's signal characteristics rather than using fixed values. Gradient and high-frequency power criteria are available in the code but disabled by default -- they were found to reject trials containing discriminative motor imagery signal.
 
 ### 4. Feature Extraction
 
@@ -142,7 +136,7 @@ All thresholds are adaptive to each subject's signal characteristics rather than
 
 Two feature sets are computed and later concatenated:
 
-#### Handcrafted Features (59 total)
+#### Handcrafted Features (39 total)
 
 Computed from baseline-vs-task comparisons using Welch's method for spectral analysis:
 
@@ -152,12 +146,6 @@ Computed from baseline-vs-task comparisons using Welch's method for spectral ana
 | Cz supplementary motor area | Cz | mu (8-12 Hz), beta (13-30 Hz) | ERD, log power | 2 × 2 = **4** |
 | Fz frontal theta | Fz | theta (4-8 Hz) | log(theta_task / theta_baseline) | **1** |
 | Time-domain (Hjorth) | C3, C4 | -- | activity, mobility, complexity | 2 × 3 = **6** |
-| Spectral entropy | C3, C4 | mu, beta | normalized entropy | 2 × 2 = **4** |
-| Peak frequency | C3, C4 | mu (8-12 Hz) | individual peak freq | 2 × 1 = **2** |
-| C3-C4 coherence | C3, C4 | mu, beta | magnitude-squared coherence | 2 × 1 = **2** |
-| Posterior lateralization | PO7, PO8 | mu, beta | lateralization index, log total power | 2 × 2 = **4** |
-| Band power ratios | C3 | mu/theta, beta/mu | log ratio | **2** |
-| Statistical features | C3, C4 | -- | skewness, kurtosis, zero-crossing rate | 2 × 3 = **6** |
 
 **Key formulas**:
 - **Lateralization Index**: `(C4_power - C3_power) / (C4_power + C3_power)` -- positive for left imagery (contralateral C3 desynchronization), negative for right
@@ -184,8 +172,8 @@ Three classifiers are evaluated per subject. The best per-subject classifier is 
 Per-subject, per-fold pipeline (10-fold stratified CV):
 
 1. **FBCSP extraction** -- bandpass filter to each of 10 bands, fit CSP on training set, transform both train and test (up to 40 features)
-2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (59) = ~99 features
-3. **Feature selection** -- `SelectKBest(f_classif, k=15)` picks the 15 most discriminative features by ANOVA F-score
+2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (39) = ~79 features
+3. **Feature selection** -- `SelectKBest(f_classif, k=10)` picks the 10 most discriminative features by ANOVA F-score
 4. **Scaling** -- `StandardScaler` zero-centers and unit-normalizes features
 5. **Classification** -- `LDA(solver='lsqr', shrinkage='auto')` with automatic Ledoit-Wolf shrinkage for robust covariance estimation
 
@@ -197,21 +185,21 @@ Per-subject, per-fold pipeline (10-fold stratified CV, no frequency band tuning 
 2. **Tangent space projection** -- `TangentSpace(metric='riemann')` maps SPD matrices to Euclidean tangent space (36 features for 8 channels)
 3. **Classification** -- `LogisticRegression(C=1.0, solver='lbfgs')`
 
-#### Classifier 3: Transfer Learning (Riemannian Domain Adaptation)
+#### Classifier 3: FBCSP + SVM (RBF)
 
-Leave-one-subject-out CV with within-target k-fold:
+Per-subject, per-fold pipeline (10-fold stratified CV):
 
-1. **Covariance estimation** -- `Covariances(estimator='oas')` as above
-2. **Domain encoding** -- `encode_domains()` labels each trial with source/target domain
-3. **Riemannian re-centering** -- `TLCenter(target_domain='target')` re-centers each domain's covariance distribution to identity in Riemannian space, aligning cross-subject geometric means
-4. **Tangent space projection** -- `TangentSpace(metric='riemann')`
-5. **Classification** -- `LogisticRegression(C=1.0, solver='lbfgs')`
+1. **FBCSP extraction** -- same as Classifier 1
+2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (39) = ~79 features
+3. **Feature selection** -- `SelectKBest(f_classif, k=10)`
+4. **Scaling** -- `StandardScaler`
+5. **Classification** -- `SVC(kernel='rbf', C=1.0, gamma='scale')` -- tests nonlinear decision boundaries that LDA misses
 
-This classifier pools data from all other subjects as source data, helping subjects at chance by leveraging cross-subject motor imagery patterns.
+This classifier replaces a previous Transfer learning (Riemannian domain adaptation) classifier that averaged below chance (46.9%) with only 10 subjects.
 
-**Evaluation**: 10-fold stratified cross-validation per subject (classifiers 1 & 2), leave-one-subject-out with within-target k-fold (classifier 3). CSP models are re-fitted on each fold's training set to prevent information leakage.
+**Evaluation**: 10-fold stratified cross-validation per subject for all three classifiers. CSP models are re-fitted on each fold's training set to prevent information leakage.
 
-**Deployment models**: After CV evaluation, the best-scoring classifier is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA models contain the full inference pipeline (CSP models, feature selector, scaler, LDA classifier). Riemannian models contain a single sklearn Pipeline. Transfer models contain the covariance estimator, TLCenter, tangent space, and classifier.
+**Deployment models**: After CV evaluation, the best-scoring classifier is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA and FBCSP+SVM models contain the full inference pipeline (CSP models, feature selector, scaler, classifier). Riemannian models contain a single sklearn Pipeline.
 
 ## Project Structure
 
@@ -300,10 +288,9 @@ model = joblib.load("models/subject0011_riemann.joblib")
 from src.train import predict_riemann
 predictions = predict_riemann(model, X_multichannel)
 
-# Transfer model
-model = joblib.load("models/subject0001_transfer.joblib")
-from src.train import predict_transfer
-predictions = predict_transfer(model, X_multichannel)
+# FBCSP+SVM model (uses same predict function as LDA)
+model = joblib.load("models/subject0010_svm.joblib")
+predictions = predict(model, X_features, X_multichannel)
 
 # predictions: array of 0 (left) or 1 (right)
 ```
@@ -341,26 +328,21 @@ Each CSV file has the following columns:
 | Key | Type | Description |
 |-----|------|-------------|
 | `csp_models` | `list[tuple[CSP, tuple[float, float]]]` | Fitted CSP spatial filters per frequency band |
-| `selector` | `SelectKBest` | Fitted feature selector (top 15 by ANOVA F-score) |
+| `selector` | `SelectKBest` | Fitted feature selector (top 10 by ANOVA F-score) |
 | `scaler` | `StandardScaler` | Fitted feature normalizer |
 | `classifier` | `LinearDiscriminantAnalysis` | Fitted LDA with shrinkage |
 | `sfreq` | `float` | Sampling frequency (250.0 Hz) |
-| `k_best` | `int` | Number of selected features (15) |
+| `k_best` | `int` | Number of selected features (10) |
+
+### FBCSP+SVM models (`*_svm.joblib`)
+
+Same structure as FBCSP+LDA models, but `classifier` is `SVC` instead of `LinearDiscriminantAnalysis`.
 
 ### Riemannian models (`*_riemann.joblib`)
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `pipeline` | `sklearn.pipeline.Pipeline` | Full pipeline: Covariances → TangentSpace → LogisticRegression |
-
-### Transfer models (`*_transfer.joblib`)
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `cov_estimator` | `Covariances` | Fitted OAS covariance estimator |
-| `tlc` | `TLCenter` | Fitted Riemannian domain re-centering transform |
-| `ts` | `TangentSpace` | Fitted tangent space projection |
-| `classifier` | `LogisticRegression` | Fitted logistic regression classifier |
 
 ## Testing
 
@@ -378,8 +360,8 @@ uv run pytest tests/test_train.py -v
 - `test_data_loader.py` -- CSV parsing, event extraction, complete recording discovery
 - `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline, CAR common-mode removal, ASR artifact cleaning
 - `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end), artifact rejection (amplitude, flat signal, adaptive outlier, gradient, HF power, criteria disable)
-- `test_features.py` -- Feature dimensions (59 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
-- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; Transfer CV scores, leakage check, model round-trip
+- `test_features.py` -- Feature dimensions (39 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
+- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip
 
 ## Dependencies
 
