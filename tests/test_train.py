@@ -2,7 +2,10 @@
 
 import numpy as np
 
+from src.epochs import compute_trial_max_ptp
 from src.train import (
+    _evaluate_classifiers_batch,
+    _reject_in_fold,
     cross_session_evaluate,
     predict,
     predict_riemann,
@@ -10,6 +13,7 @@ from src.train import (
     train_final_model_riemann,
     train_final_model_svm,
     train_nested_model_selection_cv,
+    train_within_subject_cv_all_models,
     train_within_subject_cv,
     train_within_subject_cv_ensemble,
     train_within_subject_cv_riemann,
@@ -251,6 +255,84 @@ def test_ensemble_no_leakage_on_random_data():
     )
 
 
+def test_all_models_cv_matches_individual_entrypoints():
+    """Shared all-model CV path matches the legacy per-model entrypoints."""
+    X_by_subject = [_make_subject_data(np.random.default_rng(42))]
+    y_by_subject = [LABELS]
+    trial_ptps = [compute_trial_max_ptp(X_by_subject[0][1])]
+    common_kwargs = {
+        "n_folds": 5,
+        "split_strategy": "stratified_group",
+        "trial_group_size": 5,
+        "random_state": 7,
+        "trial_ptps_by_subject": trial_ptps,
+    }
+
+    all_results = train_within_subject_cv_all_models(
+        X_by_subject, y_by_subject, **common_kwargs
+    )
+
+    lda_scores, lda_mean, lda_std = train_within_subject_cv(
+        X_by_subject, y_by_subject, **common_kwargs
+    )
+    np.testing.assert_allclose(all_results["lda"][0], lda_scores)
+    np.testing.assert_allclose(all_results["lda"][1:], (lda_mean, lda_std))
+
+    riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
+        [X_mc for _, X_mc in X_by_subject], y_by_subject, **common_kwargs
+    )
+    np.testing.assert_allclose(all_results["riemann"][0], riemann_scores)
+    np.testing.assert_allclose(all_results["riemann"][1:], (riemann_mean, riemann_std))
+
+    svm_scores, svm_mean, svm_std = train_within_subject_cv_svm(
+        X_by_subject, y_by_subject, **common_kwargs
+    )
+    np.testing.assert_allclose(all_results["svm"][0], svm_scores)
+    np.testing.assert_allclose(all_results["svm"][1:], (svm_mean, svm_std))
+
+    ensemble_scores, ensemble_mean, ensemble_std = train_within_subject_cv_ensemble(
+        X_by_subject, y_by_subject, **common_kwargs
+    )
+    np.testing.assert_allclose(all_results["ensemble"][0], ensemble_scores)
+    np.testing.assert_allclose(
+        all_results["ensemble"][1:], (ensemble_mean, ensemble_std)
+    )
+
+
+def test_batched_classifier_eval_matches_single_requests():
+    """Batch split evaluation returns the same score as per-classifier requests."""
+    rng = np.random.default_rng(123)
+    X_features, X_multichannel = _make_subject_data(rng)
+    train_idx = np.arange(0, 30)
+    test_idx = np.arange(30, 40)
+
+    batch_scores = _evaluate_classifiers_batch(
+        ["lda", "riemann", "svm", "ensemble"],
+        X_features[train_idx],
+        X_features[test_idx],
+        LABELS[train_idx],
+        LABELS[test_idx],
+        X_multichannel[train_idx],
+        X_multichannel[test_idx],
+        sfreq=250.0,
+        k_best=10,
+    )
+
+    for name in ("lda", "riemann", "svm", "ensemble"):
+        single = _evaluate_classifiers_batch(
+            [name],
+            X_features[train_idx],
+            X_features[test_idx],
+            LABELS[train_idx],
+            LABELS[test_idx],
+            X_multichannel[train_idx],
+            X_multichannel[test_idx],
+            sfreq=250.0,
+            k_best=10,
+        )[name]
+        np.testing.assert_allclose(batch_scores[name], single)
+
+
 # ---------- Nested model selection CV tests ----------
 
 
@@ -324,3 +406,56 @@ def test_cross_session_no_leakage():
         assert acc < 0.70, (
             f"Cross-session {method} accuracy {acc:.1%} is suspiciously high"
         )
+
+
+# ---------- Per-fold artifact rejection tests ----------
+
+
+def test_reject_in_fold_removes_outliers():
+    """_reject_in_fold drops trials with extreme PTP amplitudes."""
+    ptps = np.array([10.0, 12.0, 11.0, 500.0, 9.0, 0.5, 13.0, 11.5])
+    train_idx = np.array([0, 1, 2, 3, 4])
+    test_idx = np.array([5, 6, 7])
+
+    clean_train, clean_test = _reject_in_fold(ptps, train_idx, test_idx)
+
+    # Trial 3 (ptp=500) should be removed from train; trial 5 (ptp=0.5 < 1.0) from test
+    assert 3 not in clean_train
+    assert 5 not in clean_test
+    # Normal trials should survive
+    assert 0 in clean_train
+    assert 6 in clean_test
+
+
+def test_reject_in_fold_none_is_noop():
+    """When trial_ptps is None, indices are returned unchanged."""
+    train_idx = np.array([0, 1, 2])
+    test_idx = np.array([3, 4])
+
+    clean_train, clean_test = _reject_in_fold(None, train_idx, test_idx)
+
+    np.testing.assert_array_equal(clean_train, train_idx)
+    np.testing.assert_array_equal(clean_test, test_idx)
+
+
+def test_per_fold_rejection_excludes_artifacts():
+    """CV with trial_ptps_by_subject runs without error and excludes artifact trials."""
+    rng = np.random.default_rng(42)
+    X_features, X_multichannel = _make_subject_data(rng)
+
+    # Inject 2 extreme outlier trials (amplitude × 1000)
+    X_multichannel[0] *= 1000
+    X_multichannel[1] *= 1000
+
+    trial_ptps = compute_trial_max_ptp(X_multichannel)
+
+    scores, mean_acc, std_acc = train_within_subject_cv(
+        [(X_features, X_multichannel)],
+        [LABELS],
+        n_folds=5,
+        trial_ptps_by_subject=[trial_ptps],
+    )
+
+    assert len(scores) == 1
+    assert 0 <= mean_acc <= 1
+    assert std_acc >= 0

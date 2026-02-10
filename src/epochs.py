@@ -188,6 +188,21 @@ def compute_rejection_threshold(
     return median + n_mad * mad
 
 
+def compute_trial_max_ptp(X_multichannel: np.ndarray) -> np.ndarray:
+    """Compute max peak-to-peak amplitude across channels for each trial.
+
+    Operates on the (n_trials, n_channels, n_samples) array format used by the
+    CV functions, replicating the same PTP metric as :func:`reject_bad_epochs`.
+
+    Args:
+        X_multichannel: Array of shape (n_trials, n_channels, n_samples).
+
+    Returns:
+        Array of shape (n_trials,) with the max PTP per trial.
+    """
+    return np.max(np.ptp(X_multichannel, axis=2), axis=1)
+
+
 def reject_bad_epochs(
     left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],

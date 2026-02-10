@@ -6,6 +6,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
+from src.config import TrainingConfig
 from src.data_loader import (
     CHANNELS,
     get_complete_recordings,
@@ -14,22 +15,22 @@ from src.data_loader import (
 )
 from src.epochs import (
     compute_rejection_threshold,
+    compute_trial_max_ptp,
     extract_left_right_epochs,
     reject_bad_epochs,
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_eeg
+from src.runtime_output import configure_console_output
 from src.train import (
     cross_session_evaluate,
     train_final_model,
     train_final_model_riemann,
     train_final_model_svm,
     train_nested_model_selection_cv,
-    train_within_subject_cv,
-    train_within_subject_cv_ensemble,
-    train_within_subject_cv_riemann,
-    train_within_subject_cv_svm,
+    train_within_subject_cv_all_models,
 )
+from src.validation import build_classwise_trial_groups
 
 # Map nested CV method names to pipeline display names
 _NESTED_TO_DISPLAY = {
@@ -38,6 +39,20 @@ _NESTED_TO_DISPLAY = {
     "svm": "SVM",
     "ensemble": "Ensemble",
 }
+
+_LINE_WIDTH = 68
+
+
+def _print_header(title: str) -> None:
+    """Print a consistent run header."""
+    print("=" * _LINE_WIDTH)
+    print(title)
+    print("=" * _LINE_WIDTH)
+
+
+def _print_step(step_idx: int, total_steps: int, title: str) -> None:
+    """Print a clean step marker."""
+    print(f"\n[{step_idx}/{total_steps}] {title}")
 
 
 def _task_epochs(
@@ -194,6 +209,8 @@ def run_pipeline(
     data_dir: Path,
     output_dir: Path,
     holdout_fraction: float = 0.0,
+    training_config: TrainingConfig | None = None,
+    quiet_output: bool = True,
 ) -> dict:
     """Run the full training pipeline for left/right motor imagery classification.
 
@@ -205,27 +222,36 @@ def run_pipeline(
             When > 0, epochs are split *before* artifact rejection.  The
             rejection threshold is computed from the training portion only
             and applied to both splits.
+        training_config: Optional experiment configuration. Defaults to
+            :class:`src.config.TrainingConfig`.
+        quiet_output: Reduce noisy third-party logs/warnings when ``True``.
 
     Returns:
         Dictionary with results.
     """
-    print("=" * 60)
-    print("Left/Right Motor Imagery Classifier - Training Pipeline")
-    print("=" * 60)
+    configure_console_output(quiet_output)
+    _print_header("Left/Right Motor Imagery Classifier - Training Pipeline")
+    cfg = training_config or TrainingConfig()
+    sfreq = cfg.sfreq
 
     # Step 1: Find complete recordings
-    print("\n[1/5] Finding complete recordings...")
+    _print_step(1, 5, "Finding complete recordings")
     recordings = get_complete_recordings(data_dir)
     print(f"Found {len(recordings)} complete recordings")
 
     if holdout_fraction > 0:
         print(f"  Held-out fraction: {holdout_fraction:.0%}")
+    print(
+        f"  CV split strategy: {cfg.split_strategy} (group_size={cfg.trial_group_size})"
+    )
 
     # Step 2: Load and preprocess data for each subject
-    print("\n[2/5] Loading and preprocessing data...")
+    _print_step(2, 5, "Loading and preprocessing data")
     X_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_by_subject: list[np.ndarray] = []
     subject_ids: list[str] = []
+    trial_ptps_by_subject: list[np.ndarray] = []
+    trial_groups_by_subject: list[np.ndarray] = []
 
     # Held-out data (only populated when holdout_fraction > 0)
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
@@ -235,7 +261,11 @@ def run_pipeline(
         subject_id = rec_path.parent.parent.name
         print(f"  Processing {subject_id}...")
 
-        data, events, sfreq = load_recording(rec_path)
+        data, events, rec_sfreq = load_recording(rec_path)
+        if abs(rec_sfreq - sfreq) > 1e-6:
+            raise ValueError(
+                f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
+            )
 
         # Extract epochs per channel (before artifact rejection)
         left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
@@ -294,6 +324,12 @@ def run_pipeline(
             X_by_subject.append((X_feat, X_mc))
             y_by_subject.append(y)
             subject_ids.append(subject_id)
+            # Training portion already had global rejection from threshold;
+            # compute PTPs for in-fold rejection within CV on training portion
+            trial_ptps_by_subject.append(compute_trial_max_ptp(X_mc))
+            trial_groups_by_subject.append(
+                build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
+            )
 
             if n_test_l > 0 and n_test_r > 0:
                 X_feat_ho, X_mc_ho, y_ho = _pairs_to_features(
@@ -306,51 +342,68 @@ def run_pipeline(
                 X_holdout_by_subject.append((np.empty((0, 0)), np.empty((0, 0, 0))))
                 y_holdout_by_subject.append(np.array([]))
         else:
-            # Original path: no holdout
-            left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = (
-                reject_bad_epochs(left_pairs_by_channel, right_pairs_by_channel)
-            )
-
+            # No holdout: skip global rejection — rejection moves into CV folds
             n_left = len(left_pairs_by_channel[CHANNELS[0]])
             n_right = len(right_pairs_by_channel[CHANNELS[0]])
-            print(
-                f"    Epochs: {n_left_raw}L/{n_right_raw}R → "
-                f"rejected {rej_l}L/{rej_r}R → kept {n_left}L/{n_right}R"
-            )
 
             if n_left == 0 or n_right == 0:
-                print(f"    Skipping {subject_id} - no epochs after rejection")
+                print(f"    Skipping {subject_id} - no epochs")
                 continue
 
             X_feat, X_mc, y = _pairs_to_features(
                 left_pairs_by_channel, right_pairs_by_channel, sfreq
             )
+
+            # Compute per-trial PTPs for in-fold rejection
+            trial_ptps = compute_trial_max_ptp(X_mc)
+
+            # Informational: show how many would be flagged by global threshold
+            median_ptp = float(np.median(trial_ptps))
+            mad_ptp = float(np.median(np.abs(trial_ptps - median_ptp)))
+            global_thresh = median_ptp + 4.0 * mad_ptp
+            n_flagged = int(np.sum((trial_ptps > global_thresh) | (trial_ptps < 1.0)))
+            print(
+                f"    Epochs: {n_left_raw}L/{n_right_raw}R "
+                f"(~{n_flagged} artifact trials, rejected per CV fold)"
+            )
+
             X_by_subject.append((X_feat, X_mc))
             y_by_subject.append(y)
             subject_ids.append(subject_id)
+            # Track PTPs alongside subject data
+            trial_ptps_by_subject.append(trial_ptps)
+            trial_groups_by_subject.append(
+                build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
+            )
 
     if not X_by_subject:
         raise ValueError("No valid subjects found")
 
-    # Separate multichannel arrays for Riemannian pipeline
-    X_multi_by_subject = [X_mc for _, X_mc in X_by_subject]
-
     # Step 3: Cross-validation (four classifiers + nested model selection)
-    print("\n[3/5] Running cross-validation...")
-    print("(10-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
+    _print_step(3, 5, "Running cross-validation")
+    print(f"({cfg.n_folds}-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
 
-    fbcsp_scores, fbcsp_mean, fbcsp_std = train_within_subject_cv(
-        X_by_subject, y_by_subject, sfreq=sfreq
+    # Pass trial PTPs so artifact rejection happens inside each CV fold
+    ptps_arg = trial_ptps_by_subject if trial_ptps_by_subject else None
+    groups_arg = trial_groups_by_subject if trial_groups_by_subject else None
+
+    cv_results = train_within_subject_cv_all_models(
+        X_by_subject,
+        y_by_subject,
+        sfreq=sfreq,
+        n_folds=cfg.n_folds,
+        trial_ptps_by_subject=ptps_arg,
+        split_strategy=cfg.split_strategy,
+        trial_groups_by_subject=groups_arg,
+        trial_group_size=cfg.trial_group_size,
+        random_state=cfg.random_state,
+        k_best=cfg.k_best,
+        k_candidates=cfg.k_candidates,
     )
-    riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
-        X_multi_by_subject, y_by_subject, sfreq=sfreq
-    )
-    svm_scores, svm_mean, svm_std = train_within_subject_cv_svm(
-        X_by_subject, y_by_subject, sfreq=sfreq
-    )
-    ensemble_scores, ensemble_mean, ensemble_std = train_within_subject_cv_ensemble(
-        X_by_subject, y_by_subject, sfreq=sfreq
-    )
+    fbcsp_scores, fbcsp_mean, fbcsp_std = cv_results["lda"]
+    riemann_scores, riemann_mean, riemann_std = cv_results["riemann"]
+    svm_scores, svm_mean, svm_std = cv_results["svm"]
+    ensemble_scores, ensemble_mean, ensemble_std = cv_results["ensemble"]
 
     # Per-subject best score across all four classifiers (optimistic)
     best_scores = []
@@ -369,7 +422,19 @@ def run_pipeline(
     # Nested model selection CV (unbiased)
     print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
     nested_scores, nested_mean, nested_std, nested_methods = (
-        train_nested_model_selection_cv(X_by_subject, y_by_subject, sfreq=sfreq)
+        train_nested_model_selection_cv(
+            X_by_subject,
+            y_by_subject,
+            sfreq=sfreq,
+            n_outer_folds=cfg.n_outer_folds,
+            n_inner_folds=cfg.n_inner_folds,
+            k_best=cfg.k_best,
+            trial_ptps_by_subject=ptps_arg,
+            split_strategy=cfg.split_strategy,
+            trial_groups_by_subject=groups_arg,
+            trial_group_size=cfg.trial_group_size,
+            random_state=cfg.random_state,
+        )
     )
     # Convert nested method names to display names for model saving
     nested_methods_display = [_NESTED_TO_DISPLAY[m] for m in nested_methods]
@@ -406,7 +471,7 @@ def run_pipeline(
     # Held-out evaluation (when enabled)
     holdout_results: dict[str, float] = {}
     if holdout_fraction > 0 and X_holdout_by_subject:
-        print("\n[3b/5] Evaluating on held-out test sets...")
+        print("\n[3b/5] Evaluating held-out test sets")
         from src.train import _evaluate_classifier
 
         for i, (sid, (X_feat, X_mc), y_tr) in enumerate(
@@ -427,7 +492,7 @@ def run_pipeline(
                 X_mc,
                 X_mc_ho,
                 sfreq,
-                k_best=10,
+                k_best=cfg.k_best,
             )
             holdout_results[sid] = acc
             print(
@@ -440,7 +505,7 @@ def run_pipeline(
             print(f"\n  Held-out mean: {ho_mean:.1%}")
 
     # Step 4: Cross-session evaluation
-    print("\n[4/5] Cross-session evaluation...")
+    _print_step(4, 5, "Cross-session evaluation")
     recordings_by_subject = get_recordings_by_subject(data_dir)
     multi_session_subjects = {
         sid: paths for sid, paths in recordings_by_subject.items() if len(paths) > 1
@@ -473,25 +538,45 @@ def run_pipeline(
         )
 
     # Step 5: Train & save per-subject models (nested CV method)
-    print("\n[5/5] Training and saving per-subject models...")
+    _print_step(5, 5, "Training and saving per-subject models")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
     for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
         zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
     ):
+        # For deployment: apply global rejection (train on all clean data)
+        if trial_ptps_by_subject:
+            ptps = trial_ptps_by_subject[i]
+            median_ptp = float(np.median(ptps))
+            mad_ptp = float(np.median(np.abs(ptps - median_ptp)))
+            thresh = median_ptp + 4.0 * mad_ptp
+            clean_mask = (ptps >= 1.0) & (ptps <= thresh)
+            X_features = X_features[clean_mask]
+            X_multichannel = X_multichannel[clean_mask]
+            y = y[clean_mask]
+            if len(y) < 2:
+                print(f"  Skipping {sid} - too few clean trials for deployment model")
+                continue
+
         if method == "SVM":
-            model = train_final_model_svm(X_features, X_multichannel, y, sfreq=sfreq)
+            model = train_final_model_svm(
+                X_features, X_multichannel, y, sfreq=sfreq, k_best=cfg.k_best
+            )
             model_path = output_dir / f"{sid}_svm.joblib"
         elif method == "Riemann":
             model = train_final_model_riemann(X_multichannel, y, sfreq=sfreq)
             model_path = output_dir / f"{sid}_riemann.joblib"
         elif method == "Ensemble":
             # Ensemble is CV-only; save FBCSP+LDA as deployable model
-            model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
+            model = train_final_model(
+                X_features, X_multichannel, y, sfreq=sfreq, k_best=cfg.k_best
+            )
             model_path = output_dir / f"{sid}_ensemble_lda.joblib"
         else:
-            model = train_final_model(X_features, X_multichannel, y, sfreq=sfreq)
+            model = train_final_model(
+                X_features, X_multichannel, y, sfreq=sfreq, k_best=cfg.k_best
+            )
             model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
         joblib.dump(model, model_path)
         model_paths[sid] = str(model_path)
@@ -501,9 +586,9 @@ def run_pipeline(
     for sid, s in zip(subject_ids, nested_scores):
         (above_chance if s >= 0.60 else at_chance).append(sid)
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * _LINE_WIDTH)
     print("Diagnostic Summary")
-    print("=" * 60)
+    print("=" * _LINE_WIDTH)
     print(f"Subjects with signal (>=60%): {', '.join(above_chance) or 'none'}")
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
@@ -515,6 +600,7 @@ def run_pipeline(
     # Save results
     results: dict = {
         "task": "left_right_motor_imagery",
+        "training_config": cfg.to_dict(),
         "models": [
             "FBCSP+LDA (nested k)",
             "Riemannian (8-30Hz + OAS+TangentSpace+LR)",
@@ -563,9 +649,9 @@ def run_pipeline(
         json.dump(results, f, indent=2)
 
     print(f"\nResults saved to: {results_path}")
-    print("\n" + "=" * 60)
+    print("\n" + "=" * _LINE_WIDTH)
     print("Pipeline complete!")
-    print("=" * 60)
+    print("=" * _LINE_WIDTH)
 
     return results
 

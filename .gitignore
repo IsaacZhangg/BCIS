@@ -39,5 +39,13 @@ htmlcov/
 .env
 .env.local
 
+# Project-specific
+docs/
+CLAUDE.md
+
+# Dot-prefixed directories (all hidden folders except .git)
+.*/
+!.git/
+
 # Models (optional - uncomment if models should be ignored)
 # models/*.joblib

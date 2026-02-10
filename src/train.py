@@ -10,10 +10,12 @@ from pyriemann.tangentspace import TangentSpace
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+
+from src.config import SplitStrategy
+from src.validation import build_classwise_trial_groups, make_cv_splits
 
 FBCSP_BANDS = [
     (4, 8),
@@ -29,6 +31,8 @@ FBCSP_BANDS = [
 ]
 
 N_CSP_COMPONENTS = 4
+DEFAULT_K_CANDIDATES = (5, 8, 10, 15, 20)
+ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 
 
 def _extract_fbcsp_features(
@@ -98,14 +102,269 @@ def _extract_fbcsp_features_pretrained(
     return np.hstack(parts)
 
 
+def _reject_in_fold(
+    trial_ptps: np.ndarray | None,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    n_mad: float = 4.0,
+    flat_uv: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Filter train/test indices using an adaptive amplitude threshold.
+
+    The threshold is computed from training indices only, then applied to both
+    splits.  When *trial_ptps* is ``None``, indices are returned unchanged
+    (backward compatibility).
+
+    Args:
+        trial_ptps: Max peak-to-peak amplitude per trial, or ``None``.
+        train_idx: Training fold indices.
+        test_idx: Test fold indices.
+        n_mad: Number of MADs above median for the threshold.
+        flat_uv: Minimum PTP below which a trial is considered flat.
+
+    Returns:
+        (clean_train_idx, clean_test_idx).
+    """
+    if trial_ptps is None:
+        return train_idx, test_idx
+
+    train_ptps = trial_ptps[train_idx]
+    median = float(np.median(train_ptps))
+    mad = float(np.median(np.abs(train_ptps - median)))
+    threshold = median + n_mad * mad
+
+    def _keep(idx: np.ndarray) -> np.ndarray:
+        ptps = trial_ptps[idx]
+        mask = (ptps >= flat_uv) & (ptps <= threshold)
+        return idx[mask]
+
+    return _keep(train_idx), _keep(test_idx)
+
+
+def _resolve_subject_groups(
+    y: np.ndarray,
+    provided_groups: list[np.ndarray] | None,
+    subject_index: int,
+    split_strategy: SplitStrategy,
+    trial_group_size: int,
+) -> np.ndarray | None:
+    """Return per-trial groups for a subject when grouped CV is enabled."""
+    if split_strategy != "stratified_group":
+        return None
+    if provided_groups is not None:
+        return provided_groups[subject_index]
+    return build_classwise_trial_groups(y, group_size=trial_group_size)
+
+
+def _safe_k_values(
+    n_features: int,
+    n_train_trials: int,
+    k_best: int,
+    k_candidates: tuple[int, ...],
+) -> list[int]:
+    """Return conservative K values to reduce overfitting on small folds."""
+    if n_features <= 0:
+        return []
+
+    # Keep dimensionality in check: K should not exceed one-third of train samples.
+    max_by_samples = max(2, n_train_trials // 3)
+    k_cap = min(n_features, max_by_samples)
+
+    candidates = sorted({k for k in k_candidates if 1 <= k <= k_cap})
+    if not candidates:
+        candidates = [min(k_best, k_cap)]
+    return candidates
+
+
+def train_within_subject_cv_all_models(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    sfreq: float = 250.0,
+    n_folds: int = 10,
+    k_best: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
+    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
+) -> dict[str, tuple[list[float], float, float]]:
+    """Within-subject CV for all four classifiers in a single shared pass.
+
+    This preserves the original train-only fitting boundaries and in-fold
+    artifact rejection while avoiding repeated split generation and repeated
+    FBCSP extraction across separate classifier entrypoints.
+
+    Returns:
+        Dict mapping classifier name ('lda', 'riemann', 'svm', 'ensemble') to
+        (per_subject_scores, mean_accuracy, std_accuracy).
+    """
+    scores_by_model: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
+
+    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
+        zip(X_by_subject, y_by_subject)
+    ):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        splits = make_cv_splits(
+            y,
+            n_splits=n_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
+        fold_scores: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
+
+        for train_idx, test_idx in splits:
+            trial_ptps = (
+                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+            )
+            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            if len(train_idx) < 2 or len(test_idx) < 1:
+                continue
+
+            X_feat_train = X_features[train_idx]
+            X_feat_test = X_features[test_idx]
+            X_mc_train = X_multichannel[train_idx]
+            X_mc_test = X_multichannel[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # Riemannian classifier does not depend on FBCSP features.
+            riemann_pipe = make_pipeline(
+                Covariances(estimator="oas"),
+                TangentSpace(metric="riemann"),
+                LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+            )
+            riemann_pipe.fit(X_mc_train, y_train)
+            fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
+
+            # Shared FBCSP extraction for LDA/SVM/ensemble.
+            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+                X_mc_train, X_mc_test, y_train, sfreq
+            )
+            X_train_combined = np.hstack([fbcsp_train, X_feat_train])
+            X_test_combined = np.hstack([fbcsp_test, X_feat_test])
+
+            k_values = _safe_k_values(
+                n_features=X_train_combined.shape[1],
+                n_train_trials=len(y_train),
+                k_best=k_best,
+                k_candidates=k_candidates,
+            )
+            if not k_values:
+                continue
+
+            _, counts = np.unique(y_train, return_counts=True)
+            priors = counts / counts.sum()
+
+            # LDA keeps its nested inner-CV K selection.
+            best_k = k_values[0]
+            best_inner_score = -1.0
+            inner_groups = groups[train_idx] if groups is not None else None
+            inner_splits = make_cv_splits(
+                y_train,
+                n_splits=3,
+                strategy=split_strategy,
+                groups=inner_groups,
+                random_state=random_state,
+            )
+            if inner_splits:
+                for k_actual in k_values:
+                    inner_scores = []
+                    for inner_train, inner_val in inner_splits:
+                        sel = SelectKBest(f_classif, k=k_actual)
+                        X_it = sel.fit_transform(
+                            X_train_combined[inner_train], y_train[inner_train]
+                        )
+                        X_iv = sel.transform(X_train_combined[inner_val])
+                        sc = StandardScaler()
+                        X_it = sc.fit_transform(X_it)
+                        X_iv = sc.transform(X_iv)
+                        clf = LinearDiscriminantAnalysis(
+                            solver="lsqr", shrinkage="auto", priors=priors
+                        )
+                        clf.fit(X_it, y_train[inner_train])
+                        inner_scores.append(float(clf.score(X_iv, y_train[inner_val])))
+                    mean_inner = float(np.mean(inner_scores))
+                    if mean_inner > best_inner_score:
+                        best_inner_score = mean_inner
+                        best_k = k_actual
+
+            lda_selector = SelectKBest(f_classif, k=best_k)
+            X_train_lda = lda_selector.fit_transform(X_train_combined, y_train)
+            X_test_lda = lda_selector.transform(X_test_combined)
+            lda_scaler = StandardScaler()
+            X_train_lda = lda_scaler.fit_transform(X_train_lda)
+            X_test_lda = lda_scaler.transform(X_test_lda)
+            lda = LinearDiscriminantAnalysis(
+                solver="lsqr", shrinkage="auto", priors=priors
+            )
+            lda.fit(X_train_lda, y_train)
+            fold_scores["lda"].append(float(lda.score(X_test_lda, y_test)))
+
+            # SVM and ensemble keep the original conservative fixed-K behavior.
+            k_fixed = k_values[-1]
+            selector = SelectKBest(f_classif, k=k_fixed)
+            X_train_sel = selector.fit_transform(X_train_combined, y_train)
+            X_test_sel = selector.transform(X_test_combined)
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train_sel)
+            X_test_scaled = scaler.transform(X_test_sel)
+
+            svm = SVC(kernel="rbf", C=1.0, gamma="scale")
+            svm.fit(X_train_scaled, y_train)
+            fold_scores["svm"].append(float(svm.score(X_test_scaled, y_test)))
+
+            lda_ens = LinearDiscriminantAnalysis(
+                solver="lsqr", shrinkage="auto", priors=priors
+            )
+            lda_ens.fit(X_train_scaled, y_train)
+            proba_lda = lda_ens.predict_proba(X_test_scaled)
+
+            svm_prob = SVC(
+                kernel="rbf", C=1.0, gamma="scale", probability=True, random_state=42
+            )
+            svm_prob.fit(X_train_scaled, y_train)
+            proba_svm = svm_prob.predict_proba(X_test_scaled)
+
+            avg_proba = (proba_lda + proba_svm) / 2
+            preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
+            fold_scores["ensemble"].append(float(np.mean(preds == y_test)))
+
+        for name in ALL_CLASSIFIERS:
+            scores_by_model[name].append(
+                float(np.mean(fold_scores[name])) if fold_scores[name] else 0.5
+            )
+
+    return {
+        name: (
+            subject_scores,
+            float(np.mean(subject_scores)),
+            float(np.std(subject_scores)),
+        )
+        for name, subject_scores in scores_by_model.items()
+    }
+
+
 def train_within_subject_cv(
     X_by_subject: list[tuple[np.ndarray, np.ndarray]],
     y_by_subject: list[np.ndarray],
     sfreq: float = 250.0,
     n_folds: int = 10,
     k_best: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
+    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
 ) -> tuple[list[float], float, float]:
-    """Within-subject stratified k-fold CV using FBCSP + LDA.
+    """Within-subject CV using FBCSP + LDA.
 
     Per fold:
     1. FBCSP: 10 frequency bands -> CSP (4 components each) -> log-variance
@@ -118,24 +377,47 @@ def train_within_subject_cv(
         X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
         y_by_subject: List of label arrays per subject.
         sfreq: Sampling frequency in Hz.
-        n_folds: Number of CV folds.
+        n_folds: Requested number of CV folds.
         k_best: Number of features to select via SelectKBest.
+        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
+            in-fold artifact rejection.  ``None`` disables per-fold rejection.
+        split_strategy: ``'stratified'`` or ``'stratified_group'``.
+        trial_groups_by_subject: Optional explicit CV groups per subject.
+        trial_group_size: Group size when groups are auto-generated.
+        random_state: Random seed for deterministic splits.
+        k_candidates: Candidate feature counts for inner-k selection.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
     """
     scores = []
 
-    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
-        n_samples = len(y)
-        actual_folds = min(n_folds, n_samples // 2)
-        if actual_folds < 2:
-            actual_folds = n_samples
-
-        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
+        zip(X_by_subject, y_by_subject)
+    ):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        outer_splits = make_cv_splits(
+            y,
+            n_splits=n_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
         fold_scores = []
 
-        for train_idx, test_idx in skf.split(X_features, y):
+        for train_idx, test_idx in outer_splits:
+            trial_ptps = (
+                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+            )
+            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            if len(train_idx) < 2 or len(test_idx) < 1:
+                continue
             y_train, y_test = y[train_idx], y[test_idx]
 
             fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
@@ -146,35 +428,50 @@ def train_within_subject_cv(
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
             # Class priors from training fold
-            classes, counts = np.unique(y_train, return_counts=True)
+            _, counts = np.unique(y_train, return_counts=True)
             priors = counts / counts.sum()
 
             # Nested CV to select k_best
-            best_k = min(k_best, X_train_combined.shape[1])
-            best_inner_score = -1.0
-            inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+            k_values = _safe_k_values(
+                n_features=X_train_combined.shape[1],
+                n_train_trials=len(y_train),
+                k_best=k_best,
+                k_candidates=k_candidates,
+            )
+            if not k_values:
+                continue
 
-            for k_candidate in [5, 8, 10, 15, 20]:
-                k_actual = min(k_candidate, X_train_combined.shape[1])
-                inner_scores = []
-                for inner_train, inner_val in inner_cv.split(X_train_combined, y_train):
-                    sel = SelectKBest(f_classif, k=k_actual)
-                    X_it = sel.fit_transform(
-                        X_train_combined[inner_train], y_train[inner_train]
-                    )
-                    X_iv = sel.transform(X_train_combined[inner_val])
-                    sc = StandardScaler()
-                    X_it = sc.fit_transform(X_it)
-                    X_iv = sc.transform(X_iv)
-                    clf = LinearDiscriminantAnalysis(
-                        solver="lsqr", shrinkage="auto", priors=priors
-                    )
-                    clf.fit(X_it, y_train[inner_train])
-                    inner_scores.append(clf.score(X_iv, y_train[inner_val]))
-                mean_inner = float(np.mean(inner_scores))
-                if mean_inner > best_inner_score:
-                    best_inner_score = mean_inner
-                    best_k = k_actual
+            best_k = k_values[0]
+            best_inner_score = -1.0
+            inner_groups = groups[train_idx] if groups is not None else None
+            inner_splits = make_cv_splits(
+                y_train,
+                n_splits=3,
+                strategy=split_strategy,
+                groups=inner_groups,
+                random_state=random_state,
+            )
+            if inner_splits:
+                for k_actual in k_values:
+                    inner_scores = []
+                    for inner_train, inner_val in inner_splits:
+                        sel = SelectKBest(f_classif, k=k_actual)
+                        X_it = sel.fit_transform(
+                            X_train_combined[inner_train], y_train[inner_train]
+                        )
+                        X_iv = sel.transform(X_train_combined[inner_val])
+                        sc = StandardScaler()
+                        X_it = sc.fit_transform(X_it)
+                        X_iv = sc.transform(X_iv)
+                        clf = LinearDiscriminantAnalysis(
+                            solver="lsqr", shrinkage="auto", priors=priors
+                        )
+                        clf.fit(X_it, y_train[inner_train])
+                        inner_scores.append(clf.score(X_iv, y_train[inner_val]))
+                    mean_inner = float(np.mean(inner_scores))
+                    if mean_inner > best_inner_score:
+                        best_inner_score = mean_inner
+                        best_k = k_actual
 
             selector = SelectKBest(f_classif, k=best_k)
             X_train_sel = selector.fit_transform(X_train_combined, y_train)
@@ -190,7 +487,7 @@ def train_within_subject_cv(
             lda.fit(X_train_scaled, y_train)
             fold_scores.append(lda.score(X_test_scaled, y_test))
 
-        scores.append(float(np.mean(fold_scores)))
+        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
@@ -269,8 +566,13 @@ def train_within_subject_cv_riemann(
     y_by_subject: list[np.ndarray],
     sfreq: float = 250.0,
     n_folds: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
 ) -> tuple[list[float], float, float]:
-    """Within-subject stratified k-fold CV using Riemannian tangent-space classifier.
+    """Within-subject CV using Riemannian tangent-space classifier.
 
     Per fold:
     1. Bandpass filter 8-30Hz (mu/beta bands)
@@ -282,23 +584,43 @@ def train_within_subject_cv_riemann(
         X_by_subject: List of multichannel EEG arrays (n_trials, n_channels, n_samples).
         y_by_subject: List of label arrays per subject.
         sfreq: Sampling frequency in Hz.
-        n_folds: Number of CV folds.
+        n_folds: Requested number of CV folds.
+        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
+            in-fold artifact rejection.  ``None`` disables per-fold rejection.
+        split_strategy: ``'stratified'`` or ``'stratified_group'``.
+        trial_groups_by_subject: Optional explicit CV groups per subject.
+        trial_group_size: Group size when groups are auto-generated.
+        random_state: Random seed for deterministic splits.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
     """
     scores = []
 
-    for X_multichannel, y in zip(X_by_subject, y_by_subject):
-        n_samples = len(y)
-        actual_folds = min(n_folds, n_samples // 2)
-        if actual_folds < 2:
-            actual_folds = n_samples
-
-        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+    for subj_idx, (X_multichannel, y) in enumerate(zip(X_by_subject, y_by_subject)):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        splits = make_cv_splits(
+            y,
+            n_splits=n_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
         fold_scores = []
 
-        for train_idx, test_idx in skf.split(X_multichannel, y):
+        for train_idx, test_idx in splits:
+            trial_ptps = (
+                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+            )
+            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            if len(train_idx) < 2 or len(test_idx) < 1:
+                continue
             pipe = make_pipeline(
                 Covariances(estimator="oas"),
                 TangentSpace(metric="riemann"),
@@ -307,7 +629,7 @@ def train_within_subject_cv_riemann(
             pipe.fit(X_multichannel[train_idx], y[train_idx])
             fold_scores.append(pipe.score(X_multichannel[test_idx], y[test_idx]))
 
-        scores.append(float(np.mean(fold_scores)))
+        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
@@ -344,8 +666,14 @@ def train_within_subject_cv_svm(
     sfreq: float = 250.0,
     n_folds: int = 10,
     k_best: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
+    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
 ) -> tuple[list[float], float, float]:
-    """Within-subject stratified k-fold CV using FBCSP + SVM.
+    """Within-subject CV using FBCSP + SVM.
 
     Per fold:
     1. FBCSP: 10 frequency bands -> CSP (4 components each) -> log-variance
@@ -358,24 +686,47 @@ def train_within_subject_cv_svm(
         X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
         y_by_subject: List of label arrays per subject.
         sfreq: Sampling frequency in Hz.
-        n_folds: Number of CV folds.
+        n_folds: Requested number of CV folds.
         k_best: Number of features to select via SelectKBest.
+        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
+            in-fold artifact rejection.  ``None`` disables per-fold rejection.
+        split_strategy: ``'stratified'`` or ``'stratified_group'``.
+        trial_groups_by_subject: Optional explicit CV groups per subject.
+        trial_group_size: Group size when groups are auto-generated.
+        random_state: Random seed for deterministic splits.
+        k_candidates: Candidate feature counts for safe K clipping.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
     """
     scores = []
 
-    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
-        n_samples = len(y)
-        actual_folds = min(n_folds, n_samples // 2)
-        if actual_folds < 2:
-            actual_folds = n_samples
-
-        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
+        zip(X_by_subject, y_by_subject)
+    ):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        splits = make_cv_splits(
+            y,
+            n_splits=n_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
         fold_scores = []
 
-        for train_idx, test_idx in skf.split(X_features, y):
+        for train_idx, test_idx in splits:
+            trial_ptps = (
+                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+            )
+            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            if len(train_idx) < 2 or len(test_idx) < 1:
+                continue
             y_train, y_test = y[train_idx], y[test_idx]
 
             fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
@@ -385,7 +736,15 @@ def train_within_subject_cv_svm(
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
-            k = min(k_best, X_train_combined.shape[1])
+            k_values = _safe_k_values(
+                n_features=X_train_combined.shape[1],
+                n_train_trials=len(y_train),
+                k_best=k_best,
+                k_candidates=k_candidates,
+            )
+            if not k_values:
+                continue
+            k = k_values[-1]
             selector = SelectKBest(f_classif, k=k)
             X_train_sel = selector.fit_transform(X_train_combined, y_train)
             X_test_sel = selector.transform(X_test_combined)
@@ -398,7 +757,7 @@ def train_within_subject_cv_svm(
             svm.fit(X_train_scaled, y_train)
             fold_scores.append(svm.score(X_test_scaled, y_test))
 
-        scores.append(float(np.mean(fold_scores)))
+        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
@@ -408,6 +767,103 @@ def train_within_subject_cv_svm(
 # ---------------------------------------------------------------------------
 # Nested model selection CV (unbiased best-of-4 estimate)
 # ---------------------------------------------------------------------------
+
+
+def _evaluate_classifiers_batch(
+    names: list[str],
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    X_mc_train: np.ndarray,
+    X_mc_test: np.ndarray,
+    sfreq: float,
+    k_best: int,
+) -> dict[str, float]:
+    """Train and score one or more classifiers on a fixed split.
+
+    The helper reuses FBCSP extraction for the FBCSP-based heads ('lda', 'svm',
+    'ensemble') so nested inner loops can evaluate all candidates without
+    recomputing identical transforms.
+    """
+    requested = set(names)
+    unknown = requested.difference(ALL_CLASSIFIERS)
+    if unknown:
+        unknown_txt = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown classifier(s): {unknown_txt}")
+
+    scores: dict[str, float] = {}
+
+    if "riemann" in requested:
+        pipe = make_pipeline(
+            Covariances(estimator="oas"),
+            TangentSpace(metric="riemann"),
+            LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+        )
+        pipe.fit(X_mc_train, y_train)
+        scores["riemann"] = float(pipe.score(X_mc_test, y_test))
+
+    fbcsp_names = requested.intersection({"lda", "svm", "ensemble"})
+    if not fbcsp_names:
+        return scores
+
+    fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+        X_mc_train, X_mc_test, y_train, sfreq
+    )
+    X_train_combined = np.hstack([fbcsp_train, X_train])
+    X_test_combined = np.hstack([fbcsp_test, X_test])
+
+    k_values = _safe_k_values(
+        n_features=X_train_combined.shape[1],
+        n_train_trials=len(y_train),
+        k_best=k_best,
+        k_candidates=DEFAULT_K_CANDIDATES,
+    )
+    if not k_values:
+        for name in fbcsp_names:
+            scores[name] = 0.5
+        return scores
+
+    k = k_values[-1]
+    selector = SelectKBest(f_classif, k=k)
+    X_train_sel = selector.fit_transform(X_train_combined, y_train)
+    X_test_sel = selector.transform(X_test_combined)
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_sel)
+    X_test_scaled = scaler.transform(X_test_sel)
+
+    _, counts = np.unique(y_train, return_counts=True)
+    priors = counts / counts.sum()
+
+    if "lda" in fbcsp_names:
+        lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
+        lda.fit(X_train_scaled, y_train)
+        scores["lda"] = float(lda.score(X_test_scaled, y_test))
+
+    if "svm" in fbcsp_names:
+        svm = SVC(kernel="rbf", C=1.0, gamma="scale")
+        svm.fit(X_train_scaled, y_train)
+        scores["svm"] = float(svm.score(X_test_scaled, y_test))
+
+    if "ensemble" in fbcsp_names:
+        lda_ens = LinearDiscriminantAnalysis(
+            solver="lsqr", shrinkage="auto", priors=priors
+        )
+        lda_ens.fit(X_train_scaled, y_train)
+        proba_lda = lda_ens.predict_proba(X_test_scaled)
+
+        svm_prob = SVC(
+            kernel="rbf", C=1.0, gamma="scale", probability=True, random_state=42
+        )
+        svm_prob.fit(X_train_scaled, y_train)
+        proba_svm = svm_prob.predict_proba(X_test_scaled)
+
+        avg_proba = (proba_lda + proba_svm) / 2
+        preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
+        scores["ensemble"] = float(np.mean(preds == y_test))
+
+    return scores
 
 
 def _evaluate_classifier(
@@ -421,76 +877,11 @@ def _evaluate_classifier(
     sfreq: float,
     k_best: int,
 ) -> float:
-    """Train and score a single classifier on pre-split data.
-
-    Used by :func:`train_nested_model_selection_cv` to evaluate each of the
-    four classifiers inside inner and outer CV folds.
-
-    Args:
-        name: One of 'lda', 'riemann', 'svm', 'ensemble'.
-        X_train: Handcrafted features for training trials.
-        X_test: Handcrafted features for test trials.
-        y_train: Training labels.
-        y_test: Test labels.
-        X_mc_train: Multichannel EEG for training trials.
-        X_mc_test: Multichannel EEG for test trials.
-        sfreq: Sampling frequency in Hz.
-        k_best: Number of features to select for FBCSP-based classifiers.
-
-    Returns:
-        Accuracy on the test split.
-    """
-    if name == "riemann":
-        pipe = make_pipeline(
-            Covariances(estimator="oas"),
-            TangentSpace(metric="riemann"),
-            LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
-        )
-        pipe.fit(X_mc_train, y_train)
-        return float(pipe.score(X_mc_test, y_test))
-
-    # FBCSP-based classifiers (lda, svm, ensemble) share feature extraction
-    fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-        X_mc_train, X_mc_test, y_train, sfreq
+    """Train and score a single classifier on pre-split data."""
+    scores = _evaluate_classifiers_batch(
+        [name], X_train, X_test, y_train, y_test, X_mc_train, X_mc_test, sfreq, k_best
     )
-    X_train_combined = np.hstack([fbcsp_train, X_train])
-    X_test_combined = np.hstack([fbcsp_test, X_test])
-
-    k = min(k_best, X_train_combined.shape[1])
-    selector = SelectKBest(f_classif, k=k)
-    X_train_sel = selector.fit_transform(X_train_combined, y_train)
-    X_test_sel = selector.transform(X_test_combined)
-
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_sel)
-    X_test_scaled = scaler.transform(X_test_sel)
-
-    if name == "lda":
-        classes, counts = np.unique(y_train, return_counts=True)
-        priors = counts / counts.sum()
-        clf = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
-        clf.fit(X_train_scaled, y_train)
-        return float(clf.score(X_test_scaled, y_test))
-
-    if name == "svm":
-        clf = SVC(kernel="rbf", C=1.0, gamma="scale")
-        clf.fit(X_train_scaled, y_train)
-        return float(clf.score(X_test_scaled, y_test))
-
-    # ensemble (lda + svm soft vote)
-    classes, counts = np.unique(y_train, return_counts=True)
-    priors = counts / counts.sum()
-    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
-    lda.fit(X_train_scaled, y_train)
-    proba_lda = lda.predict_proba(X_test_scaled)
-
-    svm = SVC(kernel="rbf", C=1.0, gamma="scale", probability=True)
-    svm.fit(X_train_scaled, y_train)
-    proba_svm = svm.predict_proba(X_test_scaled)
-
-    avg_proba = (proba_lda + proba_svm) / 2
-    preds = lda.classes_[np.argmax(avg_proba, axis=1)]
-    return float(np.mean(preds == y_test))
+    return scores[name]
 
 
 def train_nested_model_selection_cv(
@@ -500,6 +891,11 @@ def train_nested_model_selection_cv(
     n_outer_folds: int = 10,
     n_inner_folds: int = 5,
     k_best: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
 ) -> tuple[list[float], float, float, list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
@@ -518,26 +914,51 @@ def train_nested_model_selection_cv(
         n_outer_folds: Number of outer CV folds.
         n_inner_folds: Number of inner CV folds for model selection.
         k_best: Number of features for FBCSP-based classifiers.
+        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
+            in-fold artifact rejection at the outer level.  ``None`` disables
+            per-fold rejection.
+        split_strategy: ``'stratified'`` or ``'stratified_group'``.
+        trial_groups_by_subject: Optional explicit CV groups per subject.
+        trial_group_size: Group size when groups are auto-generated.
+        random_state: Random seed for deterministic splits.
 
     Returns:
         Tuple of (per_subject_scores, mean, std, per_subject_best_methods).
         per_subject_best_methods is the most frequent inner-CV winner per subject.
     """
-    classifier_names = ["lda", "riemann", "svm", "ensemble"]
+    classifier_names = list(ALL_CLASSIFIERS)
     scores = []
     best_methods = []
 
-    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
-        n_samples = len(y)
-        actual_outer = min(n_outer_folds, n_samples // 2)
-        if actual_outer < 2:
-            actual_outer = n_samples
-
-        outer_cv = StratifiedKFold(n_splits=actual_outer, shuffle=True, random_state=42)
+    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
+        zip(X_by_subject, y_by_subject)
+    ):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        outer_splits = make_cv_splits(
+            y,
+            n_splits=n_outer_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
         fold_scores = []
         fold_winners = []
 
-        for outer_train_idx, outer_test_idx in outer_cv.split(X_features, y):
+        for outer_train_idx, outer_test_idx in outer_splits:
+            trial_ptps = (
+                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+            )
+            outer_train_idx, outer_test_idx = _reject_in_fold(
+                trial_ptps, outer_train_idx, outer_test_idx
+            )
+            if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
+                continue
             X_feat_otrain = X_features[outer_train_idx]
             X_feat_otest = X_features[outer_test_idx]
             X_mc_otrain = X_multichannel[outer_train_idx]
@@ -546,33 +967,37 @@ def train_nested_model_selection_cv(
             y_otest = y[outer_test_idx]
 
             # Inner CV: evaluate each classifier on outer-train
-            actual_inner = min(n_inner_folds, len(y_otrain) // 2)
-            if actual_inner < 2:
-                actual_inner = len(y_otrain)
-
-            inner_cv = StratifiedKFold(
-                n_splits=actual_inner, shuffle=True, random_state=42
+            inner_groups = groups[outer_train_idx] if groups is not None else None
+            inner_splits = make_cv_splits(
+                y_otrain,
+                n_splits=n_inner_folds,
+                strategy=split_strategy,
+                groups=inner_groups,
+                random_state=random_state,
             )
-            inner_means: dict[str, float] = {}
-
-            for clf_name in classifier_names:
-                inner_scores = []
-                for inner_train_idx, inner_val_idx in inner_cv.split(
-                    X_feat_otrain, y_otrain
-                ):
-                    score = _evaluate_classifier(
-                        clf_name,
-                        X_feat_otrain[inner_train_idx],
-                        X_feat_otrain[inner_val_idx],
-                        y_otrain[inner_train_idx],
-                        y_otrain[inner_val_idx],
-                        X_mc_otrain[inner_train_idx],
-                        X_mc_otrain[inner_val_idx],
-                        sfreq,
-                        k_best,
-                    )
-                    inner_scores.append(score)
-                inner_means[clf_name] = float(np.mean(inner_scores))
+            inner_scores_by_clf = {name: [] for name in classifier_names}
+            for inner_train_idx, inner_val_idx in inner_splits:
+                split_scores = _evaluate_classifiers_batch(
+                    classifier_names,
+                    X_feat_otrain[inner_train_idx],
+                    X_feat_otrain[inner_val_idx],
+                    y_otrain[inner_train_idx],
+                    y_otrain[inner_val_idx],
+                    X_mc_otrain[inner_train_idx],
+                    X_mc_otrain[inner_val_idx],
+                    sfreq,
+                    k_best,
+                )
+                for clf_name, score in split_scores.items():
+                    inner_scores_by_clf[clf_name].append(score)
+            inner_means: dict[str, float] = {
+                clf_name: (
+                    float(np.mean(inner_scores_by_clf[clf_name]))
+                    if inner_scores_by_clf[clf_name]
+                    else 0.5
+                )
+                for clf_name in classifier_names
+            }
 
             # Pick best classifier by inner CV
             best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
@@ -592,10 +1017,12 @@ def train_nested_model_selection_cv(
             fold_scores.append(outer_score)
             fold_winners.append(best_clf)
 
-        scores.append(float(np.mean(fold_scores)))
+        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
         # Most frequent inner-CV winner across outer folds
         winner_counts = Counter(fold_winners)
-        best_methods.append(winner_counts.most_common(1)[0][0])
+        best_methods.append(
+            winner_counts.most_common(1)[0][0] if winner_counts else "lda"
+        )
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
@@ -631,20 +1058,17 @@ def cross_session_evaluate(
     X_feat_train, X_mc_train = train_data
     X_feat_test, X_mc_test = test_data
 
-    results = {}
-    for name in ["lda", "riemann", "svm", "ensemble"]:
-        results[name] = _evaluate_classifier(
-            name,
-            X_feat_train,
-            X_feat_test,
-            train_labels,
-            test_labels,
-            X_mc_train,
-            X_mc_test,
-            sfreq,
-            k_best,
-        )
-    return results
+    return _evaluate_classifiers_batch(
+        list(ALL_CLASSIFIERS),
+        X_feat_train,
+        X_feat_test,
+        train_labels,
+        test_labels,
+        X_mc_train,
+        X_mc_test,
+        sfreq,
+        k_best,
+    )
 
 
 def train_final_model_svm(
@@ -711,6 +1135,13 @@ def train_within_subject_cv_ensemble(
     y_by_subject: list[np.ndarray],
     sfreq: float = 250.0,
     n_folds: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
+    k_best: int = 10,
+    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
 ) -> tuple[list[float], float, float]:
     """Within-subject CV using soft-voting ensemble of FBCSP+LDA and FBCSP+SVM.
 
@@ -723,23 +1154,47 @@ def train_within_subject_cv_ensemble(
         X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
         y_by_subject: List of label arrays per subject.
         sfreq: Sampling frequency in Hz.
-        n_folds: Number of CV folds.
+        n_folds: Requested number of CV folds.
+        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
+            in-fold artifact rejection.  ``None`` disables per-fold rejection.
+        split_strategy: ``'stratified'`` or ``'stratified_group'``.
+        trial_groups_by_subject: Optional explicit CV groups per subject.
+        trial_group_size: Group size when groups are auto-generated.
+        random_state: Random seed for deterministic splits.
+        k_best: Maximum selected features for the shared FBCSP space.
+        k_candidates: Candidate feature counts for safe K clipping.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
     """
     scores = []
 
-    for (X_features, X_multichannel), y in zip(X_by_subject, y_by_subject):
-        n_samples = len(y)
-        actual_folds = min(n_folds, n_samples // 2)
-        if actual_folds < 2:
-            actual_folds = n_samples
-
-        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
+        zip(X_by_subject, y_by_subject)
+    ):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        splits = make_cv_splits(
+            y,
+            n_splits=n_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
         fold_scores = []
 
-        for train_idx, test_idx in skf.split(X_features, y):
+        for train_idx, test_idx in splits:
+            trial_ptps = (
+                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+            )
+            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            if len(train_idx) < 2 or len(test_idx) < 1:
+                continue
             y_train, y_test = y[train_idx], y[test_idx]
 
             # --- Shared FBCSP features ---
@@ -749,7 +1204,15 @@ def train_within_subject_cv_ensemble(
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
-            k = min(10, X_train_combined.shape[1])
+            k_values = _safe_k_values(
+                n_features=X_train_combined.shape[1],
+                n_train_trials=len(y_train),
+                k_best=k_best,
+                k_candidates=k_candidates,
+            )
+            if not k_values:
+                continue
+            k = k_values[-1]
             selector = SelectKBest(f_classif, k=k)
             X_train_sel = selector.fit_transform(X_train_combined, y_train)
             X_test_sel = selector.transform(X_test_combined)
@@ -758,7 +1221,7 @@ def train_within_subject_cv_ensemble(
             X_test_scaled = scaler.transform(X_test_sel)
 
             # --- Classifier 1: LDA ---
-            classes, counts = np.unique(y_train, return_counts=True)
+            _, counts = np.unique(y_train, return_counts=True)
             priors = counts / counts.sum()
             lda = LinearDiscriminantAnalysis(
                 solver="lsqr", shrinkage="auto", priors=priors
@@ -767,7 +1230,9 @@ def train_within_subject_cv_ensemble(
             proba_lda = lda.predict_proba(X_test_scaled)
 
             # --- Classifier 2: SVM ---
-            svm = SVC(kernel="rbf", C=1.0, gamma="scale", probability=True)
+            svm = SVC(
+                kernel="rbf", C=1.0, gamma="scale", probability=True, random_state=42
+            )
             svm.fit(X_train_scaled, y_train)
             proba_svm = svm.predict_proba(X_test_scaled)
 
@@ -781,7 +1246,7 @@ def train_within_subject_cv_ensemble(
 
             fold_scores.append(float(np.mean(preds_labels == y_test)))
 
-        scores.append(float(np.mean(fold_scores)))
+        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
