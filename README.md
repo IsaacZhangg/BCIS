@@ -25,24 +25,24 @@ Built on a four-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-sp
 
 ## Results
 
-**55.2% nested selection mean accuracy** (unbiased) across 10 subjects, with 58.5% best-of mean (optimistic, for reference). Evaluated with within-subject nested model-selection CV: outer 10-fold selects the best classifier per fold via inner 7-fold CV, with **in-fold artifact rejection** (threshold computed from training fold only), eliminating both post-hoc selection bias and rejection threshold leakage.
+**61.2% nested selection mean accuracy** (unbiased) across 10 subjects, with 63.2% best-of mean (optimistic, for reference). Evaluated with within-subject nested model-selection CV: outer 10-fold selects the best classifier per fold via inner 7-fold CV, with **in-fold artifact rejection** (threshold computed from training fold only), eliminating both post-hoc selection bias and rejection threshold leakage.
 
-3 of 10 subjects show above-chance classification (>=60%). This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
+5 of 10 subjects show above-chance classification (>=60%). This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
 
 | Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Best (optimistic) | Nested (unbiased) | Selected | Status |
 |---------|-----------|---------|-----|----------|-------------------|-------------------|----------|--------|
-| subject0001 | 47.4% | 45.7% | 50.0% | 52.1% | 52.1% | **44.5%** | FBCSP | chance |
-| subject0002 | 39.1% | 34.6% | 36.8% | 33.2% | 39.1% | **32.0%** | FBCSP | chance |
-| subject0004 | 29.8% | 29.6% | 32.8% | 31.9% | 32.8% | **25.7%** | SVM | chance |
-| subject0005 | 38.9% | 47.8% | 38.4% | 38.4% | 47.8% | **35.4%** | Riemann | chance |
-| subject0006 | 92.0% | 26.0% | 84.0% | 89.0% | 92.0% | **90.0%** | FBCSP | signal |
-| subject0007 | 62.0% | 42.0% | 57.0% | 60.0% | 62.0% | **60.0%** | FBCSP | signal |
-| subject0008 | 63.6% | 48.4% | 58.8% | 60.5% | 63.6% | **59.5%** | Ensemble | chance |
-| subject0009 | 45.7% | 51.5% | 48.6% | 47.7% | 51.5% | **48.5%** | Riemann | chance |
-| subject0010 | 75.2% | 68.6% | 74.0% | 75.2% | 75.2% | **72.9%** | Riemann | signal |
-| subject0011 | 43.0% | 45.6% | 42.9% | 38.6% | 45.6% | **43.3%** | Riemann | chance |
+| subject0001 | 48.5% | 41.9% | 49.3% | 45.7% | 49.3% | **45.9%** | SVM | chance |
+| subject0002 | 40.1% | 41.7% | 43.2% | 35.4% | 43.2% | **41.0%** | SVM | chance |
+| subject0004 | 42.8% | 29.9% | 56.7% | 44.2% | 56.7% | **54.7%** | SVM | chance |
+| subject0005 | 56.8% | 53.4% | 55.6% | 55.5% | 56.8% | **55.9%** | FBCSP | chance |
+| subject0006 | 90.0% | 42.0% | 87.0% | 85.0% | 90.0% | **88.0%** | FBCSP | signal |
+| subject0007 | 64.0% | 45.0% | 50.0% | 61.0% | 64.0% | **66.0%** | FBCSP | signal |
+| subject0008 | 69.8% | 52.8% | 57.1% | 63.4% | 69.8% | **65.6%** | FBCSP | signal |
+| subject0009 | 49.1% | 56.1% | 54.9% | 47.6% | 56.1% | **52.3%** | Riemann | chance |
+| subject0010 | 78.0% | 60.3% | 85.3% | 83.1% | 85.3% | **82.1%** | FBCSP | signal |
+| subject0011 | 53.6% | 60.4% | 48.7% | 49.6% | 60.4% | **60.4%** | Riemann | signal |
 
-Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~26-60%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on some subjects. The nested CV selects the classifier method per subject without the inflated accuracy of post-hoc selection.
+Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~41-56%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on some subjects. The nested CV selects the classifier method per subject without the inflated accuracy of post-hoc selection.
 
 ## Hardware
 
