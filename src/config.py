@@ -23,7 +23,7 @@ class TrainingConfig:
     k_best: int = 10
     k_candidates: tuple[int, ...] = (3, 5, 8, 10, 15, 20, 25)
     split_strategy: SplitStrategy = "stratified_group"
-    trial_group_size: int = 2
+    trial_group_size: int = 1
     random_state: int = 42
 
     def to_dict(self) -> dict:
