@@ -25,24 +25,24 @@ Built on a four-classifier pipeline — **FBCSP + LDA**, **Riemannian tangent-sp
 
 ## Results
 
-**55.9% nested selection mean accuracy** (unbiased) across 10 subjects, with 59.1% best-of mean (optimistic, for reference). Evaluated with within-subject nested model-selection CV: outer 10-fold selects the best classifier per fold via inner 5-fold CV, with **in-fold artifact rejection** (threshold computed from training fold only), eliminating both post-hoc selection bias and rejection threshold leakage.
+**55.2% nested selection mean accuracy** (unbiased) across 10 subjects, with 58.5% best-of mean (optimistic, for reference). Evaluated with within-subject nested model-selection CV: outer 10-fold selects the best classifier per fold via inner 7-fold CV, with **in-fold artifact rejection** (threshold computed from training fold only), eliminating both post-hoc selection bias and rejection threshold leakage.
 
 3 of 10 subjects show above-chance classification (>=60%). This is consistent with the literature on consumer-grade EEG -- signal quality and motor imagery aptitude vary significantly between individuals.
 
 | Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Best (optimistic) | Nested (unbiased) | Selected | Status |
 |---------|-----------|---------|-----|----------|-------------------|-------------------|----------|--------|
-| subject0001 | 54.0% | 44.4% | 54.4% | 56.4% | 56.4% | **52.9%** | FBCSP | chance |
-| subject0002 | 47.0% | 47.8% | 47.2% | 49.0% | 49.0% | **46.8%** | Riemann | chance |
-| subject0004 | 36.9% | 33.7% | 39.7% | 41.2% | 41.2% | **31.7%** | Ensemble | chance |
-| subject0005 | 44.0% | 40.4% | 44.5% | 41.9% | 44.5% | **43.1%** | Ensemble | chance |
-| subject0006 | 92.0% | 38.0% | 88.0% | 91.0% | 92.0% | **90.0%** | FBCSP | signal |
-| subject0007 | 58.0% | 46.0% | 56.0% | 59.0% | 59.0% | **57.0%** | Ensemble | chance |
-| subject0008 | 48.0% | 48.0% | 54.3% | 52.2% | 54.3% | **55.3%** | SVM | chance |
-| subject0009 | 48.3% | 56.2% | 40.9% | 42.0% | 56.2% | **50.4%** | Riemann | chance |
-| subject0010 | 76.1% | 68.9% | 78.2% | 76.1% | 78.2% | **71.2%** | FBCSP | signal |
-| subject0011 | 45.7% | 59.9% | 51.7% | 48.5% | 59.9% | **60.4%** | Riemann | signal |
+| subject0001 | 47.4% | 45.7% | 50.0% | 52.1% | 52.1% | **44.5%** | FBCSP | chance |
+| subject0002 | 39.1% | 34.6% | 36.8% | 33.2% | 39.1% | **32.0%** | FBCSP | chance |
+| subject0004 | 29.8% | 29.6% | 32.8% | 31.9% | 32.8% | **25.7%** | SVM | chance |
+| subject0005 | 38.9% | 47.8% | 38.4% | 38.4% | 47.8% | **35.4%** | Riemann | chance |
+| subject0006 | 92.0% | 26.0% | 84.0% | 89.0% | 92.0% | **90.0%** | FBCSP | signal |
+| subject0007 | 62.0% | 42.0% | 57.0% | 60.0% | 62.0% | **60.0%** | FBCSP | signal |
+| subject0008 | 63.6% | 48.4% | 58.8% | 60.5% | 63.6% | **59.5%** | Ensemble | chance |
+| subject0009 | 45.7% | 51.5% | 48.6% | 47.7% | 51.5% | **48.5%** | Riemann | chance |
+| subject0010 | 75.2% | 68.6% | 74.0% | 75.2% | 75.2% | **72.9%** | Riemann | signal |
+| subject0011 | 43.0% | 45.6% | 42.9% | 38.6% | 45.6% | **43.3%** | Riemann | chance |
 
-Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~32-57%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on subjects 0002, 0009, and 0011. The nested CV selects the classifier method per subject without the inflated accuracy of post-hoc selection.
+Subjects with signal (>=60% accuracy) are viable candidates for real-time 6th finger control. The remaining subjects perform at chance level (~26-60%), likely due to low signal-to-noise ratio from the consumer headset or difficulty producing distinguishable motor imagery patterns. The Riemannian classifier complements FBCSP on some subjects. The nested CV selects the classifier method per subject without the inflated accuracy of post-hoc selection.
 
 ## Hardware
 
@@ -60,23 +60,24 @@ CSV files (8 channels, 250 Hz, Unicorn headset)
   │
   ├─ preprocess.py ─── Bandpass (1-40 Hz) + Notch (60 Hz) filtering
   │
-  ├─ epochs.py ──────── Extract paired baseline (1.0s) / task (1.8s) windows
+  ├─ epochs.py ──────── Extract paired baseline (1.0s) / task (3.0s) windows
   │                      + per-trial PTP computation for in-fold rejection
   │
-  ├─ features.py ────── 39 handcrafted features:
+  ├─ features.py ────── 45 handcrafted features:
   │                        Surface Laplacian filtered C3/C4,
   │                        Lateralization indices, ERD asymmetry,
-  │                        Hjorth parameters, Cz motor area, frontal theta
+  │                        Hjorth params, C3-C4 coherence,
+  │                        spectral entropy, Cz motor area, frontal theta
   │
   ├─ train.py ─────────  Four classifiers evaluated per subject:
   │                      In-fold artifact rejection (threshold from train only)
-  │                      1. FBCSP (10 bands × 4 CSP = 40 features)
-  │                         + 39 handcrafted → SelectKBest(nested CV k)
+  │                      1. FBCSP (8 bands × 4 CSP = 32 features)
+  │                         + 45 handcrafted → SelectKBest(nested CV k)
   │                         → StandardScaler → LDA (shrinkage + class priors)
   │                      2. Riemannian: Covariances(OAS)
   │                         → TangentSpace(riemann) → LogisticRegression
   │                      3. FBCSP + SVM: same FBCSP features
-  │                         → SelectKBest(k=10) → SVC(RBF)
+  │                         → SelectKBest(k) → SVC(RBF, C=10)
   │                      4. Ensemble: LDA + SVM soft voting
   │
   └─ pipeline.py ────── Orchestrates everything, runs all four classifiers
@@ -119,16 +120,16 @@ Extracts time-locked windows around each motor imagery event marker. Each trial 
 
 ```
        ←── 1.0s ──→←── event marker
-       [  baseline  ][ 0.5s skip ][ ─── 1.8s task ─── ]
+       [  baseline  ][ skip ][ ────── 3.0s task ────── ]
 ```
 
 - **Baseline**: 1.0 second immediately before the event marker (resting state reference)
-- **Skip**: 0.5 seconds after the event marker (accounts for reaction time / instruction processing)
-- **Task**: 1.8 seconds of motor imagery signal (the classification target)
+- **Skip**: 0.25 seconds after the event marker (accounts for initial visual evoked potential)
+- **Task**: 3.0 seconds of motor imagery signal (the classification target)
 
 Trials are discarded if the baseline would start before the signal beginning or the task would extend past the signal end.
 
-After extraction, per-trial **max peak-to-peak amplitude** is computed across channels via `compute_trial_max_ptp()`. Artifact rejection is performed **inside each CV fold** rather than globally: the threshold (`median + 4×MAD`) is computed from training-fold trials only, then applied to both train and test splits. This prevents the rejection threshold from leaking test-fold information. Flat trials (PTP < 1 µV) are also removed.
+After extraction, per-trial **max peak-to-peak amplitude** is computed across channels via `compute_trial_max_ptp()`. Artifact rejection is performed **inside each CV fold** rather than globally: the threshold (`median + 3.5×MAD`) is computed from training-fold trials only, then applied to both train and test splits. This prevents the rejection threshold from leaking test-fold information. Flat trials (PTP < 1 µV) are also removed.
 
 For deployment models (trained on all data), global rejection is applied once using the full-dataset threshold. Gradient and high-frequency power criteria are available in the code but disabled by default -- they were found to reject trials containing discriminative motor imagery signal.
 
@@ -138,7 +139,7 @@ For deployment models (trained on all data), global rejection is applied once us
 
 Two feature sets are computed and later concatenated:
 
-#### Handcrafted Features (39 total)
+#### Handcrafted Features (45 total)
 
 Computed from baseline-vs-task comparisons using Welch's method for spectral analysis. C3/C4 features use **Surface Laplacian** spatial filtering to sharpen motor cortex signals: C3_lap = C3 − mean(Fz, Cz, PO7), C4_lap = C4 − mean(Cz, Pz, PO8).
 
@@ -148,34 +149,36 @@ Computed from baseline-vs-task comparisons using Welch's method for spectral ana
 | Cz supplementary motor area | Cz | mu (8-12 Hz), beta (13-30 Hz) | ERD, log power | 2 × 2 = **4** |
 | Fz frontal theta | Fz | theta (4-8 Hz) | log(theta_task / theta_baseline) | **1** |
 | Time-domain (Hjorth) | C3_lap, C4_lap | -- | activity, mobility, complexity | 2 × 3 = **6** |
+| C3-C4 coherence | C3_lap, C4_lap | mu (8-12 Hz), beta (13-30 Hz) | coherence (task), coherence change (task - baseline) | 2 × 2 = **4** |
+| Spectral entropy lateralization | C3_lap, C4_lap | mu (8-12 Hz), beta (13-30 Hz) | C3 entropy - C4 entropy | 2 × 1 = **2** |
 
 **Key formulas**:
 - **Lateralization Index**: `(C4_power - C3_power) / (C4_power + C3_power)` -- positive for left imagery (contralateral C3 desynchronization), negative for right
 - **ERD (Event-Related Desynchronization)**: `(baseline_power - task_power) / baseline_power × 100` -- percentage power decrease during motor imagery
 - **Hjorth parameters**: Activity (variance), Mobility (mean frequency), Complexity (bandwidth) -- efficient time-domain descriptors
 
-#### FBCSP Features (up to 40)
+#### FBCSP Features (up to 32)
 
 Computed in `src/train.py` during the training loop (fitted per fold to avoid data leakage):
 
-- **10 frequency bands**: (4-8), (8-10), (10-12), (12-14), (14-16), (16-18), (18-20), (20-24), (24-30), (30-40) Hz
+- **8 motor-focused frequency bands**: (8-10), (10-12), (12-14), (14-16), (16-18), (18-20), (20-24), (24-30) Hz
 - **4 CSP components per band**: spatial filters maximizing variance ratio between left and right classes
 - **Log-variance transformation**: CSP features are log-transformed for Gaussian-like distribution
-- **Ledoit-Wolf regularization**: robust covariance estimation for small sample sizes
+- **OAS regularization**: Oracle Approximating Shrinkage for robust covariance estimation with small samples
 
 ### 5. Training & Classification
 
 **Module**: `src/train.py`
 
-Four classifiers are evaluated per subject. The best per-subject classifier is selected via **nested model-selection CV** (inner 5-fold selects, outer 10-fold evaluates) to avoid selection bias.
+Four classifiers are evaluated per subject. The best per-subject classifier is selected via **nested model-selection CV** (inner 7-fold selects, outer 10-fold evaluates) to avoid selection bias.
 
 #### Classifier 1: FBCSP + LDA
 
 Per-subject, per-fold pipeline (group-aware 10-fold stratified CV):
 
-1. **FBCSP extraction** -- bandpass filter to each of 10 bands, fit CSP on training set, transform both train and test (up to 40 features)
-2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (39) = ~79 features
-3. **Feature selection** -- `SelectKBest(f_classif)` with k selected via nested 3-fold CV from {5, 8, 10, 15, 20}
+1. **FBCSP extraction** -- bandpass filter to each of 8 motor bands, fit CSP (OAS reg) on training set, transform both train and test (up to 32 features)
+2. **Feature concatenation** -- FBCSP features (32) + handcrafted features (45) = ~77 features
+3. **Feature selection** -- `SelectKBest(f_classif)` with k selected via nested 5-fold CV from {3, 5, 8, 10, 15, 20}
 4. **Scaling** -- `StandardScaler` zero-centers and unit-normalizes features
 5. **Classification** -- `LDA(solver='lsqr', shrinkage='auto', priors=...)` with Ledoit-Wolf shrinkage and class priors estimated from training fold frequencies
 
@@ -192,10 +195,10 @@ Per-subject, per-fold pipeline (group-aware 10-fold stratified CV, no frequency 
 Per-subject, per-fold pipeline (group-aware 10-fold stratified CV):
 
 1. **FBCSP extraction** -- same as Classifier 1
-2. **Feature concatenation** -- FBCSP features (40) + handcrafted features (39) = ~79 features
-3. **Feature selection** -- `SelectKBest(f_classif, k=10)`
+2. **Feature concatenation** -- FBCSP features (32) + handcrafted features (45) = ~77 features
+3. **Feature selection** -- `SelectKBest(f_classif, k=max_allowed)`
 4. **Scaling** -- `StandardScaler`
-5. **Classification** -- `SVC(kernel='rbf', C=1.0, gamma='scale')` -- tests nonlinear decision boundaries that LDA misses
+5. **Classification** -- `SVC(kernel='rbf', C=10.0, gamma='scale')` -- tests nonlinear decision boundaries that LDA misses
 
 This classifier replaces a previous Transfer learning (Riemannian domain adaptation) classifier that averaged below chance (46.9%) with only 10 subjects.
 
@@ -398,11 +401,11 @@ uv run pytest tests/test_train.py
 
 Pytest is configured for clean output by default (`-q --tb=short`) and suppresses known non-actionable MNE filter-length warnings.
 
-**Test coverage** (58 tests):
+**Test coverage** (60 tests):
 - `test_data_loader.py` -- CSV parsing, event extraction, complete recording discovery
 - `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline, CAR common-mode removal, ASR artifact cleaning
 - `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end), artifact rejection (amplitude, flat signal, adaptive outlier, gradient, HF power, criteria disable)
-- `test_features.py` -- Feature dimensions (39 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
+- `test_features.py` -- Feature dimensions (45 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
 - `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip; Ensemble CV scores, leakage check; Nested model-selection CV scores, leakage check; Cross-session evaluate scores, leakage check; In-fold rejection (outlier removal, None passthrough, integration with CV)
 - `test_validation.py` -- classwise trial grouping, group-aware split integrity, grouped-split fallback behavior
 
