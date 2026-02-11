@@ -101,7 +101,7 @@ def _process_recording(
             signal,
             events,
             sfreq,
-            task_duration=2.5,
+            task_duration=3.0,
             baseline_duration=1.0,
             skip_duration=0.5,
         )
@@ -276,7 +276,7 @@ def run_pipeline(
                 signal,
                 events,
                 sfreq,
-                task_duration=2.5,
+                task_duration=3.0,
                 baseline_duration=1.0,
                 skip_duration=0.5,
             )
