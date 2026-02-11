@@ -28,7 +28,7 @@ FBCSP_BANDS = [
     (24, 30),
 ]
 
-N_CSP_COMPONENTS = 4
+N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 
