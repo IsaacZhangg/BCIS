@@ -314,7 +314,7 @@ def train_within_subject_cv_all_models(
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            svm = SVC(kernel="rbf", C=10.0, gamma="scale")
+            svm = SVC(kernel="rbf", C=20.0, gamma="scale")
             svm.fit(X_train_scaled, y_train)
             fold_scores["svm"].append(float(svm.score(X_test_scaled, y_test)))
 
@@ -325,7 +325,7 @@ def train_within_subject_cv_all_models(
             proba_lda = lda_ens.predict_proba(X_test_scaled)
 
             svm_prob = SVC(
-                kernel="rbf", C=10.0, gamma="scale", probability=True, random_state=42
+                kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
             )
             svm_prob.fit(X_train_scaled, y_train)
             proba_svm = svm_prob.predict_proba(X_test_scaled)
@@ -751,7 +751,7 @@ def train_within_subject_cv_svm(
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            svm = SVC(kernel="rbf", C=10.0, gamma="scale")
+            svm = SVC(kernel="rbf", C=20.0, gamma="scale")
             svm.fit(X_train_scaled, y_train)
             fold_scores.append(svm.score(X_test_scaled, y_test))
 
@@ -840,7 +840,7 @@ def _evaluate_classifiers_batch(
         scores["lda"] = float(lda.score(X_test_scaled, y_test))
 
     if "svm" in fbcsp_names:
-        svm = SVC(kernel="rbf", C=10.0, gamma="scale")
+        svm = SVC(kernel="rbf", C=20.0, gamma="scale")
         svm.fit(X_train_scaled, y_train)
         scores["svm"] = float(svm.score(X_test_scaled, y_test))
 
@@ -852,7 +852,7 @@ def _evaluate_classifiers_batch(
         proba_lda = lda_ens.predict_proba(X_test_scaled)
 
         svm_prob = SVC(
-            kernel="rbf", C=10.0, gamma="scale", probability=True, random_state=42
+            kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
         )
         svm_prob.fit(X_train_scaled, y_train)
         proba_svm = svm_prob.predict_proba(X_test_scaled)
@@ -1094,7 +1094,7 @@ def train_final_model_svm(
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_selected)
 
-    classifier = SVC(kernel="rbf", C=10.0, gamma="scale")
+    classifier = SVC(kernel="rbf", C=20.0, gamma="scale")
     classifier.fit(X_scaled, y)
 
     return {
@@ -1230,7 +1230,7 @@ def train_within_subject_cv_ensemble(
 
             # --- Classifier 2: SVM ---
             svm = SVC(
-                kernel="rbf", C=10.0, gamma="scale", probability=True, random_state=42
+                kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
             )
             svm.fit(X_train_scaled, y_train)
             proba_svm = svm.predict_proba(X_test_scaled)
