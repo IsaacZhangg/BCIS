@@ -21,7 +21,7 @@ class TrainingConfig:
     n_outer_folds: int = 10
     n_inner_folds: int = 7
     k_best: int = 10
-    k_candidates: tuple[int, ...] = (3, 5, 8, 10, 15, 20)
+    k_candidates: tuple[int, ...] = (3, 5, 8, 10, 15, 20, 25)
     split_strategy: SplitStrategy = "stratified_group"
     trial_group_size: int = 2
     random_state: int = 42
