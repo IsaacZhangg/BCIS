@@ -18,7 +18,6 @@ from src.config import SplitStrategy
 from src.validation import build_classwise_trial_groups, make_cv_splits
 
 FBCSP_BANDS = [
-    (4, 8),
     (8, 10),
     (10, 12),
     (12, 14),
@@ -27,11 +26,10 @@ FBCSP_BANDS = [
     (18, 20),
     (20, 24),
     (24, 30),
-    (30, 40),
 ]
 
 N_CSP_COMPONENTS = 4
-DEFAULT_K_CANDIDATES = (5, 8, 10, 15, 20)
+DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 
 
@@ -65,7 +63,7 @@ def _extract_fbcsp_features(
             )
             csp = CSP(
                 n_components=n_components,
-                reg="ledoit_wolf",
+                reg="oas",
                 log=True,
                 norm_trace=True,
             )
@@ -106,7 +104,7 @@ def _reject_in_fold(
     trial_ptps: np.ndarray | None,
     train_idx: np.ndarray,
     test_idx: np.ndarray,
-    n_mad: float = 4.0,
+    n_mad: float = 3.5,
     flat_uv: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Filter train/test indices using an adaptive amplitude threshold.
@@ -1201,6 +1199,7 @@ def train_within_subject_cv_ensemble(
             fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
                 X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
             )
+
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 

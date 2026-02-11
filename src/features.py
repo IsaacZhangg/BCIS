@@ -310,6 +310,25 @@ def extract_lateralization_features(
             activity, mobility, complexity = compute_hjorth_parameters(signal)
             epoch_features.extend([activity, mobility, complexity])
 
+        # C3-C4 inter-hemispheric coherence (Laplacian-filtered)
+        # Lower coherence during lateralized motor imagery
+        for low, high in [(8, 12), (13, 30)]:
+            coh_task = compute_c3c4_coherence(
+                c3_task_lap, c4_task_lap, sfreq, low, high
+            )
+            coh_baseline = compute_c3c4_coherence(
+                c3_baseline_lap, c4_baseline_lap, sfreq, low, high
+            )
+            epoch_features.append(coh_task)
+            epoch_features.append(coh_task - coh_baseline)
+
+        # Spectral entropy lateralization (Laplacian-filtered)
+        # Narrow-band mu/beta suppression → lower entropy on contralateral side
+        for low, high in [(8, 12), (13, 30)]:
+            c3_ent = compute_spectral_entropy(c3_task_lap, sfreq, low, high)
+            c4_ent = compute_spectral_entropy(c4_task_lap, sfreq, low, high)
+            epoch_features.append(c3_ent - c4_ent)
+
         all_features.append(epoch_features)
 
     return np.array(all_features)
@@ -350,7 +369,7 @@ def extract_csp_features(
     # Fit CSP - finds spatial filters maximizing class separability
     csp = CSP(
         n_components=n_components,
-        reg="ledoit_wolf",  # Regularization for robust covariance estimation
+        reg="oas",  # OAS shrinkage for robust covariance estimation
         log=True,  # Log-transform variance features
         norm_trace=True,  # Normalize for scale invariance
     )
