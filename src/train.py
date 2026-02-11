@@ -234,7 +234,7 @@ def train_within_subject_cv_all_models(
 
             # Riemannian classifier does not depend on FBCSP features.
             riemann_pipe = make_pipeline(
-                Covariances(estimator="oas"),
+                Covariances(estimator="lwf"),
                 TangentSpace(metric="riemann"),
                 LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
             )
@@ -620,7 +620,7 @@ def train_within_subject_cv_riemann(
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             pipe = make_pipeline(
-                Covariances(estimator="oas"),
+                Covariances(estimator="lwf"),
                 TangentSpace(metric="riemann"),
                 LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
             )
@@ -645,7 +645,7 @@ def train_final_model_riemann(
         Dict with keys 'pipeline', 'sfreq'.
     """
     pipe = make_pipeline(
-        Covariances(estimator="oas"),
+        Covariances(estimator="lwf"),
         TangentSpace(metric="riemann"),
         LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
     )
@@ -794,7 +794,7 @@ def _evaluate_classifiers_batch(
 
     if "riemann" in requested:
         pipe = make_pipeline(
-            Covariances(estimator="oas"),
+            Covariances(estimator="lwf"),
             TangentSpace(metric="riemann"),
             LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
         )
