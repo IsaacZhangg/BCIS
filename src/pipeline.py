@@ -103,7 +103,7 @@ def _process_recording(
             sfreq,
             task_duration=3.0,
             baseline_duration=1.0,
-            skip_duration=0.5,
+            skip_duration=0.25,
         )
         left_pairs_by_channel[ch_name] = left
         right_pairs_by_channel[ch_name] = right
@@ -278,7 +278,7 @@ def run_pipeline(
                 sfreq,
                 task_duration=3.0,
                 baseline_duration=1.0,
-                skip_duration=0.5,
+                skip_duration=0.25,
             )
             left_pairs_by_channel[ch_name] = left
             right_pairs_by_channel[ch_name] = right
