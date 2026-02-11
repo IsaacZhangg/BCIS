@@ -236,7 +236,7 @@ def train_within_subject_cv_all_models(
             riemann_pipe = make_pipeline(
                 Covariances(estimator="oas"),
                 TangentSpace(metric="riemann"),
-                LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+                LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
             )
             riemann_pipe.fit(X_mc_train, y_train)
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
@@ -622,7 +622,7 @@ def train_within_subject_cv_riemann(
             pipe = make_pipeline(
                 Covariances(estimator="oas"),
                 TangentSpace(metric="riemann"),
-                LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+                LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
             )
             pipe.fit(X_multichannel[train_idx], y[train_idx])
             fold_scores.append(pipe.score(X_multichannel[test_idx], y[test_idx]))
@@ -647,7 +647,7 @@ def train_final_model_riemann(
     pipe = make_pipeline(
         Covariances(estimator="oas"),
         TangentSpace(metric="riemann"),
-        LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+        LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
     )
     pipe.fit(X_multichannel, y)
     return {"pipeline": pipe, "sfreq": sfreq}
@@ -796,7 +796,7 @@ def _evaluate_classifiers_batch(
         pipe = make_pipeline(
             Covariances(estimator="oas"),
             TangentSpace(metric="riemann"),
-            LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000),
+            LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
         )
         pipe.fit(X_mc_train, y_train)
         scores["riemann"] = float(pipe.score(X_mc_test, y_test))
