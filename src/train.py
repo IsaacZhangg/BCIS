@@ -1,9 +1,11 @@
 """Training pipeline: FBCSP + LDA, FBCSP + SVM, and Riemannian classifiers for left/right MI."""
 
 from collections import Counter
+from typing import Literal
 
 import mne
 import numpy as np
+from joblib import Parallel, delayed
 from mne.decoding import CSP
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
@@ -13,6 +15,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+from threadpoolctl import threadpool_limits
 
 from src.config import SplitStrategy
 from src.validation import build_classwise_trial_groups, make_cv_splits
@@ -31,6 +34,81 @@ FBCSP_BANDS = [
 N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
+ParallelBackend = Literal["loky", "threading"]
+CacheScope = Literal["subject", "outer_fold"]
+BandCache = dict[tuple[float, float], np.ndarray]
+
+
+def _precompute_bandpassed(
+    X: np.ndarray,
+    sfreq: float,
+    bands: list[tuple[float, float]] = FBCSP_BANDS,
+) -> BandCache:
+    """Bandpass every trial for each FBCSP band once.
+
+    Filtering is trial-wise along the time axis, so cached per-band tensors can be
+    safely indexed for CV train/test splits without changing leakage boundaries.
+    """
+    filtered_by_band: BandCache = {}
+    for low, high in bands:
+        try:
+            filtered_by_band[(low, high)] = mne.filter.filter_data(
+                X, sfreq, low, high, verbose=False
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+    return filtered_by_band
+
+
+def _subset_band_cache(cache: BandCache, indices: np.ndarray) -> BandCache:
+    """Slice a precomputed band cache by trial indices."""
+    return {band: X_band[indices] for band, X_band in cache.items()}
+
+
+def _extract_fbcsp_features_prefiltered(
+    X_train_by_band: BandCache,
+    X_test_by_band: BandCache,
+    y_train: np.ndarray,
+    bands: list[tuple[float, float]] = FBCSP_BANDS,
+    n_components: int = N_CSP_COMPONENTS,
+    n_train_trials: int | None = None,
+    n_test_trials: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[tuple[CSP, tuple[float, float]]]]:
+    """Extract FBCSP features from pre-filtered tensors."""
+    csp_models: list[tuple[CSP, tuple[float, float]]] = []
+    train_parts: list[np.ndarray] = []
+    test_parts: list[np.ndarray] = []
+
+    for low, high in bands:
+        band = (low, high)
+        if band not in X_train_by_band or band not in X_test_by_band:
+            continue
+        try:
+            csp = CSP(
+                n_components=n_components,
+                reg="oas",
+                log=True,
+                norm_trace=True,
+            )
+            train_parts.append(csp.fit_transform(X_train_by_band[band], y_train))
+            test_parts.append(csp.transform(X_test_by_band[band]))
+            csp_models.append((csp, band))
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+
+    if not train_parts:
+        train_rows = n_train_trials if n_train_trials is not None else len(y_train)
+        if n_test_trials is None:
+            n_test_trials = (
+                next(iter(X_test_by_band.values())).shape[0] if X_test_by_band else 0
+            )
+        return (
+            np.empty((train_rows, 0)),
+            np.empty((n_test_trials, 0)),
+            [],
+        )
+
+    return np.hstack(train_parts), np.hstack(test_parts), csp_models
 
 
 def _extract_fbcsp_features(
@@ -49,34 +127,17 @@ def _extract_fbcsp_features(
     Returns:
         Tuple of (train_features, test_features, list of (fitted_csp, band) pairs).
     """
-    csp_models = []
-    train_parts = []
-    test_parts = []
-
-    for low, high in bands:
-        try:
-            X_train_filt = mne.filter.filter_data(
-                X_train, sfreq, low, high, verbose=False
-            )
-            X_test_filt = mne.filter.filter_data(
-                X_test, sfreq, low, high, verbose=False
-            )
-            csp = CSP(
-                n_components=n_components,
-                reg="oas",
-                log=True,
-                norm_trace=True,
-            )
-            train_parts.append(csp.fit_transform(X_train_filt, y_train))
-            test_parts.append(csp.transform(X_test_filt))
-            csp_models.append((csp, (low, high)))
-        except (ValueError, np.linalg.LinAlgError):
-            continue
-
-    if not train_parts:
-        return np.empty((X_train.shape[0], 0)), np.empty((X_test.shape[0], 0)), []
-
-    return np.hstack(train_parts), np.hstack(test_parts), csp_models
+    train_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
+    test_filtered = _precompute_bandpassed(X_test, sfreq, bands=bands)
+    return _extract_fbcsp_features_prefiltered(
+        train_filtered,
+        test_filtered,
+        y_train,
+        bands=bands,
+        n_components=n_components,
+        n_train_trials=X_train.shape[0],
+        n_test_trials=X_test.shape[0],
+    )
 
 
 def _extract_fbcsp_features_pretrained(
@@ -174,41 +235,26 @@ def _safe_k_values(
     return candidates
 
 
-def train_within_subject_cv_all_models(
-    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
-    y_by_subject: list[np.ndarray],
-    sfreq: float = 250.0,
-    n_folds: int = 10,
-    k_best: int = 10,
-    trial_ptps_by_subject: list[np.ndarray] | None = None,
-    split_strategy: SplitStrategy = "stratified_group",
-    trial_groups_by_subject: list[np.ndarray] | None = None,
-    trial_group_size: int = 5,
-    random_state: int = 42,
-    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
-) -> dict[str, tuple[list[float], float, float]]:
-    """Within-subject CV for all four classifiers in a single shared pass.
-
-    This preserves the original train-only fitting boundaries and in-fold
-    artifact rejection while avoiding repeated split generation and repeated
-    FBCSP extraction across separate classifier entrypoints.
-
-    Returns:
-        Dict mapping classifier name ('lda', 'riemann', 'svm', 'ensemble') to
-        (per_subject_scores, mean_accuracy, std_accuracy).
-    """
-    scores_by_model: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
-
-    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
-        zip(X_by_subject, y_by_subject)
-    ):
-        groups = _resolve_subject_groups(
-            y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
-            split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
+def _evaluate_subject_all_models(
+    X_features: np.ndarray,
+    X_multichannel: np.ndarray,
+    y: np.ndarray,
+    sfreq: float,
+    n_folds: int,
+    k_best: int,
+    trial_ptps: np.ndarray | None,
+    split_strategy: SplitStrategy,
+    groups: np.ndarray | None,
+    random_state: int,
+    k_candidates: tuple[int, ...],
+    enable_band_cache: bool,
+    max_blas_threads_per_worker: int,
+) -> dict[str, float]:
+    """Evaluate all classifiers for a single subject."""
+    blas_limits = (
+        max_blas_threads_per_worker if max_blas_threads_per_worker > 0 else None
+    )
+    with threadpool_limits(limits=blas_limits):
         splits = make_cv_splits(
             y,
             n_splits=n_folds,
@@ -217,11 +263,11 @@ def train_within_subject_cv_all_models(
             random_state=random_state,
         )
         fold_scores: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
+        subject_band_cache = (
+            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+        )
 
         for train_idx, test_idx in splits:
-            trial_ptps = (
-                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-            )
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
@@ -242,9 +288,21 @@ def train_within_subject_cv_all_models(
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
             # Shared FBCSP extraction for LDA/SVM/ensemble.
-            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                X_mc_train, X_mc_test, y_train, sfreq
-            )
+            if subject_band_cache is not None:
+                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+                    train_band_cache,
+                    test_band_cache,
+                    y_train,
+                    n_train_trials=len(train_idx),
+                    n_test_trials=len(test_idx),
+                )
+            else:
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+                    X_mc_train, X_mc_test, y_train, sfreq
+                )
+
             X_train_combined = np.hstack([fbcsp_train, X_feat_train])
             X_test_combined = np.hstack([fbcsp_test, X_feat_test])
 
@@ -334,11 +392,104 @@ def train_within_subject_cv_all_models(
             preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
             fold_scores["ensemble"].append(float(np.mean(preds == y_test)))
 
-        for name in ALL_CLASSIFIERS:
-            scores_by_model[name].append(
-                float(np.mean(fold_scores[name])) if fold_scores[name] else 0.5
-            )
+        return {
+            name: float(np.mean(fold_scores[name])) if fold_scores[name] else 0.5
+            for name in ALL_CLASSIFIERS
+        }
 
+
+def train_within_subject_cv_all_models(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    sfreq: float = 250.0,
+    n_folds: int = 10,
+    k_best: int = 10,
+    trial_ptps_by_subject: list[np.ndarray] | None = None,
+    split_strategy: SplitStrategy = "stratified_group",
+    trial_groups_by_subject: list[np.ndarray] | None = None,
+    trial_group_size: int = 5,
+    random_state: int = 42,
+    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
+    n_jobs: int = 1,
+    parallel_backend: ParallelBackend = "loky",
+    max_blas_threads_per_worker: int = 1,
+    enable_band_cache: bool = False,
+) -> dict[str, tuple[list[float], float, float]]:
+    """Within-subject CV for all four classifiers in a single shared pass.
+
+    This preserves the original train-only fitting boundaries and in-fold
+    artifact rejection while avoiding repeated split generation and repeated
+    FBCSP extraction across separate classifier entrypoints.
+
+    Returns:
+        Dict mapping classifier name ('lda', 'riemann', 'svm', 'ensemble') to
+        (per_subject_scores, mean_accuracy, std_accuracy).
+
+    Extra controls:
+        n_jobs: Subject-level parallel jobs (1 disables parallelism).
+        parallel_backend: joblib backend for subject-level parallelism.
+        max_blas_threads_per_worker: BLAS/OpenMP thread cap per worker.
+        enable_band_cache: Reuse precomputed per-band filtered trials.
+    """
+    payloads: list[
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
+    ] = []
+    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
+        zip(X_by_subject, y_by_subject)
+    ):
+        groups = _resolve_subject_groups(
+            y,
+            provided_groups=trial_groups_by_subject,
+            subject_index=subj_idx,
+            split_strategy=split_strategy,
+            trial_group_size=trial_group_size,
+        )
+        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+        payloads.append((X_features, X_multichannel, y, groups, trial_ptps))
+
+    if n_jobs == 1:
+        per_subject_results = [
+            _evaluate_subject_all_models(
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                n_folds=n_folds,
+                k_best=k_best,
+                trial_ptps=trial_ptps,
+                split_strategy=split_strategy,
+                groups=groups,
+                random_state=random_state,
+                k_candidates=k_candidates,
+                enable_band_cache=enable_band_cache,
+                max_blas_threads_per_worker=max_blas_threads_per_worker,
+            )
+            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+        ]
+    else:
+        per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
+            delayed(_evaluate_subject_all_models)(
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                n_folds=n_folds,
+                k_best=k_best,
+                trial_ptps=trial_ptps,
+                split_strategy=split_strategy,
+                groups=groups,
+                random_state=random_state,
+                k_candidates=k_candidates,
+                enable_band_cache=enable_band_cache,
+                max_blas_threads_per_worker=max_blas_threads_per_worker,
+            )
+            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+        )
+
+    scores_by_model: dict[str, list[float]] = {
+        name: [subject_scores[name] for subject_scores in per_subject_results]
+        for name in ALL_CLASSIFIERS
+    }
     return {
         name: (
             subject_scores,
@@ -777,6 +928,8 @@ def _evaluate_classifiers_batch(
     X_mc_test: np.ndarray,
     sfreq: float,
     k_best: int,
+    prefiltered_train: BandCache | None = None,
+    prefiltered_test: BandCache | None = None,
 ) -> dict[str, float]:
     """Train and score one or more classifiers on a fixed split.
 
@@ -805,9 +958,18 @@ def _evaluate_classifiers_batch(
     if not fbcsp_names:
         return scores
 
-    fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-        X_mc_train, X_mc_test, y_train, sfreq
-    )
+    if prefiltered_train is not None and prefiltered_test is not None:
+        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+            prefiltered_train,
+            prefiltered_test,
+            y_train,
+            n_train_trials=X_mc_train.shape[0],
+            n_test_trials=X_mc_test.shape[0],
+        )
+    else:
+        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+            X_mc_train, X_mc_test, y_train, sfreq
+        )
     X_train_combined = np.hstack([fbcsp_train, X_train])
     X_test_combined = np.hstack([fbcsp_test, X_test])
 
@@ -874,12 +1036,159 @@ def _evaluate_classifier(
     X_mc_test: np.ndarray,
     sfreq: float,
     k_best: int,
+    prefiltered_train: BandCache | None = None,
+    prefiltered_test: BandCache | None = None,
 ) -> float:
     """Train and score a single classifier on pre-split data."""
     scores = _evaluate_classifiers_batch(
-        [name], X_train, X_test, y_train, y_test, X_mc_train, X_mc_test, sfreq, k_best
+        [name],
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        X_mc_train,
+        X_mc_test,
+        sfreq,
+        k_best,
+        prefiltered_train=prefiltered_train,
+        prefiltered_test=prefiltered_test,
     )
     return scores[name]
+
+
+def _evaluate_subject_nested_model_selection(
+    X_features: np.ndarray,
+    X_multichannel: np.ndarray,
+    y: np.ndarray,
+    sfreq: float,
+    n_outer_folds: int,
+    n_inner_folds: int,
+    k_best: int,
+    trial_ptps: np.ndarray | None,
+    split_strategy: SplitStrategy,
+    groups: np.ndarray | None,
+    random_state: int,
+    enable_band_cache: bool,
+    cache_scope: CacheScope,
+    max_blas_threads_per_worker: int,
+) -> tuple[float, str]:
+    """Nested model-selection CV for a single subject."""
+    classifier_names = list(ALL_CLASSIFIERS)
+    blas_limits = (
+        max_blas_threads_per_worker if max_blas_threads_per_worker > 0 else None
+    )
+    with threadpool_limits(limits=blas_limits):
+        subject_band_cache = (
+            _precompute_bandpassed(X_multichannel, sfreq)
+            if enable_band_cache and cache_scope == "subject"
+            else None
+        )
+        outer_splits = make_cv_splits(
+            y,
+            n_splits=n_outer_folds,
+            strategy=split_strategy,
+            groups=groups,
+            random_state=random_state,
+        )
+        fold_scores: list[float] = []
+        fold_winners: list[str] = []
+
+        for outer_train_idx, outer_test_idx in outer_splits:
+            outer_train_idx, outer_test_idx = _reject_in_fold(
+                trial_ptps, outer_train_idx, outer_test_idx
+            )
+            if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
+                continue
+
+            X_feat_otrain = X_features[outer_train_idx]
+            X_feat_otest = X_features[outer_test_idx]
+            X_mc_otrain = X_multichannel[outer_train_idx]
+            X_mc_otest = X_multichannel[outer_test_idx]
+            y_otrain = y[outer_train_idx]
+            y_otest = y[outer_test_idx]
+
+            outer_train_cache: BandCache | None = None
+            outer_test_cache: BandCache | None = None
+            if enable_band_cache:
+                if subject_band_cache is not None:
+                    outer_train_cache = _subset_band_cache(
+                        subject_band_cache, outer_train_idx
+                    )
+                    outer_test_cache = _subset_band_cache(
+                        subject_band_cache, outer_test_idx
+                    )
+                else:
+                    outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
+                    outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
+
+            # Inner CV: evaluate each classifier on outer-train
+            inner_groups = groups[outer_train_idx] if groups is not None else None
+            inner_splits = make_cv_splits(
+                y_otrain,
+                n_splits=n_inner_folds,
+                strategy=split_strategy,
+                groups=inner_groups,
+                random_state=random_state,
+            )
+            inner_scores_by_clf = {name: [] for name in classifier_names}
+            for inner_train_idx, inner_val_idx in inner_splits:
+                inner_train_cache: BandCache | None = None
+                inner_val_cache: BandCache | None = None
+                if outer_train_cache is not None:
+                    inner_train_cache = _subset_band_cache(
+                        outer_train_cache, inner_train_idx
+                    )
+                    inner_val_cache = _subset_band_cache(
+                        outer_train_cache, inner_val_idx
+                    )
+                split_scores = _evaluate_classifiers_batch(
+                    classifier_names,
+                    X_feat_otrain[inner_train_idx],
+                    X_feat_otrain[inner_val_idx],
+                    y_otrain[inner_train_idx],
+                    y_otrain[inner_val_idx],
+                    X_mc_otrain[inner_train_idx],
+                    X_mc_otrain[inner_val_idx],
+                    sfreq,
+                    k_best,
+                    prefiltered_train=inner_train_cache,
+                    prefiltered_test=inner_val_cache,
+                )
+                for clf_name, score in split_scores.items():
+                    inner_scores_by_clf[clf_name].append(score)
+            inner_means: dict[str, float] = {
+                clf_name: (
+                    float(np.mean(inner_scores_by_clf[clf_name]))
+                    if inner_scores_by_clf[clf_name]
+                    else 0.5
+                )
+                for clf_name in classifier_names
+            }
+
+            # Pick best classifier by inner CV
+            best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+
+            # Retrain on full outer-train, evaluate on outer-test
+            outer_score = _evaluate_classifier(
+                best_clf,
+                X_feat_otrain,
+                X_feat_otest,
+                y_otrain,
+                y_otest,
+                X_mc_otrain,
+                X_mc_otest,
+                sfreq,
+                k_best,
+                prefiltered_train=outer_train_cache,
+                prefiltered_test=outer_test_cache,
+            )
+            fold_scores.append(outer_score)
+            fold_winners.append(best_clf)
+
+        score = float(np.mean(fold_scores)) if fold_scores else 0.5
+        winner_counts = Counter(fold_winners)
+        best_method = winner_counts.most_common(1)[0][0] if winner_counts else "lda"
+        return score, best_method
 
 
 def train_nested_model_selection_cv(
@@ -894,6 +1203,11 @@ def train_nested_model_selection_cv(
     trial_groups_by_subject: list[np.ndarray] | None = None,
     trial_group_size: int = 5,
     random_state: int = 42,
+    n_jobs: int = 1,
+    parallel_backend: ParallelBackend = "loky",
+    max_blas_threads_per_worker: int = 1,
+    enable_band_cache: bool = False,
+    cache_scope: CacheScope = "subject",
 ) -> tuple[list[float], float, float, list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
@@ -923,11 +1237,17 @@ def train_nested_model_selection_cv(
     Returns:
         Tuple of (per_subject_scores, mean, std, per_subject_best_methods).
         per_subject_best_methods is the most frequent inner-CV winner per subject.
-    """
-    classifier_names = list(ALL_CLASSIFIERS)
-    scores = []
-    best_methods = []
 
+    Extra controls:
+        n_jobs: Subject-level parallel jobs (1 disables parallelism).
+        parallel_backend: joblib backend for subject-level parallelism.
+        max_blas_threads_per_worker: BLAS/OpenMP thread cap per worker.
+        enable_band_cache: Reuse precomputed per-band filtered trials.
+        cache_scope: Cache precompute scope ('subject' or 'outer_fold').
+    """
+    payloads: list[
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
+    ] = []
     for subj_idx, ((X_features, X_multichannel), y) in enumerate(
         zip(X_by_subject, y_by_subject)
     ):
@@ -938,89 +1258,52 @@ def train_nested_model_selection_cv(
             split_strategy=split_strategy,
             trial_group_size=trial_group_size,
         )
-        outer_splits = make_cv_splits(
-            y,
-            n_splits=n_outer_folds,
-            strategy=split_strategy,
-            groups=groups,
-            random_state=random_state,
-        )
-        fold_scores = []
-        fold_winners = []
+        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+        payloads.append((X_features, X_multichannel, y, groups, trial_ptps))
 
-        for outer_train_idx, outer_test_idx in outer_splits:
-            trial_ptps = (
-                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-            )
-            outer_train_idx, outer_test_idx = _reject_in_fold(
-                trial_ptps, outer_train_idx, outer_test_idx
-            )
-            if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
-                continue
-            X_feat_otrain = X_features[outer_train_idx]
-            X_feat_otest = X_features[outer_test_idx]
-            X_mc_otrain = X_multichannel[outer_train_idx]
-            X_mc_otest = X_multichannel[outer_test_idx]
-            y_otrain = y[outer_train_idx]
-            y_otest = y[outer_test_idx]
-
-            # Inner CV: evaluate each classifier on outer-train
-            inner_groups = groups[outer_train_idx] if groups is not None else None
-            inner_splits = make_cv_splits(
-                y_otrain,
-                n_splits=n_inner_folds,
-                strategy=split_strategy,
-                groups=inner_groups,
+    if n_jobs == 1:
+        per_subject_results = [
+            _evaluate_subject_nested_model_selection(
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                n_outer_folds=n_outer_folds,
+                n_inner_folds=n_inner_folds,
+                k_best=k_best,
+                trial_ptps=trial_ptps,
+                split_strategy=split_strategy,
+                groups=groups,
                 random_state=random_state,
+                enable_band_cache=enable_band_cache,
+                cache_scope=cache_scope,
+                max_blas_threads_per_worker=max_blas_threads_per_worker,
             )
-            inner_scores_by_clf = {name: [] for name in classifier_names}
-            for inner_train_idx, inner_val_idx in inner_splits:
-                split_scores = _evaluate_classifiers_batch(
-                    classifier_names,
-                    X_feat_otrain[inner_train_idx],
-                    X_feat_otrain[inner_val_idx],
-                    y_otrain[inner_train_idx],
-                    y_otrain[inner_val_idx],
-                    X_mc_otrain[inner_train_idx],
-                    X_mc_otrain[inner_val_idx],
-                    sfreq,
-                    k_best,
-                )
-                for clf_name, score in split_scores.items():
-                    inner_scores_by_clf[clf_name].append(score)
-            inner_means: dict[str, float] = {
-                clf_name: (
-                    float(np.mean(inner_scores_by_clf[clf_name]))
-                    if inner_scores_by_clf[clf_name]
-                    else 0.5
-                )
-                for clf_name in classifier_names
-            }
-
-            # Pick best classifier by inner CV
-            best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
-
-            # Retrain on full outer-train, evaluate on outer-test
-            outer_score = _evaluate_classifier(
-                best_clf,
-                X_feat_otrain,
-                X_feat_otest,
-                y_otrain,
-                y_otest,
-                X_mc_otrain,
-                X_mc_otest,
-                sfreq,
-                k_best,
+            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+        ]
+    else:
+        per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
+            delayed(_evaluate_subject_nested_model_selection)(
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                n_outer_folds=n_outer_folds,
+                n_inner_folds=n_inner_folds,
+                k_best=k_best,
+                trial_ptps=trial_ptps,
+                split_strategy=split_strategy,
+                groups=groups,
+                random_state=random_state,
+                enable_band_cache=enable_band_cache,
+                cache_scope=cache_scope,
+                max_blas_threads_per_worker=max_blas_threads_per_worker,
             )
-            fold_scores.append(outer_score)
-            fold_winners.append(best_clf)
-
-        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
-        # Most frequent inner-CV winner across outer folds
-        winner_counts = Counter(fold_winners)
-        best_methods.append(
-            winner_counts.most_common(1)[0][0] if winner_counts else "lda"
+            for X_features, X_multichannel, y, groups, trial_ptps in payloads
         )
+
+    scores = [score for score, _ in per_subject_results]
+    best_methods = [method for _, method in per_subject_results]
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))

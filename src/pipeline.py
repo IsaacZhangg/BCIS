@@ -1,6 +1,7 @@
 """Main pipeline: load data, preprocess, extract features, train left/right classifier."""
 
 import json
+import time
 from pathlib import Path
 
 import joblib
@@ -233,8 +234,11 @@ def run_pipeline(
     _print_header("Left/Right Motor Imagery Classifier - Training Pipeline")
     cfg = training_config or TrainingConfig()
     sfreq = cfg.sfreq
+    runtime_seconds: dict[str, float] = {}
+    total_start = time.perf_counter()
 
     # Step 1: Find complete recordings
+    step_start = time.perf_counter()
     _print_step(1, 5, "Finding complete recordings")
     recordings = get_complete_recordings(data_dir)
     print(f"Found {len(recordings)} complete recordings")
@@ -244,8 +248,15 @@ def run_pipeline(
     print(
         f"  CV split strategy: {cfg.split_strategy} (group_size={cfg.trial_group_size})"
     )
+    print(
+        f"  Parallelism: n_jobs={cfg.n_jobs}, backend={cfg.parallel_backend}, "
+        f"blas_threads/worker={cfg.max_blas_threads_per_worker}"
+    )
+    print(f"  Bandpass cache: {'on' if cfg.enable_band_cache else 'off'}")
+    runtime_seconds["find_recordings"] = time.perf_counter() - step_start
 
     # Step 2: Load and preprocess data for each subject
+    step_start = time.perf_counter()
     _print_step(2, 5, "Loading and preprocessing data")
     X_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_by_subject: list[np.ndarray] = []
@@ -378,8 +389,10 @@ def run_pipeline(
 
     if not X_by_subject:
         raise ValueError("No valid subjects found")
+    runtime_seconds["load_preprocess"] = time.perf_counter() - step_start
 
     # Step 3: Cross-validation (four classifiers + nested model selection)
+    step_start = time.perf_counter()
     _print_step(3, 5, "Running cross-validation")
     print(f"({cfg.n_folds}-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
 
@@ -399,6 +412,10 @@ def run_pipeline(
         random_state=cfg.random_state,
         k_best=cfg.k_best,
         k_candidates=cfg.k_candidates,
+        n_jobs=cfg.n_jobs,
+        parallel_backend=cfg.parallel_backend,
+        max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
+        enable_band_cache=cfg.enable_band_cache,
     )
     fbcsp_scores, fbcsp_mean, fbcsp_std = cv_results["lda"]
     riemann_scores, riemann_mean, riemann_std = cv_results["riemann"]
@@ -434,8 +451,14 @@ def run_pipeline(
             trial_groups_by_subject=groups_arg,
             trial_group_size=cfg.trial_group_size,
             random_state=cfg.random_state,
+            n_jobs=cfg.n_jobs,
+            parallel_backend=cfg.parallel_backend,
+            max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
+            enable_band_cache=cfg.enable_band_cache,
+            cache_scope=cfg.cache_scope,
         )
     )
+    runtime_seconds["cross_validation"] = time.perf_counter() - step_start
     # Convert nested method names to display names for model saving
     nested_methods_display = [_NESTED_TO_DISPLAY[m] for m in nested_methods]
 
@@ -505,6 +528,7 @@ def run_pipeline(
             print(f"\n  Held-out mean: {ho_mean:.1%}")
 
     # Step 4: Cross-session evaluation
+    step_start = time.perf_counter()
     _print_step(4, 5, "Cross-session evaluation")
     recordings_by_subject = get_recordings_by_subject(data_dir)
     multi_session_subjects = {
@@ -536,8 +560,10 @@ def run_pipeline(
             "  WARNING: All subjects have a single recording. "
             "Cross-session evaluation requires >=2 recordings per subject."
         )
+    runtime_seconds["cross_session_eval"] = time.perf_counter() - step_start
 
     # Step 5: Train & save per-subject models (nested CV method)
+    step_start = time.perf_counter()
     _print_step(5, 5, "Training and saving per-subject models")
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -581,6 +607,7 @@ def run_pipeline(
         joblib.dump(model, model_path)
         model_paths[sid] = str(model_path)
         print(f"  Saved {model_path} ({method})")
+    runtime_seconds["train_and_save_models"] = time.perf_counter() - step_start
 
     above_chance, at_chance = [], []
     for sid, s in zip(subject_ids, nested_scores):
@@ -635,6 +662,7 @@ def run_pipeline(
         "subjects_with_signal": above_chance,
         "subjects_at_chance": at_chance,
         "model_paths": model_paths,
+        "runtime_seconds": runtime_seconds,
     }
 
     if holdout_fraction > 0:
@@ -645,10 +673,16 @@ def run_pipeline(
         results["cross_session_results"] = cross_session_results
 
     results_path = output_dir / "training_results.json"
+    runtime_seconds["total"] = time.perf_counter() - total_start
+    results["runtime_seconds"] = runtime_seconds
+
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
 
     print(f"\nResults saved to: {results_path}")
+    print("Runtime summary (s):")
+    for stage, seconds in runtime_seconds.items():
+        print(f"  {stage}: {seconds:.2f}")
     print("\n" + "=" * _LINE_WIDTH)
     print("Pipeline complete!")
     print("=" * _LINE_WIDTH)

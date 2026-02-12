@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from typing import Literal
 
 SplitStrategy = Literal["stratified", "stratified_group"]
+ParallelBackend = Literal["loky", "threading"]
+CacheScope = Literal["subject", "outer_fold"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,11 @@ class TrainingConfig:
     split_strategy: SplitStrategy = "stratified_group"
     trial_group_size: int = 1
     random_state: int = 42
+    n_jobs: int = -1
+    parallel_backend: ParallelBackend = "loky"
+    max_blas_threads_per_worker: int = 1
+    enable_band_cache: bool = True
+    cache_scope: CacheScope = "subject"
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""
