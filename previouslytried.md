@@ -231,6 +231,112 @@ The ~3.7 pp random seed variance means we're at or near the ceiling for what par
 - **Mean: 58.9% ± 1.4%** (seed 42 is the luckiest at 62.0%)
 - **Implication:** The true expected nested accuracy of this configuration is ~59%, not 62%. The 62% reported with seed=42 is within the top tail of the distribution. All seeds show clear improvement over the baseline (~44%).
 
+## Round 3: Exhaustive Parameter Sweep (all tested, none improved)
+
+All experiments below used the 62.0% baseline (seed=42). Every change was tested individually and reverted.
+
+### n_inner_folds=8
+- **Result:** 60.6% nested — **worse**
+- **Why:** With ~90 outer-train trials and 8 inner folds, each inner validation set has ~11 trials — slightly too noisy.
+
+### n_inner_folds=6
+- **Result:** 61.1% nested — **worse**
+- **Why:** Fewer folds = less stable model selection than 7.
+
+### SVM C=25 (between tested C=20 and C=30)
+- **Result:** 61.9% nested — **effectively same** (within rounding)
+- **Why:** C=20-30 range is essentially flat; the RBF decision boundary isn't sensitive to C in this range with scaled features.
+
+### Riemannian LR C=0.15
+- **Result:** 61.8% nested — **worse**
+- **Why:** Less regularization than C=0.1 allows more overfitting on 36-dim tangent space.
+
+### Riemannian LR C=0.2
+- **Result:** 61.5% nested — **worse**
+
+### Riemannian LR C=0.08
+- **Result:** 61.4% nested — **worse**
+- **Why:** Too much regularization; underfitting slightly.
+
+### n_mad=3.75 (less aggressive rejection)
+- **Result:** 58.9% nested — **much worse**
+- **Why:** More artifacts pass through, degrading CSP estimation quality.
+
+### n_mad=3.25 (more aggressive rejection)
+- **Result:** 61.4% nested — **worse**
+- **Why:** Too many borderline trials rejected, reducing training data.
+
+### CSP reg="lwf" (instead of "oas")
+- **Result:** 55.8% nested — **much worse**
+- **Why:** Ledoit-Wolf shrinkage for CSP spatial filter covariance estimation is inferior to OAS. OAS better estimates the shrinkage intensity for the 8-channel CSP covariance matrices.
+
+### skip_duration=0.15 (earlier onset)
+- **Result:** 60.6% nested — **worse**
+- **Why:** Some VEP contamination from the cue at 150ms.
+
+### skip_duration=0.35 (later onset)
+- **Result:** 59.3% nested — **worse**
+- **Why:** Misses early motor planning signal (250-350ms window).
+
+### task_duration=3.25
+- **Result:** 58.7% nested — **worse**
+- **Why:** Extra 250ms captures late-epoch data where imagery fades.
+
+### baseline_duration=0.75
+- **Result:** 60.2% nested — **worse**
+- **Why:** Shorter baseline → noisier power reference → less stable ERD computation.
+
+### SVM gamma=0.05 (instead of "scale")
+- **Result:** 61.8% nested — **marginally worse**
+- **Why:** Fixed gamma can't adapt to per-fold feature variance the way "scale" does.
+
+### SVM gamma=0.1
+- **Result:** 59.9% nested — **worse**
+- **Why:** Too narrow RBF kernels → overfitting.
+
+### k_candidates extended to (2,3,5,8,10,15,20,25,30)
+- **Result:** 62.0% nested — **same**
+- **Why:** k=2 and k=30 are clipped by _safe_k_values (n_train//3 cap) anyway.
+
+### flat_uv=0.5 and flat_uv=2.0
+- **Result:** 62.0% nested for both — **same**
+- **Why:** No trials in the dataset are actually flat (<1µV PTP). The flat rejection threshold doesn't matter.
+
+### LDA inner k-selection with 2-fold (instead of 3)
+- **Result:** 62.0% nested — **same**
+- **Why:** 2-fold k-selection gives coarser but sufficient k estimates. Doesn't affect nested selection.
+
+### Welch nperseg=sfreq/4 (62 samples instead of 125)
+- **Result:** 58.0% nested — **much worse**
+- **Why:** 62-sample segments give only ~4Hz frequency resolution — too coarse to resolve mu (8-12Hz) and beta sub-bands.
+
+### Riemannian with MDM classifier (instead of TangentSpace+LR)
+- **Result:** 59.8% nested — **worse**
+- **Why:** MDM (Minimum Distance to Mean) is simpler but less discriminative than tangent space + logistic regression for this data size.
+
+### Riemannian with CospCovariances (band-specific covariances)
+- **Result:** Error — CospCovariances not available in installed pyriemann version. CoSpectra produces 4D output incompatible with TangentSpace.
+
+### CSP norm_trace=False
+- **Result:** 60.4% nested — **worse**
+- **Why:** Without trace normalization, CSP variance features are scale-dependent, hurting cross-trial generalization.
+
+### k-value cap relaxed to n_train//2 (from n_train//3)
+- **Result:** 60.5% nested — **worse**
+- **Why:** Allowing up to ~45 features from 90 training samples leads to overfitting.
+
+### CSP n_components=4 (re-tested with current config)
+- **Result:** 60.3% nested — **worse**
+- **Why:** 4th CSP component (32 total) still captures noise with 8 channels. CSP=3 (24 features) remains optimal.
+
+### Weighted ensemble (0.4 LDA + 0.6 SVM instead of 0.5/0.5)
+- **Result:** 62.0% nested — **same** (ensemble mean dropped from 57.3% to 56.8%)
+- **Why:** Weighting doesn't affect nested selection which evaluates classifiers independently. Ensemble accuracy itself dropped because the weights are static and don't adapt per-subject.
+
+## Conclusion on Parameter Tuning
+
+After 25+ parameter experiments in Round 3, the 62.0% nested accuracy (seed=42) is confirmed as the parameter-tuning ceiling. All individual parameter changes either hurt or have no effect. This is consistent with the Round 2 multi-seed analysis showing ~59% ± 1.4% true expected accuracy. The 62.0% with seed=42 is in the top tail of the seed distribution.
+
 ## Things Still Not Tried
 
 1. **Per-subject adaptive parameters** — different C, k, or band selection per subject via inner CV
@@ -238,4 +344,4 @@ The ~3.7 pp random seed variance means we're at or near the ceiling for what par
 3. **Gradient boosting classifier** — would be a structural/architecture change
 4. **Subject-specific FBCSP bands** — computationally expensive, needs inner CV per band per subject
 5. **Stacking instead of soft voting** — meta-classifier on top of base classifier predictions
-6. **Riemannian with band-specific covariances** — CospCovariances from pyriemann for frequency-domain SPD matrices
+6. **Riemannian with band-specific covariances** — CospCovariances not available; would need pyriemann upgrade or custom implementation
