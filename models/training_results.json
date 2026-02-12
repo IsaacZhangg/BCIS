@@ -39,16 +39,16 @@
     "subject0011": 0.535515873015873
   },
   "riemann_scores": {
-    "subject0001": 0.37722222222222224,
-    "subject0002": 0.4395238095238095,
-    "subject0004": 0.37,
-    "subject0005": 0.5227777777777777,
-    "subject0006": 0.43000000000000005,
-    "subject0007": 0.5,
-    "subject0008": 0.5266666666666666,
-    "subject0009": 0.5660714285714286,
-    "subject0010": 0.6244444444444446,
-    "subject0011": 0.6150793650793651
+    "subject0001": 0.3911111111111111,
+    "subject0002": 0.41730158730158734,
+    "subject0004": 0.3088888888888889,
+    "subject0005": 0.5463888888888888,
+    "subject0006": 0.39,
+    "subject0007": 0.44000000000000006,
+    "subject0008": 0.5277777777777778,
+    "subject0009": 0.5771825396825397,
+    "subject0010": 0.6033333333333333,
+    "subject0011": 0.6039682539682539
   },
   "svm_scores": {
     "subject0001": 0.49333333333333335,
@@ -76,15 +76,15 @@
   },
   "best_scores": {
     "subject0001": 0.49333333333333335,
-    "subject0002": 0.4395238095238095,
+    "subject0002": 0.41730158730158734,
     "subject0004": 0.6288888888888888,
     "subject0005": 0.5675,
     "subject0006": 0.9,
     "subject0007": 0.64,
     "subject0008": 0.6977777777777778,
-    "subject0009": 0.5660714285714286,
+    "subject0009": 0.5771825396825397,
     "subject0010": 0.8533333333333333,
-    "subject0011": 0.6150793650793651
+    "subject0011": 0.6039682539682539
   },
   "best_methods_posthoc": {
     "subject0001": "SVM",
@@ -106,9 +106,9 @@
     "subject0006": 0.8799999999999999,
     "subject0007": 0.64,
     "subject0008": 0.6555555555555556,
-    "subject0009": 0.5,
+    "subject0009": 0.5396825396825398,
     "subject0010": 0.821111111111111,
-    "subject0011": 0.6150793650793651
+    "subject0011": 0.6039682539682539
   },
   "nested_methods": {
     "subject0001": "SVM",
@@ -123,13 +123,13 @@
     "subject0011": "Riemann"
   },
   "fbcsp_mean_accuracy": 0.5926269841269842,
-  "riemann_mean_accuracy": 0.49717857142857136,
+  "riemann_mean_accuracy": 0.48059523809523813,
   "svm_mean_accuracy": 0.595845238095238,
   "ensemble_mean_accuracy": 0.5733730158730159,
-  "best_mean_accuracy": 0.6401507936507936,
-  "best_std_accuracy": 0.13770154243732913,
-  "nested_mean_accuracy": 0.6170873015873015,
-  "nested_std_accuracy": 0.1408995226571361,
+  "best_mean_accuracy": 0.6379285714285714,
+  "best_std_accuracy": 0.14076085944439354,
+  "nested_mean_accuracy": 0.6199444444444444,
+  "nested_std_accuracy": 0.13816485109135931,
   "subjects_with_signal": [
     "subject0004",
     "subject0006",

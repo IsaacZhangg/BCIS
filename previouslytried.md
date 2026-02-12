@@ -3,7 +3,8 @@
 This document records every parameter experiment conducted during accuracy optimization of the BCI motor imagery classifier. Use this to avoid re-testing things that have already been explored.
 
 **Starting baseline (before any changes):** 43.9% nested, 45.4% FBCSP+LDA, 48.4% best-of
-**Final result:** 61.7% nested, 59.3% FBCSP+LDA, 63.6% best-of
+**Final result (seed=42):** 62.0% nested, 59.3% FBCSP+LDA, 63.8% best-of
+**Mean across 10 seeds:** 58.9% ± 1.4% nested (true expected accuracy)
 
 ## Current Best Configuration
 
@@ -13,6 +14,7 @@ This document records every parameter experiment conducted during accuracy optim
 | N_CSP_COMPONENTS | 3 | train.py | 31 |
 | CSP reg | "oas" | train.py | 68 |
 | DEFAULT_K_CANDIDATES | (3, 5, 8, 10, 15, 20, 25) | train.py | 32 |
+| Riemannian covariance | "lwf" | train.py | multiple |
 | SVM C | 20.0 | train.py | multiple |
 | SVM kernel | "rbf" | train.py | multiple |
 | SVM gamma | "scale" | train.py | multiple |
@@ -192,17 +194,48 @@ The ~3.7 pp random seed variance means we're at or near the ceiling for what par
 - 8-channel consumer-grade dry electrode EEG
 - Several "BCI-illiterate" subjects who may not produce distinguishable motor imagery patterns
 
-## Things NOT Tried (potential future experiments)
+## Round 2: Untried Ideas (now tested)
 
-1. **IIR bandpass for Riemannian** — FIR was ineffective due to edge effects on short epochs, but IIR (Butterworth) would be much shorter and could work
-2. **Per-subject adaptive parameters** — different skip_duration, task_duration, or C values per subject based on inner CV
-3. **Covariance estimation methods for Riemannian** — currently OAS; could try SCM, LWF, or MCD
-4. **TangentSpace metric** — currently "riemann"; "logeuclid" is more robust to noise
-5. **xDAWN spatial filtering** — alternative to CSP that maximizes SNR for evoked responses
-6. **Gradient boosting classifier** — XGBoost/LightGBM with max_depth=3 could capture nonlinear interactions
-7. **PCA before SelectKBest** — dimensionality reduction before feature selection might help
-8. **Subject-specific FBCSP bands** — use inner CV to select which bands to include per subject
-9. **Ensemble including Riemannian** — currently LDA+SVM only; Riemannian adds orthogonal info
-10. **Common Average Reference (CAR)** — previously tested and hurt CSP (rank 8→7), but might help with more regularization
-11. **Stacking instead of soft voting** — train a meta-classifier on the 4 classifiers' predictions
-12. **Different random seeds** — run pipeline with seeds 0-99 and report mean±std for a more robust accuracy estimate
+### Idea 1: IIR bandpass for Riemannian (8-30Hz, method="iir")
+- **Result:** 59.6% nested (was 62.0%) — **worse**
+- **Why it hurts:** Even with IIR filters (minimal edge effects), restricting to 8-30Hz removes full-spectrum covariance structure that the Riemannian classifier uses. The 1-40Hz broadband covariance is more informative.
+
+### Idea 3: Riemannian covariance estimator: oas → lwf
+- **Result:** 62.0% nested (was 61.7% with oas) — **slight improvement, kept**
+- Also tested scm (sample covariance): 61.7% nested — same as oas
+- **Why LWF helps:** Ledoit-Wolf shrinkage provides a slightly better bias-variance tradeoff for 8x8 covariance matrices with ~45 trials per class.
+
+### Idea 4: TangentSpace metric: riemann → logeuclid
+- **Result:** 59.2% nested (was 62.0%) — **worse**
+- **Why it hurts:** Logeuclid approximation loses the full Riemannian geometry that the riemann metric captures. The 8-channel covariance matrices are small enough that the exact riemann computation is stable.
+
+### Idea 7: PCA (95% variance) before classifiers in batch evaluator
+- **Result:** 59.0% nested (was 62.0%) — **worse**
+- **Why it hurts:** PCA decorrelation removes the feature structure that f_classif-selected features already optimized. LDA with shrinkage handles correlation natively; PCA is redundant and removes discriminative variance.
+
+### Idea 8 (partial): Add (6,8)Hz sub-theta/low-mu FBCSP band
+- **Result:** 60.3% nested (was 62.0%) — **worse**
+- **Why it hurts:** 6-8Hz contains high-theta/low-alpha activity that is not lateralized for motor imagery. CSP can't find useful spatial patterns, adding 3 noise features.
+
+### Idea 9: 3-way ensemble (LDA + SVM + Riemannian)
+- **Result:** 61.5% nested (was 62.0%), ensemble unchanged at 57.3% — **worse**
+- **Why it hurts:** Riemannian's weaker accuracy (~48%) drags down the ensemble vote. The 2-way LDA+SVM ensemble has better signal diversity without the Riemannian noise.
+
+### Idea 10: Common Average Reference (CAR) + LWF covariance
+- **Result:** 62.0% nested — **no change**
+- **Why it's neutral:** CAR reduces rank 8→7, but LWF/OAS shrinkage regularization compensates. The common-mode noise that CAR removes is already handled by the bandpass filter and Surface Laplacian.
+
+### Idea 12: Multi-seed robustness analysis (10 seeds)
+- **Seeds tested:** 0, 1, 2, 3, 7, 13, 21, 37, 42, 99
+- **Results:** 56.6%, 57.6%, 58.8%, 56.6%, 59.4%, 58.6%, 58.9%, 59.0%, 62.0%, 58.3%
+- **Mean: 58.9% ± 1.4%** (seed 42 is the luckiest at 62.0%)
+- **Implication:** The true expected nested accuracy of this configuration is ~59%, not 62%. The 62% reported with seed=42 is within the top tail of the distribution. All seeds show clear improvement over the baseline (~44%).
+
+## Things Still Not Tried
+
+1. **Per-subject adaptive parameters** — different C, k, or band selection per subject via inner CV
+2. **xDAWN spatial filtering** — alternative to CSP for evoked response maximization
+3. **Gradient boosting classifier** — would be a structural/architecture change
+4. **Subject-specific FBCSP bands** — computationally expensive, needs inner CV per band per subject
+5. **Stacking instead of soft voting** — meta-classifier on top of base classifier predictions
+6. **Riemannian with band-specific covariances** — CospCovariances from pyriemann for frequency-domain SPD matrices
