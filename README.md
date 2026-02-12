@@ -213,7 +213,7 @@ Per-subject, per-fold pipeline (group-aware 10-fold stratified CV):
 
 Riemannian is excluded from the ensemble because its lower overall accuracy (50.2%) drags down the vote.
 
-**Evaluation**: Group-aware stratified cross-validation per subject for all four classifiers individually, plus nested model-selection CV for unbiased best-of-4 estimation. **In-fold artifact rejection** computes the amplitude threshold from training indices only and applies it to both train and test (via `_reject_in_fold()`), preventing threshold leakage. CSP models are re-fitted on each fold's training set to prevent information leakage. The pipeline also supports optional held-out evaluation (`holdout_fraction` parameter) and cross-session validation for subjects with multiple recordings.
+**Evaluation**: Group-aware stratified cross-validation per subject for all four classifiers individually, plus nested model-selection CV for unbiased best-of-4 estimation. **In-fold artifact rejection** computes the amplitude threshold from training indices only and applies it to both train and test (via `_reject_in_fold()`), preventing threshold leakage. CSP models are re-fitted on each fold's training set to prevent information leakage. The pipeline also supports optional held-out evaluation (`holdout_fraction` parameter) and cross-session validation for subjects with multiple recordings. **Subject-level parallelism** dispatches per-subject CV via `joblib.Parallel` with configurable backend and BLAS thread capping (`threadpoolctl`). **Bandpass caching** precomputes filtered trials once per subject and slices by CV indices, eliminating redundant `filter_data` calls across folds.
 
 **Deployment models**: After CV evaluation, the classifier selected by nested CV is trained on all data per subject and saved as a `.joblib` file. FBCSP+LDA, FBCSP+SVM, and Ensemble models contain the full inference pipeline (CSP models, feature selector, scaler, classifier). Riemannian models contain a single sklearn Pipeline. Ensemble winners are saved as their LDA component for deployment.
 
@@ -223,10 +223,10 @@ Riemannian is excluded from the ensemble because its lower overall accuracy (50.
 BCIS/
 ├── src/
 │   ├── __init__.py
-│   ├── config.py            # Typed experiment configuration (CV/feature settings)
+│   ├── config.py            # Typed experiment configuration (CV/feature/parallelism settings)
 │   ├── validation.py        # Leakage-resistant split policies (stratified/grouped)
 │   ├── pipeline.py          # Main pipeline orchestrator (entry point, held-out, cross-session)
-│   ├── train.py              # FBCSP+LDA & Riemannian training, in-fold rejection, nested CV, cross-session eval
+│   ├── train.py              # FBCSP+LDA & Riemannian training, in-fold rejection, nested CV, cross-session eval, parallel dispatch
 │   ├── data_loader.py        # CSV loading, event parsing
 │   ├── preprocess.py         # Bandpass + notch filtering, CAR, ASR
 │   ├── epochs.py             # Epoch extraction + per-trial PTP computation
@@ -406,7 +406,7 @@ Pytest is configured for clean output by default (`-q --tb=short`) and suppresse
 - `test_preprocess.py` -- DC offset removal, 60 Hz attenuation (>90% power reduction), full pipeline, CAR common-mode removal, ASR artifact cleaning
 - `test_epochs.py` -- Epoch shapes, class separation, boundary conditions (signal start/end), artifact rejection (amplitude, flat signal, adaptive outlier, gradient, HF power, criteria disable)
 - `test_features.py` -- Feature dimensions (45 features), lateralization index symmetry, missing channel errors, CSP output shapes, spectral entropy, peak frequency, C3-C4 coherence, statistical features
-- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip; Ensemble CV scores, leakage check; Nested model-selection CV scores, leakage check; Cross-session evaluate scores, leakage check; In-fold rejection (outlier removal, None passthrough, integration with CV)
+- `test_train.py` -- FBCSP+LDA CV scores, leakage check, model completeness, round-trip predict; Riemannian CV scores, leakage check, model round-trip; SVM CV scores, leakage check, model round-trip; Ensemble CV scores, leakage check; Nested model-selection CV scores, leakage check; Cross-session evaluate scores, leakage check; In-fold rejection (outlier removal, None passthrough, integration with CV); prefiltered/cached parity tests; parallel+cached statistical parity tests
 - `test_validation.py` -- classwise trial grouping, group-aware split integrity, grouped-split fallback behavior
 
 ## Dependencies
@@ -420,6 +420,7 @@ Pytest is configured for clean output by default (`-q --tb=short`) and suppresse
 | [NumPy](https://numpy.org/) | >=2.4.2 | Array operations |
 | [SciPy](https://scipy.org/) | >=1.17.0 | Welch's method for spectral analysis |
 | [pandas](https://pandas.pydata.org/) | >=3.0.0 | CSV loading |
-| [joblib](https://joblib.readthedocs.io/) | >=1.5.3 | Model serialization |
+| [joblib](https://joblib.readthedocs.io/) | >=1.5.3 | Model serialization, subject-level parallel dispatch |
+| [threadpoolctl](https://github.com/joblib/threadpoolctl) | >=3.0 | BLAS/OpenMP thread capping per parallel worker |
 
 **Dev dependencies**: pytest (>=9.0.2), ruff (>=0.14.14)
