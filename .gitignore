@@ -42,10 +42,11 @@ htmlcov/
 # Project-specific
 docs/
 CLAUDE.md
+AGENTS.md
 
 # Dot-prefixed directories (all hidden folders except .git)
 .*/
 !.git/
 
 # Models (optional - uncomment if models should be ignored)
-# models/*.joblib
+models/*.joblib

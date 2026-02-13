@@ -17,7 +17,12 @@
     ],
     "split_strategy": "stratified_group",
     "trial_group_size": 1,
-    "random_state": 42
+    "random_state": 42,
+    "n_jobs": -1,
+    "parallel_backend": "loky",
+    "max_blas_threads_per_worker": 1,
+    "enable_band_cache": true,
+    "cache_scope": "subject"
   },
   "models": [
     "FBCSP+LDA (nested k)",
@@ -155,5 +160,13 @@
     "subject0009": "models/subject0009_riemann.joblib",
     "subject0010": "models/subject0010_fbcsp_lda.joblib",
     "subject0011": "models/subject0011_riemann.joblib"
+  },
+  "runtime_seconds": {
+    "find_recordings": 0.7377930830116384,
+    "load_preprocess": 5.415396999975201,
+    "cross_validation": 13.299748875026125,
+    "cross_session_eval": 0.9031716249883175,
+    "train_and_save_models": 4.225424791977275,
+    "total": 24.582270624989178
   }
 }
