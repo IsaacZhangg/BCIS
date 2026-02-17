@@ -105,13 +105,21 @@ ruff format src/ tests/
 import joblib
 from src.train import predict, predict_riemann
 
-# FBCSP+LDA or SVM model
+# FBCSP+LDA model
 model = joblib.load("models/subject0006_fbcsp_lda.joblib")
 predictions = predict(model, X_features, X_multichannel)  # 0=left, 1=right
+
+# SVM model (same predict interface as FBCSP+LDA)
+model = joblib.load("models/subject0004_svm.joblib")
+predictions = predict(model, X_features, X_multichannel)
 
 # Riemannian model
 model = joblib.load("models/subject0011_riemann.joblib")
 predictions = predict_riemann(model, X_multichannel)
+
+# Ensemble-selected subjects save an FBCSP+LDA model for deployment
+model = joblib.load("models/subject0007_ensemble_lda.joblib")
+predictions = predict(model, X_features, X_multichannel)
 ```
 
 ## Data Format

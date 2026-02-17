@@ -278,7 +278,6 @@ def _evaluate_subject_all_models(
             X_mc_test = X_multichannel[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            # Riemannian classifier does not depend on FBCSP features.
             riemann_pipe = make_pipeline(
                 Covariances(estimator="lwf"),
                 TangentSpace(metric="riemann"),
@@ -287,7 +286,6 @@ def _evaluate_subject_all_models(
             riemann_pipe.fit(X_mc_train, y_train)
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
-            # Shared FBCSP extraction for LDA/SVM/ensemble.
             if subject_band_cache is not None:
                 train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
                 test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
@@ -318,7 +316,6 @@ def _evaluate_subject_all_models(
             _, counts = np.unique(y_train, return_counts=True)
             priors = counts / counts.sum()
 
-            # LDA keeps its nested inner-CV K selection.
             best_k = k_values[0]
             best_inner_score = -1.0
             inner_groups = groups[train_idx] if groups is not None else None
@@ -363,7 +360,6 @@ def _evaluate_subject_all_models(
             lda.fit(X_train_lda, y_train)
             fold_scores["lda"].append(float(lda.score(X_test_lda, y_test)))
 
-            # SVM and ensemble keep the original conservative fixed-K behavior.
             k_fixed = k_values[-1]
             selector = SelectKBest(f_classif, k=k_fixed)
             X_train_sel = selector.fit_transform(X_train_combined, y_train)
@@ -576,11 +572,9 @@ def train_within_subject_cv(
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
-            # Class priors from training fold
             _, counts = np.unique(y_train, return_counts=True)
             priors = counts / counts.sum()
 
-            # Nested CV to select k_best
             k_values = _safe_k_values(
                 n_features=X_train_combined.shape[1],
                 n_train_trials=len(y_train),
@@ -1121,7 +1115,6 @@ def _evaluate_subject_nested_model_selection(
                     outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
                     outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
 
-            # Inner CV: evaluate each classifier on outer-train
             inner_groups = groups[outer_train_idx] if groups is not None else None
             inner_splits = make_cv_splits(
                 y_otrain,
@@ -1165,10 +1158,8 @@ def _evaluate_subject_nested_model_selection(
                 for clf_name in classifier_names
             }
 
-            # Pick best classifier by inner CV
             best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
 
-            # Retrain on full outer-train, evaluate on outer-test
             outer_score = _evaluate_classifier(
                 best_clf,
                 X_feat_otrain,
@@ -1478,7 +1469,6 @@ def train_within_subject_cv_ensemble(
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
-            # --- Shared FBCSP features ---
             fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
                 X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
             )
@@ -1502,7 +1492,6 @@ def train_within_subject_cv_ensemble(
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            # --- Classifier 1: LDA ---
             _, counts = np.unique(y_train, return_counts=True)
             priors = counts / counts.sum()
             lda = LinearDiscriminantAnalysis(
@@ -1511,18 +1500,14 @@ def train_within_subject_cv_ensemble(
             lda.fit(X_train_scaled, y_train)
             proba_lda = lda.predict_proba(X_test_scaled)
 
-            # --- Classifier 2: SVM ---
             svm = SVC(
                 kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
             )
             svm.fit(X_train_scaled, y_train)
             proba_svm = svm.predict_proba(X_test_scaled)
 
-            # --- Soft voting (LDA + SVM) ---
             avg_proba = (proba_lda + proba_svm) / 2
             preds = np.argmax(avg_proba, axis=1)
-
-            # Map predictions back to original class labels
             classes_sorted = lda.classes_
             preds_labels = classes_sorted[preds]
 

@@ -7,9 +7,8 @@ import pandas as pd
 from pathlib import Path
 
 
-# Channel names in order from CSV
 CHANNELS = ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
-SFREQ = 250.0  # Sampling frequency in Hz
+SFREQ = 250.0
 
 
 def load_recording(

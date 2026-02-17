@@ -173,6 +173,7 @@ def compute_rejection_threshold(
     channels = list(left_pairs_by_channel.keys())
 
     def _trial_ptps(pairs_by_channel: dict) -> list[float]:
+        """Return max cross-channel PTP amplitude for each trial."""
         n_trials = len(pairs_by_channel[channels[0]])
         ptps = []
         for i in range(n_trials):
@@ -250,8 +251,9 @@ def reject_bad_epochs(
     """
     channels = list(left_pairs_by_channel.keys())
 
-    # --- Criterion 1: Peak-to-peak amplitude (adaptive or fixed) ---
+    # Peak-to-peak amplitude threshold (adaptive or fixed)
     def _trial_ptps(pairs_by_channel: dict) -> list[float]:
+        """Return max cross-channel PTP amplitude for each trial."""
         n_trials = len(pairs_by_channel[channels[0]])
         ptps = []
         for i in range(n_trials):
@@ -267,11 +269,12 @@ def reject_bad_epochs(
         mad = float(np.median(np.abs(all_ptps - median)))
         threshold_uv = median + n_mad * mad
 
-    # --- Criterion 2: Gradient adaptive threshold ---
+    # Gradient adaptive threshold
     gradient_threshold: float | None = None
     if gradient_n_mad is not None and sfreq is not None:
 
         def _trial_gradients(pairs_by_channel: dict) -> list[float]:
+            """Return max cross-channel sample-to-sample gradient for each trial."""
             n_trials = len(pairs_by_channel[channels[0]])
             grad_vals = []
             for i in range(n_trials):
@@ -289,11 +292,12 @@ def reject_bad_epochs(
         grad_mad = float(np.median(np.abs(all_grads - grad_median)))
         gradient_threshold = grad_median + gradient_n_mad * grad_mad
 
-    # --- Criterion 3: HF power adaptive threshold ---
+    # HF power adaptive threshold
     hf_threshold: float | None = None
     if hf_power_n_mad is not None and sfreq is not None:
 
         def _trial_hf(pairs_by_channel: dict) -> list[float]:
+            """Return max cross-channel high-frequency power for each trial."""
             n_trials = len(pairs_by_channel[channels[0]])
             hf_vals = []
             for i in range(n_trials):
@@ -313,8 +317,9 @@ def reject_bad_epochs(
         hf_mad = float(np.median(np.abs(all_hf - hf_median)))
         hf_threshold = hf_median + hf_power_n_mad * hf_mad
 
-    # --- Apply all criteria ---
+    # Apply all criteria
     def _good_indices(pairs_by_channel: dict) -> list[int]:
+        """Return indices of trials passing all three rejection criteria."""
         n_trials = len(pairs_by_channel[channels[0]])
         good = []
         for i in range(n_trials):
@@ -322,16 +327,13 @@ def reject_bad_epochs(
             for ch in channels:
                 task = pairs_by_channel[ch][i][1]
                 ptp = float(np.ptp(task))
-                # Criterion 1: amplitude
                 if ptp > threshold_uv or ptp < flat_uv:
                     ok = False
                     break
-                # Criterion 2: gradient
                 if gradient_threshold is not None:
                     if _compute_max_gradient(task) > gradient_threshold:
                         ok = False
                         break
-                # Criterion 3: HF power
                 if hf_threshold is not None:
                     if (
                         _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
