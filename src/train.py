@@ -97,16 +97,13 @@ def _extract_fbcsp_features_prefiltered(
             continue
 
     if not train_parts:
-        train_rows = n_train_trials if n_train_trials is not None else len(y_train)
-        if n_test_trials is None:
-            n_test_trials = (
+        n_train = n_train_trials if n_train_trials is not None else len(y_train)
+        n_test = n_test_trials
+        if n_test is None:
+            n_test = (
                 next(iter(X_test_by_band.values())).shape[0] if X_test_by_band else 0
             )
-        return (
-            np.empty((train_rows, 0)),
-            np.empty((n_test_trials, 0)),
-            [],
-        )
+        return np.empty((n_train, 0)), np.empty((n_test, 0)), []
 
     return np.hstack(train_parts), np.hstack(test_parts), csp_models
 
@@ -225,14 +222,9 @@ def _safe_k_values(
     if n_features <= 0:
         return []
 
-    # Keep dimensionality in check: K should not exceed one-third of train samples.
-    max_by_samples = max(2, n_train_trials // 3)
-    k_cap = min(n_features, max_by_samples)
-
-    candidates = sorted({k for k in k_candidates if 1 <= k <= k_cap})
-    if not candidates:
-        candidates = [min(k_best, k_cap)]
-    return candidates
+    k_cap = min(n_features, max(2, n_train_trials // 3))
+    candidates = sorted(k for k in k_candidates if 1 <= k <= k_cap)
+    return candidates or [min(k_best, k_cap)]
 
 
 def _evaluate_subject_all_models(
@@ -251,10 +243,7 @@ def _evaluate_subject_all_models(
     max_blas_threads_per_worker: int,
 ) -> dict[str, float]:
     """Evaluate all classifiers for a single subject."""
-    blas_limits = (
-        max_blas_threads_per_worker if max_blas_threads_per_worker > 0 else None
-    )
-    with threadpool_limits(limits=blas_limits):
+    with threadpool_limits(limits=max_blas_threads_per_worker or None):
         splits = make_cv_splits(
             y,
             n_splits=n_folds,
@@ -313,8 +302,8 @@ def _evaluate_subject_all_models(
             if not k_values:
                 continue
 
-            _, counts = np.unique(y_train, return_counts=True)
-            priors = counts / counts.sum()
+            _, outer_counts = np.unique(y_train, return_counts=True)
+            outer_priors = outer_counts / outer_counts.sum()
 
             best_k = k_values[0]
             best_inner_score = -1.0
@@ -338,8 +327,12 @@ def _evaluate_subject_all_models(
                         sc = StandardScaler()
                         X_it = sc.fit_transform(X_it)
                         X_iv = sc.transform(X_iv)
+                        _, inner_counts = np.unique(
+                            y_train[inner_train], return_counts=True
+                        )
+                        inner_priors = inner_counts / inner_counts.sum()
                         clf = LinearDiscriminantAnalysis(
-                            solver="lsqr", shrinkage="auto", priors=priors
+                            solver="lsqr", shrinkage="auto", priors=inner_priors
                         )
                         clf.fit(X_it, y_train[inner_train])
                         inner_scores.append(float(clf.score(X_iv, y_train[inner_val])))
@@ -355,7 +348,7 @@ def _evaluate_subject_all_models(
             X_train_lda = lda_scaler.fit_transform(X_train_lda)
             X_test_lda = lda_scaler.transform(X_test_lda)
             lda = LinearDiscriminantAnalysis(
-                solver="lsqr", shrinkage="auto", priors=priors
+                solver="lsqr", shrinkage="auto", priors=outer_priors
             )
             lda.fit(X_train_lda, y_train)
             fold_scores["lda"].append(float(lda.score(X_test_lda, y_test)))
@@ -373,7 +366,7 @@ def _evaluate_subject_all_models(
             fold_scores["svm"].append(float(svm.score(X_test_scaled, y_test)))
 
             lda_ens = LinearDiscriminantAnalysis(
-                solver="lsqr", shrinkage="auto", priors=priors
+                solver="lsqr", shrinkage="auto", priors=outer_priors
             )
             lda_ens.fit(X_train_scaled, y_train)
             proba_lda = lda_ens.predict_proba(X_test_scaled)
@@ -572,8 +565,8 @@ def train_within_subject_cv(
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
 
-            _, counts = np.unique(y_train, return_counts=True)
-            priors = counts / counts.sum()
+            _, outer_counts = np.unique(y_train, return_counts=True)
+            outer_priors = outer_counts / outer_counts.sum()
 
             k_values = _safe_k_values(
                 n_features=X_train_combined.shape[1],
@@ -606,8 +599,12 @@ def train_within_subject_cv(
                         sc = StandardScaler()
                         X_it = sc.fit_transform(X_it)
                         X_iv = sc.transform(X_iv)
+                        _, inner_counts = np.unique(
+                            y_train[inner_train], return_counts=True
+                        )
+                        inner_priors = inner_counts / inner_counts.sum()
                         clf = LinearDiscriminantAnalysis(
-                            solver="lsqr", shrinkage="auto", priors=priors
+                            solver="lsqr", shrinkage="auto", priors=inner_priors
                         )
                         clf.fit(X_it, y_train[inner_train])
                         inner_scores.append(clf.score(X_iv, y_train[inner_val]))
@@ -625,7 +622,7 @@ def train_within_subject_cv(
             X_test_scaled = scaler.transform(X_test_sel)
 
             lda = LinearDiscriminantAnalysis(
-                solver="lsqr", shrinkage="auto", priors=priors
+                solver="lsqr", shrinkage="auto", priors=outer_priors
             )
             lda.fit(X_train_scaled, y_train)
             fold_scores.append(lda.score(X_test_scaled, y_test))
@@ -1068,10 +1065,7 @@ def _evaluate_subject_nested_model_selection(
 ) -> tuple[float, str]:
     """Nested model-selection CV for a single subject."""
     classifier_names = list(ALL_CLASSIFIERS)
-    blas_limits = (
-        max_blas_threads_per_worker if max_blas_threads_per_worker > 0 else None
-    )
-    with threadpool_limits(limits=blas_limits):
+    with threadpool_limits(limits=max_blas_threads_per_worker or None):
         subject_band_cache = (
             _precompute_bandpassed(X_multichannel, sfreq)
             if enable_band_cache and cache_scope == "subject"
@@ -1103,17 +1097,16 @@ def _evaluate_subject_nested_model_selection(
 
             outer_train_cache: BandCache | None = None
             outer_test_cache: BandCache | None = None
-            if enable_band_cache:
-                if subject_band_cache is not None:
-                    outer_train_cache = _subset_band_cache(
-                        subject_band_cache, outer_train_idx
-                    )
-                    outer_test_cache = _subset_band_cache(
-                        subject_band_cache, outer_test_idx
-                    )
-                else:
-                    outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
-                    outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
+            if enable_band_cache and subject_band_cache is not None:
+                outer_train_cache = _subset_band_cache(
+                    subject_band_cache, outer_train_idx
+                )
+                outer_test_cache = _subset_band_cache(
+                    subject_band_cache, outer_test_idx
+                )
+            elif enable_band_cache:
+                outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
+                outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
 
             inner_groups = groups[outer_train_idx] if groups is not None else None
             inner_splits = make_cv_splits(
@@ -1149,13 +1142,9 @@ def _evaluate_subject_nested_model_selection(
                 )
                 for clf_name, score in split_scores.items():
                     inner_scores_by_clf[clf_name].append(score)
-            inner_means: dict[str, float] = {
-                clf_name: (
-                    float(np.mean(inner_scores_by_clf[clf_name]))
-                    if inner_scores_by_clf[clf_name]
-                    else 0.5
-                )
-                for clf_name in classifier_names
+            inner_means = {
+                name: float(np.mean(scores)) if scores else 0.5
+                for name, scores in inner_scores_by_clf.items()
             }
 
             best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
@@ -1507,11 +1496,8 @@ def train_within_subject_cv_ensemble(
             proba_svm = svm.predict_proba(X_test_scaled)
 
             avg_proba = (proba_lda + proba_svm) / 2
-            preds = np.argmax(avg_proba, axis=1)
-            classes_sorted = lda.classes_
-            preds_labels = classes_sorted[preds]
-
-            fold_scores.append(float(np.mean(preds_labels == y_test)))
+            preds = lda.classes_[np.argmax(avg_proba, axis=1)]
+            fold_scores.append(float(np.mean(preds == y_test)))
 
         scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
 

@@ -12,6 +12,11 @@ if TYPE_CHECKING:
     from mne.decoding import CSP
 
 
+def _welch_nperseg(epoch: np.ndarray, sfreq: float) -> int:
+    """Return nperseg for Welch's method, clamped to a reasonable range."""
+    return max(min(int(sfreq / 2), len(epoch) // 2), 64)
+
+
 def compute_band_power(
     epoch: np.ndarray,
     sfreq: float,
@@ -19,8 +24,7 @@ def compute_band_power(
     high_freq: float,
 ) -> float:
     """Compute mean power in [low_freq, high_freq] Hz using Welch's method."""
-    nperseg = min(int(sfreq / 2), len(epoch) // 2)
-    nperseg = max(nperseg, 64)  # Minimum for reasonable FFT
+    nperseg = _welch_nperseg(epoch, sfreq)
     freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low_freq) & (freqs <= high_freq)
     return float(np.mean(psd[mask]))
@@ -65,8 +69,7 @@ def compute_spectral_entropy(
     Returns a value in [0, 1]: low entropy indicates a strong narrow-band
     rhythm; high entropy indicates broadband noise.
     """
-    nperseg = min(int(sfreq / 2), len(epoch) // 2)
-    nperseg = max(nperseg, 64)
+    nperseg = _welch_nperseg(epoch, sfreq)
     freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low) & (freqs <= high)
     psd_band = psd[mask]
@@ -83,8 +86,7 @@ def compute_peak_frequency(
     high: float,
 ) -> float:
     """Return the peak frequency in [low, high] Hz."""
-    nperseg = min(int(sfreq / 2), len(epoch) // 2)
-    nperseg = max(nperseg, 64)
+    nperseg = _welch_nperseg(epoch, sfreq)
     freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low) & (freqs <= high)
     freqs_band = freqs[mask]
@@ -100,8 +102,7 @@ def compute_c3c4_coherence(
     high: float,
 ) -> float:
     """Mean magnitude-squared coherence between C3 and C4 in [low, high] Hz."""
-    nperseg = min(int(sfreq / 2), len(c3) // 2)
-    nperseg = max(nperseg, 64)
+    nperseg = _welch_nperseg(c3, sfreq)
     freqs, coh = coherence(c3, c4, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low) & (freqs <= high)
     return float(np.mean(coh[mask]))
@@ -193,32 +194,29 @@ def extract_lateralization_features(
         c4_task_lap = c4_task - (cz_task + pz_task + po8_task) / 3
 
         # Lateralization features from Laplacian-filtered C3/C4
-        for c3b, c3t, c4b, c4t in [
-            (c3_baseline_lap, c3_task_lap, c4_baseline_lap, c4_task_lap),
-        ]:
-            for _band_name, (low, high) in bands.items():
-                c3_bp = compute_band_power(c3b, sfreq, low, high)
-                c3_tp = compute_band_power(c3t, sfreq, low, high)
-                c4_bp = compute_band_power(c4b, sfreq, low, high)
-                c4_tp = compute_band_power(c4t, sfreq, low, high)
+        for _band_name, (low, high) in bands.items():
+            c3_bp = compute_band_power(c3_baseline_lap, sfreq, low, high)
+            c3_tp = compute_band_power(c3_task_lap, sfreq, low, high)
+            c4_bp = compute_band_power(c4_baseline_lap, sfreq, low, high)
+            c4_tp = compute_band_power(c4_task_lap, sfreq, low, high)
 
-                lat_task = (c4_tp - c3_tp) / (c4_tp + c3_tp + 1e-10)
-                lat_baseline = (c4_bp - c3_bp) / (c4_bp + c3_bp + 1e-10)
+            lat_task = (c4_tp - c3_tp) / (c4_tp + c3_tp + 1e-10)
+            lat_baseline = (c4_bp - c3_bp) / (c4_bp + c3_bp + 1e-10)
 
-                c3_erd = (c3_bp - c3_tp) / (c3_bp + 1e-10) * 100
-                c4_erd = (c4_bp - c4_tp) / (c4_bp + 1e-10) * 100
+            c3_erd = (c3_bp - c3_tp) / (c3_bp + 1e-10) * 100
+            c4_erd = (c4_bp - c4_tp) / (c4_bp + 1e-10) * 100
 
-                epoch_features.extend(
-                    [
-                        lat_task,
-                        lat_baseline,
-                        lat_task - lat_baseline,
-                        c3_erd - c4_erd,
-                        np.log((c3_tp + 1e-10) / (c4_tp + 1e-10)),
-                        c3_erd,
-                        c4_erd,
-                    ]
-                )
+            epoch_features.extend(
+                [
+                    lat_task,
+                    lat_baseline,
+                    lat_task - lat_baseline,
+                    c3_erd - c4_erd,
+                    np.log((c3_tp + 1e-10) / (c4_tp + 1e-10)),
+                    c3_erd,
+                    c4_erd,
+                ]
+            )
 
         # Cz (supplementary motor area): only mu + combined beta — SMA doesn't
         # benefit from the low/high beta split used for primary motor cortex

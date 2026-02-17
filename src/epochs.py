@@ -150,6 +150,25 @@ def _compute_hf_power(task: np.ndarray, sfreq: float, low: float, high: float) -
     return float(np.mean(psd[mask]))
 
 
+def _trial_max_ptps(
+    pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+) -> list[float]:
+    """Return max cross-channel PTP amplitude for each trial."""
+    channels = list(pairs_by_channel.keys())
+    n_trials = len(pairs_by_channel[channels[0]])
+    return [
+        max(float(np.ptp(pairs_by_channel[ch][i][1])) for ch in channels)
+        for i in range(n_trials)
+    ]
+
+
+def _adaptive_threshold(values: np.ndarray, n_mad: float) -> float:
+    """Return median + n_mad * MAD for an array of values."""
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    return median + n_mad * mad
+
+
 def compute_rejection_threshold(
     left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
@@ -170,23 +189,10 @@ def compute_rejection_threshold(
     Returns:
         Adaptive threshold in µV.
     """
-    channels = list(left_pairs_by_channel.keys())
-
-    def _trial_ptps(pairs_by_channel: dict) -> list[float]:
-        """Return max cross-channel PTP amplitude for each trial."""
-        n_trials = len(pairs_by_channel[channels[0]])
-        ptps = []
-        for i in range(n_trials):
-            max_ptp = max(float(np.ptp(pairs_by_channel[ch][i][1])) for ch in channels)
-            ptps.append(max_ptp)
-        return ptps
-
     all_ptps = np.array(
-        _trial_ptps(left_pairs_by_channel) + _trial_ptps(right_pairs_by_channel)
+        _trial_max_ptps(left_pairs_by_channel) + _trial_max_ptps(right_pairs_by_channel)
     )
-    median = float(np.median(all_ptps))
-    mad = float(np.median(np.abs(all_ptps - median)))
-    return median + n_mad * mad
+    return _adaptive_threshold(all_ptps, n_mad)
 
 
 def compute_trial_max_ptp(X_multichannel: np.ndarray) -> np.ndarray:
@@ -251,116 +257,72 @@ def reject_bad_epochs(
     """
     channels = list(left_pairs_by_channel.keys())
 
-    # Peak-to-peak amplitude threshold (adaptive or fixed)
-    def _trial_ptps(pairs_by_channel: dict) -> list[float]:
-        """Return max cross-channel PTP amplitude for each trial."""
+    def _trial_max_metric(pairs_by_channel, metric_fn):
+        """Return max cross-channel metric value for each trial."""
         n_trials = len(pairs_by_channel[channels[0]])
-        ptps = []
-        for i in range(n_trials):
-            max_ptp = max(float(np.ptp(pairs_by_channel[ch][i][1])) for ch in channels)
-            ptps.append(max_ptp)
-        return ptps
+        return [
+            max(metric_fn(pairs_by_channel[ch][i][1]) for ch in channels)
+            for i in range(n_trials)
+        ]
 
+    # Peak-to-peak amplitude threshold (adaptive or fixed)
     if threshold_uv is None:
         all_ptps = np.array(
-            _trial_ptps(left_pairs_by_channel) + _trial_ptps(right_pairs_by_channel)
+            _trial_max_metric(left_pairs_by_channel, np.ptp)
+            + _trial_max_metric(right_pairs_by_channel, np.ptp)
         )
-        median = float(np.median(all_ptps))
-        mad = float(np.median(np.abs(all_ptps - median)))
-        threshold_uv = median + n_mad * mad
+        threshold_uv = _adaptive_threshold(all_ptps, n_mad)
 
     # Gradient adaptive threshold
     gradient_threshold: float | None = None
     if gradient_n_mad is not None and sfreq is not None:
-
-        def _trial_gradients(pairs_by_channel: dict) -> list[float]:
-            """Return max cross-channel sample-to-sample gradient for each trial."""
-            n_trials = len(pairs_by_channel[channels[0]])
-            grad_vals = []
-            for i in range(n_trials):
-                max_grad = max(
-                    _compute_max_gradient(pairs_by_channel[ch][i][1]) for ch in channels
-                )
-                grad_vals.append(max_grad)
-            return grad_vals
-
         all_grads = np.array(
-            _trial_gradients(left_pairs_by_channel)
-            + _trial_gradients(right_pairs_by_channel)
+            _trial_max_metric(left_pairs_by_channel, _compute_max_gradient)
+            + _trial_max_metric(right_pairs_by_channel, _compute_max_gradient)
         )
-        grad_median = float(np.median(all_grads))
-        grad_mad = float(np.median(np.abs(all_grads - grad_median)))
-        gradient_threshold = grad_median + gradient_n_mad * grad_mad
+        gradient_threshold = _adaptive_threshold(all_grads, gradient_n_mad)
 
     # HF power adaptive threshold
     hf_threshold: float | None = None
     if hf_power_n_mad is not None and sfreq is not None:
 
-        def _trial_hf(pairs_by_channel: dict) -> list[float]:
-            """Return max cross-channel high-frequency power for each trial."""
-            n_trials = len(pairs_by_channel[channels[0]])
-            hf_vals = []
-            for i in range(n_trials):
-                max_hf = max(
-                    _compute_hf_power(
-                        pairs_by_channel[ch][i][1], sfreq, hf_band[0], hf_band[1]
-                    )
-                    for ch in channels
-                )
-                hf_vals.append(max_hf)
-            return hf_vals
+        def hf_fn(task):
+            return _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
 
         all_hf = np.array(
-            _trial_hf(left_pairs_by_channel) + _trial_hf(right_pairs_by_channel)
+            _trial_max_metric(left_pairs_by_channel, hf_fn)
+            + _trial_max_metric(right_pairs_by_channel, hf_fn)
         )
-        hf_median = float(np.median(all_hf))
-        hf_mad = float(np.median(np.abs(all_hf - hf_median)))
-        hf_threshold = hf_median + hf_power_n_mad * hf_mad
+        hf_threshold = _adaptive_threshold(all_hf, hf_power_n_mad)
 
     # Apply all criteria
-    def _good_indices(pairs_by_channel: dict) -> list[int]:
-        """Return indices of trials passing all three rejection criteria."""
+    def _is_good_trial(pairs_by_channel, trial_idx):
+        """Return True if trial passes all rejection criteria across all channels."""
+        for ch in channels:
+            task = pairs_by_channel[ch][trial_idx][1]
+            ptp = float(np.ptp(task))
+            if ptp > threshold_uv or ptp < flat_uv:
+                return False
+            if (
+                gradient_threshold is not None
+                and _compute_max_gradient(task) > gradient_threshold
+            ):
+                return False
+            if (
+                hf_threshold is not None
+                and _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
+                > hf_threshold
+            ):
+                return False
+        return True
+
+    def _filter_pairs(pairs_by_channel):
         n_trials = len(pairs_by_channel[channels[0]])
-        good = []
-        for i in range(n_trials):
-            ok = True
-            for ch in channels:
-                task = pairs_by_channel[ch][i][1]
-                ptp = float(np.ptp(task))
-                if ptp > threshold_uv or ptp < flat_uv:
-                    ok = False
-                    break
-                if gradient_threshold is not None:
-                    if _compute_max_gradient(task) > gradient_threshold:
-                        ok = False
-                        break
-                if hf_threshold is not None:
-                    if (
-                        _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
-                        > hf_threshold
-                    ):
-                        ok = False
-                        break
-            if ok:
-                good.append(i)
-        return good
+        good = [i for i in range(n_trials) if _is_good_trial(pairs_by_channel, i)]
+        cleaned = {ch: [pairs_by_channel[ch][i] for i in good] for ch in channels}
+        return cleaned, n_trials - len(good)
 
-    left_good = _good_indices(left_pairs_by_channel)
-    right_good = _good_indices(right_pairs_by_channel)
+    cleaned_left, n_rejected_left = _filter_pairs(left_pairs_by_channel)
+    cleaned_right, n_rejected_right = _filter_pairs(right_pairs_by_channel)
 
-    n_left_orig = len(left_pairs_by_channel[channels[0]])
-    n_right_orig = len(right_pairs_by_channel[channels[0]])
-
-    cleaned_left = {
-        ch: [left_pairs_by_channel[ch][i] for i in left_good] for ch in channels
-    }
-    cleaned_right = {
-        ch: [right_pairs_by_channel[ch][i] for i in right_good] for ch in channels
-    }
-
-    return (
-        cleaned_left,
-        cleaned_right,
-        n_left_orig - len(left_good),
-        n_right_orig - len(right_good),
-    )
+    return cleaned_left, cleaned_right, n_rejected_left, n_rejected_right

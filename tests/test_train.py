@@ -261,70 +261,41 @@ def test_all_models_cv_matches_individual_entrypoints():
     X_by_subject = [_make_subject_data(np.random.default_rng(42))]
     y_by_subject = [LABELS]
     trial_ptps = [compute_trial_max_ptp(X_by_subject[0][1])]
-    n_folds = 5
-    split_strategy = "stratified_group"
-    trial_group_size = 5
-    random_state = 7
-
-    all_results = train_within_subject_cv_all_models(
-        X_by_subject,
-        y_by_subject,
-        n_folds=n_folds,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
+    cv_kwargs = dict(
+        n_folds=5,
+        split_strategy="stratified_group",
+        trial_group_size=5,
+        random_state=7,
         trial_ptps_by_subject=trial_ptps,
     )
 
+    all_results = train_within_subject_cv_all_models(
+        X_by_subject, y_by_subject, **cv_kwargs
+    )
+
     lda_scores, lda_mean, lda_std = train_within_subject_cv(
-        X_by_subject,
-        y_by_subject,
-        n_folds=n_folds,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
-        trial_ptps_by_subject=trial_ptps,
+        X_by_subject, y_by_subject, **cv_kwargs
     )
     np.testing.assert_allclose(all_results["lda"][0], lda_scores)
     np.testing.assert_allclose(all_results["lda"][1:], (lda_mean, lda_std))
 
     riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
-        [X_mc for _, X_mc in X_by_subject],
-        y_by_subject,
-        n_folds=n_folds,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
-        trial_ptps_by_subject=trial_ptps,
+        [X_mc for _, X_mc in X_by_subject], y_by_subject, **cv_kwargs
     )
     np.testing.assert_allclose(all_results["riemann"][0], riemann_scores)
     np.testing.assert_allclose(all_results["riemann"][1:], (riemann_mean, riemann_std))
 
     svm_scores, svm_mean, svm_std = train_within_subject_cv_svm(
-        X_by_subject,
-        y_by_subject,
-        n_folds=n_folds,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
-        trial_ptps_by_subject=trial_ptps,
+        X_by_subject, y_by_subject, **cv_kwargs
     )
     np.testing.assert_allclose(all_results["svm"][0], svm_scores)
     np.testing.assert_allclose(all_results["svm"][1:], (svm_mean, svm_std))
 
-    ensemble_scores, ensemble_mean, ensemble_std = train_within_subject_cv_ensemble(
-        X_by_subject,
-        y_by_subject,
-        n_folds=n_folds,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
-        trial_ptps_by_subject=trial_ptps,
+    ens_scores, ens_mean, ens_std = train_within_subject_cv_ensemble(
+        X_by_subject, y_by_subject, **cv_kwargs
     )
-    np.testing.assert_allclose(all_results["ensemble"][0], ensemble_scores)
-    np.testing.assert_allclose(
-        all_results["ensemble"][1:], (ensemble_mean, ensemble_std)
-    )
+    np.testing.assert_allclose(all_results["ensemble"][0], ens_scores)
+    np.testing.assert_allclose(all_results["ensemble"][1:], (ens_mean, ens_std))
 
 
 def test_batched_classifier_eval_matches_single_requests():
@@ -406,49 +377,34 @@ def test_all_models_cached_parallel_path_keeps_statistical_parity():
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
     trial_ptps = [compute_trial_max_ptp(X_mc) for _, X_mc in X_by_subject]
-    n_folds = 3
-    split_strategy = "stratified_group"
-    trial_group_size = 5
-    random_state = 21
-    k_best = 10
+    shared_kwargs = dict(
+        n_folds=3,
+        trial_ptps_by_subject=trial_ptps,
+        split_strategy="stratified_group",
+        trial_group_size=5,
+        random_state=21,
+        k_best=10,
+    )
 
     baseline = train_within_subject_cv_all_models(
-        X_by_subject,
-        y_by_subject,
-        n_folds=n_folds,
-        trial_ptps_by_subject=trial_ptps,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
-        k_best=k_best,
-        n_jobs=1,
-        enable_band_cache=False,
+        X_by_subject, y_by_subject, n_jobs=1, enable_band_cache=False, **shared_kwargs
     )
     optimized = train_within_subject_cv_all_models(
         X_by_subject,
         y_by_subject,
-        n_folds=n_folds,
-        trial_ptps_by_subject=trial_ptps,
-        split_strategy=split_strategy,
-        trial_group_size=trial_group_size,
-        random_state=random_state,
-        k_best=k_best,
         n_jobs=2,
         parallel_backend="threading",
         max_blas_threads_per_worker=1,
         enable_band_cache=True,
+        **shared_kwargs,
     )
 
     for name in ("lda", "riemann", "svm", "ensemble"):
-        np.testing.assert_allclose(
-            baseline[name][0], optimized[name][0], atol=5e-3, rtol=0
-        )
-        np.testing.assert_allclose(
-            baseline[name][1], optimized[name][1], atol=2e-3, rtol=0
-        )
-        np.testing.assert_allclose(
-            baseline[name][2], optimized[name][2], atol=2e-3, rtol=0
-        )
+        b_scores, b_mean, b_std = baseline[name]
+        o_scores, o_mean, o_std = optimized[name]
+        np.testing.assert_allclose(b_scores, o_scores, atol=5e-3, rtol=0)
+        np.testing.assert_allclose(b_mean, o_mean, atol=2e-3, rtol=0)
+        np.testing.assert_allclose(b_std, o_std, atol=2e-3, rtol=0)
 
 
 # ---------- Nested model selection CV tests ----------
@@ -501,39 +457,32 @@ def test_nested_cached_parallel_path_keeps_statistical_parity():
     y_by_subject = [LABELS for _ in range(n_subjects)]
     trial_ptps = [compute_trial_max_ptp(X_mc) for _, X_mc in X_by_subject]
 
-    baseline_scores, baseline_mean, baseline_std, _ = train_nested_model_selection_cv(
-        X_by_subject,
-        y_by_subject,
+    shared_kwargs = dict(
         n_outer_folds=3,
         n_inner_folds=3,
         trial_ptps_by_subject=trial_ptps,
         split_strategy="stratified_group",
         trial_group_size=5,
         random_state=17,
-        n_jobs=1,
-        enable_band_cache=False,
-    )
-    optimized_scores, optimized_mean, optimized_std, _ = (
-        train_nested_model_selection_cv(
-            X_by_subject,
-            y_by_subject,
-            n_outer_folds=3,
-            n_inner_folds=3,
-            trial_ptps_by_subject=trial_ptps,
-            split_strategy="stratified_group",
-            trial_group_size=5,
-            random_state=17,
-            n_jobs=2,
-            parallel_backend="threading",
-            max_blas_threads_per_worker=1,
-            enable_band_cache=True,
-            cache_scope="subject",
-        )
     )
 
-    np.testing.assert_allclose(baseline_scores, optimized_scores, atol=5e-3, rtol=0)
-    np.testing.assert_allclose(baseline_mean, optimized_mean, atol=2e-3, rtol=0)
-    np.testing.assert_allclose(baseline_std, optimized_std, atol=2e-3, rtol=0)
+    b_scores, b_mean, b_std, _ = train_nested_model_selection_cv(
+        X_by_subject, y_by_subject, n_jobs=1, enable_band_cache=False, **shared_kwargs
+    )
+    o_scores, o_mean, o_std, _ = train_nested_model_selection_cv(
+        X_by_subject,
+        y_by_subject,
+        n_jobs=2,
+        parallel_backend="threading",
+        max_blas_threads_per_worker=1,
+        enable_band_cache=True,
+        cache_scope="subject",
+        **shared_kwargs,
+    )
+
+    np.testing.assert_allclose(b_scores, o_scores, atol=5e-3, rtol=0)
+    np.testing.assert_allclose(b_mean, o_mean, atol=2e-3, rtol=0)
+    np.testing.assert_allclose(b_std, o_std, atol=2e-3, rtol=0)
 
 
 # ---------- Cross-session evaluation tests ----------

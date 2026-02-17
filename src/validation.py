@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
@@ -42,13 +44,10 @@ def _effective_n_splits(
     groups: np.ndarray | None,
 ) -> int:
     """Compute the maximum feasible split count for the label/group constraints."""
-    if requested < 2:
+    if requested < 2 or len(y) == 0:
         return 0
 
     _, class_counts = np.unique(y, return_counts=True)
-    if len(class_counts) == 0:
-        return 0
-
     n_splits = min(requested, int(class_counts.min()))
 
     if groups is not None:
@@ -80,10 +79,12 @@ def make_cv_splits(
     if y.ndim != 1:
         raise ValueError("y must be a 1D array")
 
-    x_dummy = np.zeros((len(y), 1), dtype=float)
+    X_dummy = np.zeros((len(y), 1))
 
     if strategy == "stratified_group" and groups is not None:
         groups = np.asarray(groups)
+        if groups.shape[0] != y.shape[0]:
+            raise ValueError("groups must have the same length as y")
         grouped_splits = _effective_n_splits(y, n_splits, groups)
         if grouped_splits >= 2:
             try:
@@ -92,10 +93,23 @@ def make_cv_splits(
                     shuffle=True,
                     random_state=random_state,
                 )
-                return list(cv.split(x_dummy, y, groups=groups))
-            except ValueError:
-                # Fall through to standard stratified CV.
-                pass
+                return list(cv.split(X_dummy, y, groups=groups))
+            except ValueError as exc:
+                warnings.warn(
+                    "Grouped CV was requested but StratifiedGroupKFold failed; "
+                    "falling back to stratified K-fold without group constraints. "
+                    f"Original error: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            warnings.warn(
+                "Grouped CV was requested but is infeasible for this subject/fold "
+                "configuration; falling back to stratified K-fold without group "
+                "constraints.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     plain_splits = _effective_n_splits(y, n_splits, groups=None)
     if plain_splits < 2:
@@ -106,4 +120,4 @@ def make_cv_splits(
         shuffle=True,
         random_state=random_state,
     )
-    return list(cv.split(x_dummy, y))
+    return list(cv.split(X_dummy, y))

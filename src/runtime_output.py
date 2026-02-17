@@ -8,19 +8,7 @@ import warnings
 import mne
 
 _FILTER_LENGTH_WARNING = r"filter_length .* is longer than the signal.*"
-
-
-def should_use_quiet_output() -> bool:
-    """Return whether console output should default to quiet mode.
-
-    Set `BCIS_VERBOSE_LOGS=1` to keep third-party logs/warnings visible.
-    """
-    return os.getenv("BCIS_VERBOSE_LOGS", "0").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+_VERBOSE_VALUES = {"1", "true", "yes", "on"}
 
 
 def configure_console_output(quiet: bool | None = None) -> None:
@@ -28,11 +16,12 @@ def configure_console_output(quiet: bool | None = None) -> None:
 
     Args:
         quiet: If ``True``, suppress noisy library output. When ``None``,
-            defaults from :func:`should_use_quiet_output`.
+            defaults to quiet unless ``BCIS_VERBOSE_LOGS=1``.
     """
-    use_quiet = should_use_quiet_output() if quiet is None else quiet
+    if quiet is None:
+        quiet = os.getenv("BCIS_VERBOSE_LOGS", "0").lower() not in _VERBOSE_VALUES
 
-    if use_quiet:
+    if quiet:
         mne.set_log_level("ERROR")
         warnings.filterwarnings(
             "ignore",

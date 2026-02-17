@@ -1,6 +1,7 @@
 """Tests for leakage-resistant cross-validation helpers."""
 
 import numpy as np
+import pytest
 
 from src.validation import build_classwise_trial_groups, make_cv_splits
 
@@ -57,3 +58,30 @@ def test_make_cv_splits_falls_back_when_grouped_not_feasible():
     # Ensure we still get usable splits with class presence in each test fold.
     for _, test_idx in splits:
         assert set(np.unique(y[test_idx])) == {0, 1}
+
+
+def test_make_cv_splits_warns_when_grouped_fallback_is_used():
+    """Grouped fallback emits a warning so leakage risk is visible to callers."""
+    # Each class appears in only one group => grouped stratification is impossible.
+    y = np.array([0, 0, 1, 1])
+    groups = np.array([0, 0, 1, 1])
+
+    with pytest.warns(RuntimeWarning, match="falling back to stratified K-fold"):
+        splits = make_cv_splits(
+            y,
+            n_splits=2,
+            strategy="stratified_group",
+            groups=groups,
+            random_state=42,
+        )
+
+    assert len(splits) >= 2
+
+
+def test_make_cv_splits_rejects_group_length_mismatch():
+    """Group labels must align one-to-one with the label array."""
+    y = np.array([0, 1, 0, 1])
+    groups = np.array([0, 1, 0])
+
+    with pytest.raises(ValueError, match="same length as y"):
+        make_cv_splits(y, n_splits=2, strategy="stratified_group", groups=groups)

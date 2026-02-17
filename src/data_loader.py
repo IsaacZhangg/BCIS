@@ -1,7 +1,5 @@
 """Load and parse Unicorn EEG recordings."""
 
-from collections import defaultdict
-
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -14,22 +12,12 @@ SFREQ = 250.0
 def load_recording(
     csv_path: Path,
 ) -> tuple[np.ndarray, list[tuple[int, int, int]], float]:
-    """
-    Load a single recording from CSV.
-
-    Args:
-        csv_path: Path to the CSV file
-
-    Returns:
-        data: EEG data array of shape (n_channels, n_samples)
-        events: List of (sample_idx, phase, movement) tuples
-        sfreq: Sampling frequency (250 Hz)
-    """
+    """Load a single recording: returns (n_channels × n_samples) data, events, sfreq."""
     df = pd.read_csv(csv_path)
     data = df[CHANNELS].values.T
     stim = df["stim"].values
 
-    (nonzero_idx,) = np.nonzero(stim)
+    nonzero_idx = np.flatnonzero(stim)
     stim_vals = stim[nonzero_idx].astype(int)
     events = [
         (int(idx), (val // 10) % 10, val % 10)
@@ -40,15 +28,7 @@ def load_recording(
 
 
 def get_complete_recordings(data_dir: Path) -> list[Path]:
-    """
-    Find all complete recordings (those with 100 imagery trials).
-
-    Args:
-        data_dir: Path to unicorn-data directory
-
-    Returns:
-        List of paths to complete recording CSVs
-    """
+    """Find all complete recordings (those with 100 imagery trials)."""
     complete = []
     for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
         stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].values
@@ -60,19 +40,9 @@ def get_complete_recordings(data_dir: Path) -> list[Path]:
 
 
 def get_recordings_by_subject(data_dir: Path) -> dict[str, list[Path]]:
-    """Group complete recordings by subject ID.
-
-    Calls :func:`get_complete_recordings` and groups the resulting paths by
-    their parent subject directory name (e.g. ``"subject0001"``).
-
-    Args:
-        data_dir: Path to unicorn-data directory.
-
-    Returns:
-        Dict mapping subject ID strings to lists of recording paths.
-    """
-    grouped: dict[str, list[Path]] = defaultdict(list)
+    """Group complete recordings by subject ID."""
+    grouped: dict[str, list[Path]] = {}
     for rec_path in get_complete_recordings(data_dir):
         subject_id = rec_path.parent.parent.name
-        grouped[subject_id].append(rec_path)
-    return dict(grouped)
+        grouped.setdefault(subject_id, []).append(rec_path)
+    return grouped

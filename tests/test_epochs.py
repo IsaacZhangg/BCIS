@@ -158,15 +158,13 @@ def test_extract_left_right_epochs_skips_task_past_signal_end():
 def _make_pairs(n_trials, amplitude=10.0, channels=("C3", "C4")):
     """Helper: create pairs_by_channel dicts with controlled amplitude."""
     rng = np.random.default_rng(0)
-    pairs_by_ch = {}
-    for ch in channels:
-        pairs = []
-        for _ in range(n_trials):
-            baseline = rng.standard_normal(250) * amplitude
-            task = rng.standard_normal(375) * amplitude
-            pairs.append((baseline, task))
-        pairs_by_ch[ch] = pairs
-    return pairs_by_ch
+    return {
+        ch: [
+            (rng.standard_normal(250) * amplitude, rng.standard_normal(375) * amplitude)
+            for _ in range(n_trials)
+        ]
+        for ch in channels
+    }
 
 
 def test_reject_bad_epochs_drops_high_amplitude():
@@ -289,12 +287,12 @@ def test_reject_tighter_n_mad():
     left = _make_pairs(10, amplitude=10.0, channels=channels)
     right = _make_pairs(10, amplitude=10.0, channels=channels)
 
-    # Find the current max ptp across all trials to craft a moderate outlier
-    all_ptps = []
-    for i in range(10):
-        for ch in channels:
-            all_ptps.append(float(np.ptp(left[ch][i][1])))
-            all_ptps.append(float(np.ptp(right[ch][i][1])))
+    all_ptps = [
+        float(np.ptp(pairs[i][1]))
+        for ch in channels
+        for pairs in [left[ch], right[ch]]
+        for i in range(len(pairs))
+    ]
     ptps_arr = np.array(all_ptps)
     median = float(np.median(ptps_arr))
     mad = float(np.median(np.abs(ptps_arr - median)))

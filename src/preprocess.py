@@ -11,18 +11,7 @@ def bandpass_filter(
     l_freq: float = 1.0,
     h_freq: float = 40.0,
 ) -> np.ndarray:
-    """
-    Apply bandpass filter to remove DC drift and high-frequency noise.
-
-    Args:
-        data: 1D signal array
-        sfreq: Sampling frequency in Hz
-        l_freq: Low cutoff frequency (Hz)
-        h_freq: High cutoff frequency (Hz)
-
-    Returns:
-        Filtered signal
-    """
+    """Apply bandpass filter to a 1D signal."""
     return mne.filter.filter_data(
         data.reshape(1, -1), sfreq, l_freq=l_freq, h_freq=h_freq, verbose=False
     ).flatten()
@@ -33,44 +22,19 @@ def notch_filter(
     sfreq: float,
     freq: float = 60.0,
 ) -> np.ndarray:
-    """
-    Apply notch filter to remove power line interference.
-
-    Args:
-        data: 1D signal array
-        sfreq: Sampling frequency in Hz
-        freq: Frequency to notch out (Hz)
-
-    Returns:
-        Filtered signal
-    """
+    """Apply notch filter to remove power line interference from a 1D signal."""
     return mne.filter.notch_filter(
         data.reshape(1, -1), sfreq, freqs=freq, verbose=False
     ).flatten()
 
 
 def common_average_reference(data: np.ndarray) -> np.ndarray:
-    """Apply Common Average Reference (CAR) spatial filter.
-
-    Subtracts the mean across channels at each time point, removing
-    common-mode noise (electrode drift, residual line noise, etc.).
-
-    Args:
-        data: 2D array of shape (n_channels, n_samples).
-
-    Returns:
-        CAR-filtered data with same shape.
-    """
+    """Apply Common Average Reference (CAR) spatial filter."""
     return data - data.mean(axis=0, keepdims=True)
 
 
 def _patch_asrpy_numpy2() -> None:
-    """Fix asrpy numpy 2.x incompatibility.
-
-    ``np.diff()`` returns a 1-element array which numpy >=2.0 refuses to
-    convert via ``int()``.  We patch ``fit_eeg_distribution`` to squeeze
-    ``max_width`` to a scalar.
-    """
+    """Patch asrpy for numpy 2.x: squeeze np.diff() results to scalars."""
     import asrpy.asr as _asr
     import asrpy.asr_utils as _au
     from scipy.special import gamma, gammaincinv
@@ -167,23 +131,7 @@ def apply_asr(
     ch_names: list[str],
     cutoff: float = 20.0,
 ) -> np.ndarray:
-    """Apply Artifact Subspace Reconstruction to multichannel EEG.
-
-    ASR identifies high-variance artifact subspaces in the continuous signal
-    and reconstructs those segments, preserving all data rather than rejecting
-    entire trials.
-
-    Args:
-        data: 2D array of shape (n_channels, n_samples), already temporally
-            filtered (bandpass + notch).
-        sfreq: Sampling frequency in Hz.
-        ch_names: Channel name list matching rows of *data*.
-        cutoff: ASR rejection threshold in standard deviations of clean data.
-            Lower = more aggressive cleaning.
-
-    Returns:
-        Cleaned data with same shape as input.
-    """
+    """Apply Artifact Subspace Reconstruction to multichannel EEG."""
     info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types="eeg")
     raw = mne.io.RawArray(data, info, verbose=False)
 
@@ -195,15 +143,6 @@ def apply_asr(
 
 
 def preprocess_eeg(data: np.ndarray, sfreq: float) -> np.ndarray:
-    """
-    Full preprocessing pipeline: bandpass + notch filter.
-
-    Args:
-        data: 1D signal array (single channel)
-        sfreq: Sampling frequency in Hz
-
-    Returns:
-        Preprocessed signal
-    """
+    """Full preprocessing pipeline: bandpass + notch filter on a single channel."""
     filtered = bandpass_filter(data, sfreq)
     return notch_filter(filtered, sfreq)

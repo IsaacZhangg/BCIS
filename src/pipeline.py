@@ -33,7 +33,6 @@ from src.train import (
 )
 from src.validation import build_classwise_trial_groups
 
-# Map nested CV method names to pipeline display names
 _NESTED_TO_DISPLAY = {
     "lda": "FBCSP",
     "riemann": "Riemann",
@@ -56,9 +55,7 @@ def _print_step(step_idx: int, total_steps: int, title: str) -> None:
     print(f"\n[{step_idx}/{total_steps}] {title}")
 
 
-def _task_epochs(
-    pairs_by_ch: dict[str, list[tuple[np.ndarray, np.ndarray]]],
-) -> np.ndarray:
+def _task_epochs(pairs_by_ch: dict) -> np.ndarray:
     """Convert per-channel epoch pairs to (n_trials, n_channels, n_samples)."""
     return np.array(
         [[trial[1] for trial in pairs_by_ch[ch]] for ch in CHANNELS]
@@ -69,33 +66,12 @@ def _process_recording(
     rec_path: Path,
     sfreq: float,
     threshold_uv: float | None = None,
-) -> (
-    tuple[
-        dict[str, list[tuple[np.ndarray, np.ndarray]]],
-        dict[str, list[tuple[np.ndarray, np.ndarray]]],
-        int,
-        int,
-        int,
-        int,
-    ]
-    | None
-):
-    """Load, preprocess, epoch, and artifact-reject a single recording.
-
-    Args:
-        rec_path: Path to the recording CSV.
-        sfreq: Sampling frequency in Hz.
-        threshold_uv: Fixed rejection threshold.  When ``None``, adaptive
-            threshold is computed from this recording's data.
-
-    Returns:
-        Tuple of (left_pairs, right_pairs, n_left_raw, n_right_raw,
-        rej_left, rej_right) or ``None`` if nothing remains after rejection.
-    """
+) -> tuple | None:
+    """Load, preprocess, epoch, and artifact-reject a single recording."""
     data, events, _ = load_recording(rec_path)
 
-    left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
-    right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+    left_pairs_by_channel: dict = {}
+    right_pairs_by_channel: dict = {}
     for ch_idx, ch_name in enumerate(CHANNELS):
         signal = preprocess_eeg(data[ch_idx], sfreq)
         left, right = extract_left_right_epochs(
@@ -135,30 +111,12 @@ def _process_recording(
 
 
 def _split_epoch_pairs(
-    left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    left_pairs_by_channel: dict,
+    right_pairs_by_channel: dict,
     test_fraction: float,
     random_state: int = 42,
-) -> tuple[
-    dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    dict[str, list[tuple[np.ndarray, np.ndarray]]],
-]:
-    """Stratified split of epoch pairs into train and test before artifact rejection.
-
-    The split is performed on trial indices (same across all channels), so the
-    same trials end up in train/test for every channel.
-
-    Args:
-        left_pairs_by_channel: Left epoch pairs keyed by channel.
-        right_pairs_by_channel: Right epoch pairs keyed by channel.
-        test_fraction: Fraction of trials to hold out (0-1).
-        random_state: RNG seed for reproducibility.
-
-    Returns:
-        (train_left, train_right, test_left, test_right) dicts.
-    """
+) -> tuple[dict, dict, dict, dict]:
+    """Stratified split of epoch pairs into train/test before artifact rejection."""
     rng = np.random.default_rng(random_state)
     channels = list(left_pairs_by_channel.keys())
 
@@ -185,15 +143,11 @@ def _split_epoch_pairs(
 
 
 def _pairs_to_features(
-    left_pairs: dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    right_pairs: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    left_pairs: dict,
+    right_pairs: dict,
     sfreq: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert cleaned epoch pairs to feature arrays and labels.
-
-    Returns:
-        (X_features, X_multichannel, y)
-    """
+    """Convert cleaned epoch pairs to feature arrays and labels."""
     n_left = len(left_pairs[CHANNELS[0]])
     n_right = len(right_pairs[CHANNELS[0]])
 
@@ -213,23 +167,7 @@ def run_pipeline(
     training_config: TrainingConfig | None = None,
     quiet_output: bool = True,
 ) -> dict:
-    """Run the full training pipeline for left/right motor imagery classification.
-
-    Args:
-        data_dir: Path to unicorn-data directory.
-        output_dir: Path to save models and results.
-        holdout_fraction: Fraction of trials per subject to hold out as an
-            independent test set (0.0 = disabled, existing behaviour).
-            When > 0, epochs are split *before* artifact rejection.  The
-            rejection threshold is computed from the training portion only
-            and applied to both splits.
-        training_config: Optional experiment configuration. Defaults to
-            :class:`src.config.TrainingConfig`.
-        quiet_output: Reduce noisy third-party logs/warnings when ``True``.
-
-    Returns:
-        Dictionary with results.
-    """
+    """Run the full training pipeline for left/right motor imagery classification."""
     configure_console_output(quiet_output)
     _print_header("Left/Right Motor Imagery Classifier - Training Pipeline")
     cfg = training_config or TrainingConfig()
@@ -264,7 +202,6 @@ def run_pipeline(
     trial_ptps_by_subject: list[np.ndarray] = []
     trial_groups_by_subject: list[np.ndarray] = []
 
-    # Held-out data (only populated when holdout_fraction > 0)
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_holdout_by_subject: list[np.ndarray] = []
 
@@ -278,9 +215,8 @@ def run_pipeline(
                 f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
             )
 
-        # Extract epochs per channel (before artifact rejection)
-        left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
-        right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+        left_pairs_by_channel: dict = {}
+        right_pairs_by_channel: dict = {}
         for ch_idx, ch_name in enumerate(CHANNELS):
             signal = preprocess_eeg(data[ch_idx], sfreq)
             left, right = extract_left_right_epochs(
@@ -335,8 +271,6 @@ def run_pipeline(
             X_by_subject.append((X_feat, X_mc))
             y_by_subject.append(y)
             subject_ids.append(subject_id)
-            # Training portion already had global rejection from threshold;
-            # compute PTPs for in-fold rejection within CV on training portion
             trial_ptps_by_subject.append(compute_trial_max_ptp(X_mc))
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
@@ -353,7 +287,6 @@ def run_pipeline(
                 X_holdout_by_subject.append((np.empty((0, 0)), np.empty((0, 0, 0))))
                 y_holdout_by_subject.append(np.array([]))
         else:
-            # No holdout: skip global rejection — rejection moves into CV folds
             n_left = len(left_pairs_by_channel[CHANNELS[0]])
             n_right = len(right_pairs_by_channel[CHANNELS[0]])
 
@@ -365,10 +298,9 @@ def run_pipeline(
                 left_pairs_by_channel, right_pairs_by_channel, sfreq
             )
 
-            # Compute per-trial PTPs for in-fold rejection
             trial_ptps = compute_trial_max_ptp(X_mc)
 
-            # Informational: show how many would be flagged by global threshold
+            # Show how many would be flagged by global threshold
             median_ptp = float(np.median(trial_ptps))
             mad_ptp = float(np.median(np.abs(trial_ptps - median_ptp)))
             global_thresh = median_ptp + 4.0 * mad_ptp
@@ -381,7 +313,6 @@ def run_pipeline(
             X_by_subject.append((X_feat, X_mc))
             y_by_subject.append(y)
             subject_ids.append(subject_id)
-            # Track PTPs alongside subject data
             trial_ptps_by_subject.append(trial_ptps)
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
@@ -396,18 +327,14 @@ def run_pipeline(
     _print_step(3, 5, "Running cross-validation")
     print(f"({cfg.n_folds}-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
 
-    # Pass trial PTPs so artifact rejection happens inside each CV fold
-    ptps_arg = trial_ptps_by_subject if trial_ptps_by_subject else None
-    groups_arg = trial_groups_by_subject if trial_groups_by_subject else None
-
     cv_results = train_within_subject_cv_all_models(
         X_by_subject,
         y_by_subject,
         sfreq=sfreq,
         n_folds=cfg.n_folds,
-        trial_ptps_by_subject=ptps_arg,
+        trial_ptps_by_subject=trial_ptps_by_subject,
         split_strategy=cfg.split_strategy,
-        trial_groups_by_subject=groups_arg,
+        trial_groups_by_subject=trial_groups_by_subject,
         trial_group_size=cfg.trial_group_size,
         random_state=cfg.random_state,
         k_best=cfg.k_best,
@@ -422,7 +349,6 @@ def run_pipeline(
     svm_scores, svm_mean, svm_std = cv_results["svm"]
     ensemble_scores, ensemble_mean, ensemble_std = cv_results["ensemble"]
 
-    # Per-subject best score across all four classifiers (optimistic)
     best_scores = []
     best_methods_posthoc = []
     for fs, rs, ss, es in zip(
@@ -436,7 +362,6 @@ def run_pipeline(
     best_mean = float(np.mean(best_scores))
     best_std = float(np.std(best_scores))
 
-    # Nested model selection CV (unbiased)
     print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
     nested_scores, nested_mean, nested_std, nested_methods = (
         train_nested_model_selection_cv(
@@ -446,9 +371,9 @@ def run_pipeline(
             n_outer_folds=cfg.n_outer_folds,
             n_inner_folds=cfg.n_inner_folds,
             k_best=cfg.k_best,
-            trial_ptps_by_subject=ptps_arg,
+            trial_ptps_by_subject=trial_ptps_by_subject,
             split_strategy=cfg.split_strategy,
-            trial_groups_by_subject=groups_arg,
+            trial_groups_by_subject=trial_groups_by_subject,
             trial_group_size=cfg.trial_group_size,
             random_state=cfg.random_state,
             n_jobs=cfg.n_jobs,
@@ -459,7 +384,6 @@ def run_pipeline(
         )
     )
     runtime_seconds["cross_validation"] = time.perf_counter() - step_start
-    # Convert nested method names to display names for model saving
     nested_methods_display = [_NESTED_TO_DISPLAY[m] for m in nested_methods]
 
     print(
@@ -491,7 +415,6 @@ def run_pipeline(
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
 
-    # Held-out evaluation (when enabled)
     holdout_results: dict[str, float] = {}
     if holdout_fraction > 0 and X_holdout_by_subject:
         print("\n[3b/5] Evaluating held-out test sets")
@@ -539,7 +462,6 @@ def run_pipeline(
     if multi_session_subjects:
         for sid, paths in multi_session_subjects.items():
             print(f"  {sid}: {len(paths)} sessions, evaluating cross-session...")
-            # Use first two sessions: train on A, test on B
             result_a = _process_recording(paths[0], sfreq)
             result_b = _process_recording(paths[1], sfreq)
             if result_a is None or result_b is None:
@@ -571,7 +493,6 @@ def run_pipeline(
     for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
         zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
     ):
-        # For deployment: apply global rejection (train on all clean data)
         if trial_ptps_by_subject:
             ptps = trial_ptps_by_subject[i]
             median_ptp = float(np.median(ptps))
@@ -624,7 +545,6 @@ def run_pipeline(
         ho_mean = float(np.mean(list(holdout_results.values())))
         print(f"Held-out mean:                 {ho_mean:.1%}")
 
-    # Save results
     results: dict = {
         "task": "left_right_motor_imagery",
         "training_config": cfg.to_dict(),
