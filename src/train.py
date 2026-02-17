@@ -402,7 +402,7 @@ def train_within_subject_cv_all_models(
     n_jobs: int = 1,
     parallel_backend: ParallelBackend = "loky",
     max_blas_threads_per_worker: int = 1,
-    enable_band_cache: bool = False,
+    enable_band_cache: bool = True,
 ) -> dict[str, tuple[list[float], float, float]]:
     """Within-subject CV for all four classifiers in a single shared pass.
 
@@ -501,6 +501,7 @@ def train_within_subject_cv(
     trial_group_size: int = 5,
     random_state: int = 42,
     k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
+    enable_band_cache: bool = True,
 ) -> tuple[list[float], float, float]:
     """Within-subject CV using FBCSP + LDA.
 
@@ -524,6 +525,7 @@ def train_within_subject_cv(
         trial_group_size: Group size when groups are auto-generated.
         random_state: Random seed for deterministic splits.
         k_candidates: Candidate feature counts for inner-k selection.
+        enable_band_cache: Reuse precomputed per-band filtered trials.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
@@ -547,20 +549,32 @@ def train_within_subject_cv(
             groups=groups,
             random_state=random_state,
         )
+        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+        subject_band_cache = (
+            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+        )
         fold_scores = []
 
         for train_idx, test_idx in outer_splits:
-            trial_ptps = (
-                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-            )
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
-            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
-            )
+            if subject_band_cache is not None:
+                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+                    train_band_cache,
+                    test_band_cache,
+                    y_train,
+                    n_train_trials=len(train_idx),
+                    n_test_trials=len(test_idx),
+                )
+            else:
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+                    X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
+                )
 
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
@@ -812,6 +826,7 @@ def train_within_subject_cv_svm(
     trial_group_size: int = 5,
     random_state: int = 42,
     k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
+    enable_band_cache: bool = True,
 ) -> tuple[list[float], float, float]:
     """Within-subject CV using FBCSP + SVM.
 
@@ -835,6 +850,7 @@ def train_within_subject_cv_svm(
         trial_group_size: Group size when groups are auto-generated.
         random_state: Random seed for deterministic splits.
         k_candidates: Candidate feature counts for safe K clipping.
+        enable_band_cache: Reuse precomputed per-band filtered trials.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
@@ -858,20 +874,32 @@ def train_within_subject_cv_svm(
             groups=groups,
             random_state=random_state,
         )
+        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+        subject_band_cache = (
+            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+        )
         fold_scores = []
 
         for train_idx, test_idx in splits:
-            trial_ptps = (
-                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-            )
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
-            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
-            )
+            if subject_band_cache is not None:
+                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+                    train_band_cache,
+                    test_band_cache,
+                    y_train,
+                    n_train_trials=len(train_idx),
+                    n_test_trials=len(test_idx),
+                )
+            else:
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+                    X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
+                )
 
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
@@ -1186,7 +1214,7 @@ def train_nested_model_selection_cv(
     n_jobs: int = 1,
     parallel_backend: ParallelBackend = "loky",
     max_blas_threads_per_worker: int = 1,
-    enable_band_cache: bool = False,
+    enable_band_cache: bool = True,
     cache_scope: CacheScope = "subject",
 ) -> tuple[list[float], float, float, list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
@@ -1403,6 +1431,7 @@ def train_within_subject_cv_ensemble(
     random_state: int = 42,
     k_best: int = 10,
     k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
+    enable_band_cache: bool = True,
 ) -> tuple[list[float], float, float]:
     """Within-subject CV using soft-voting ensemble of FBCSP+LDA and FBCSP+SVM.
 
@@ -1424,6 +1453,7 @@ def train_within_subject_cv_ensemble(
         random_state: Random seed for deterministic splits.
         k_best: Maximum selected features for the shared FBCSP space.
         k_candidates: Candidate feature counts for safe K clipping.
+        enable_band_cache: Reuse precomputed per-band filtered trials.
 
     Returns:
         Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
@@ -1447,20 +1477,32 @@ def train_within_subject_cv_ensemble(
             groups=groups,
             random_state=random_state,
         )
+        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
+        subject_band_cache = (
+            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+        )
         fold_scores = []
 
         for train_idx, test_idx in splits:
-            trial_ptps = (
-                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-            )
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
-            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
-            )
+            if subject_band_cache is not None:
+                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+                    train_band_cache,
+                    test_band_cache,
+                    y_train,
+                    n_train_trials=len(train_idx),
+                    n_test_trials=len(test_idx),
+                )
+            else:
+                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+                    X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
+                )
 
             X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
             X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
