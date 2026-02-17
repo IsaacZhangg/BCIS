@@ -21,7 +21,7 @@ from src.epochs import (
     reject_bad_epochs,
 )
 from src.features import extract_lateralization_features
-from src.preprocess import preprocess_eeg
+from src.preprocess import preprocess_multichannel_eeg
 from src.runtime_output import configure_console_output
 from src.train import (
     cross_session_evaluate,
@@ -69,11 +69,12 @@ def _process_recording(
 ) -> tuple | None:
     """Load, preprocess, epoch, and artifact-reject a single recording."""
     data, events, _ = load_recording(rec_path)
+    preprocessed = preprocess_multichannel_eeg(data, sfreq)
 
     left_pairs_by_channel: dict = {}
     right_pairs_by_channel: dict = {}
     for ch_idx, ch_name in enumerate(CHANNELS):
-        signal = preprocess_eeg(data[ch_idx], sfreq)
+        signal = preprocessed[ch_idx]
         left, right = extract_left_right_epochs(
             signal,
             events,
@@ -214,11 +215,12 @@ def run_pipeline(
             raise ValueError(
                 f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
             )
+        preprocessed = preprocess_multichannel_eeg(data, sfreq)
 
         left_pairs_by_channel: dict = {}
         right_pairs_by_channel: dict = {}
         for ch_idx, ch_name in enumerate(CHANNELS):
-            signal = preprocess_eeg(data[ch_idx], sfreq)
+            signal = preprocessed[ch_idx]
             left, right = extract_left_right_epochs(
                 signal,
                 events,

@@ -13,9 +13,9 @@ def load_recording(
     csv_path: Path,
 ) -> tuple[np.ndarray, list[tuple[int, int, int]], float]:
     """Load a single recording: returns (n_channels × n_samples) data, events, sfreq."""
-    df = pd.read_csv(csv_path)
-    data = df[CHANNELS].values.T
-    stim = df["stim"].values
+    df = pd.read_csv(csv_path, usecols=[*CHANNELS, "stim"])
+    data = df[CHANNELS].to_numpy(copy=False).T
+    stim = df["stim"].to_numpy(copy=False)
 
     nonzero_idx = np.flatnonzero(stim)
     stim_vals = stim[nonzero_idx].astype(int)
@@ -31,7 +31,7 @@ def get_complete_recordings(data_dir: Path) -> list[Path]:
     """Find all complete recordings (those with 100 imagery trials)."""
     complete = []
     for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
-        stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].values
+        stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].to_numpy(copy=False)
         nonzero = stim[stim != 0].astype(int)
         phase3_count = np.sum((nonzero // 10) % 10 == 3)
         if phase3_count == 100:

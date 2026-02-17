@@ -9,6 +9,7 @@ from src.preprocess import (
     common_average_reference,
     notch_filter,
     preprocess_eeg,
+    preprocess_multichannel_eeg,
 )
 
 
@@ -60,6 +61,26 @@ def test_preprocess_eeg_full_pipeline():
     # Should be zero-centered and cleaned
     assert abs(np.mean(processed)) < 50
     assert processed.shape == raw.shape
+
+
+def test_multichannel_preprocess_matches_per_channel_pipeline():
+    """Batch preprocessing should match per-channel preprocessing semantics."""
+    sfreq = 250.0
+    n_channels = 8
+    n_samples = 1000
+    rng = np.random.default_rng(123)
+    raw = (
+        73000
+        + rng.standard_normal((n_channels, n_samples)) * 10
+        + 0.5 * np.sin(2 * np.pi * 60 * np.arange(n_samples) / sfreq)[None, :]
+    )
+
+    batched = preprocess_multichannel_eeg(raw, sfreq)
+    per_channel = np.vstack(
+        [preprocess_eeg(raw[ch], sfreq) for ch in range(n_channels)]
+    )
+
+    np.testing.assert_allclose(batched, per_channel, atol=1e-10, rtol=1e-8)
 
 
 def test_common_average_reference_removes_common_signal():

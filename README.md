@@ -32,7 +32,7 @@ Signal quality with the consumer-grade 8-channel Unicorn headset remains the pri
 ```
 CSV files (8ch, 250Hz)
   -> data_loader.py    Parse recordings, extract event markers
-  -> preprocess.py     Bandpass (1-40Hz) + notch (60Hz) filtering
+  -> preprocess.py     Bandpass (1-40Hz) + notch (60Hz) filtering (batched over channels)
   -> epochs.py         Baseline (1.0s) / task (3.0s) windows, per-trial PTP
   -> features.py       45 handcrafted features (Laplacian C3/C4, ERD, Hjorth, coherence, entropy)
   -> train.py          4 classifiers with in-fold artifact rejection + nested CV
@@ -43,7 +43,7 @@ CSV files (8ch, 250Hz)
 
 1. **FBCSP+LDA**: 8 motor bands x 4 CSP + 45 handcrafted features -> SelectKBest (nested CV k) -> StandardScaler -> shrinkage LDA
 2. **Riemannian**: Covariances (OAS) -> TangentSpace (Riemann) -> LogisticRegression
-3. **FBCSP+SVM**: Same FBCSP features -> SelectKBest -> SVC (RBF, C=10)
+3. **FBCSP+SVM**: Same FBCSP features -> SelectKBest -> SVC (RBF, C=20)
 4. **Ensemble**: LDA + SVM soft voting (averaged probabilities)
 
 ### Key design choices
@@ -53,6 +53,7 @@ CSV files (8ch, 250Hz)
 - **Nested CV**: Inner 7-fold selects best classifier, outer 10-fold evaluates — unbiased estimate
 - **Subject-level parallelism**: joblib dispatch with BLAS thread capping
 - **Bandpass caching**: Precomputed per subject, sliced by CV indices
+- **Redundant-work elimination**: batched multichannel preprocessing, shared calibrated SVM fits in shared-eval paths, and no duplicate FBCSP filtering when training final models
 
 ## Project Structure
 

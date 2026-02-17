@@ -124,6 +124,19 @@ def _extract_fbcsp_features(
     Returns:
         Tuple of (train_features, test_features, list of (fitted_csp, band) pairs).
     """
+    # Final-model training passes the same tensor as train/test; avoid filtering it twice.
+    if X_train is X_test:
+        shared_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
+        return _extract_fbcsp_features_prefiltered(
+            shared_filtered,
+            shared_filtered,
+            y_train,
+            bands=bands,
+            n_components=n_components,
+            n_train_trials=X_train.shape[0],
+            n_test_trials=X_test.shape[0],
+        )
+
     train_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
     test_filtered = _precompute_bandpassed(X_test, sfreq, bands=bands)
     return _extract_fbcsp_features_prefiltered(
@@ -361,7 +374,13 @@ def _evaluate_subject_all_models(
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            svm = SVC(kernel="rbf", C=20.0, gamma="scale")
+            svm = SVC(
+                kernel="rbf",
+                C=20.0,
+                gamma="scale",
+                probability=True,
+                random_state=42,
+            )
             svm.fit(X_train_scaled, y_train)
             fold_scores["svm"].append(float(svm.score(X_test_scaled, y_test)))
 
@@ -371,11 +390,7 @@ def _evaluate_subject_all_models(
             lda_ens.fit(X_train_scaled, y_train)
             proba_lda = lda_ens.predict_proba(X_test_scaled)
 
-            svm_prob = SVC(
-                kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
-            )
-            svm_prob.fit(X_train_scaled, y_train)
-            proba_svm = svm_prob.predict_proba(X_test_scaled)
+            proba_svm = svm.predict_proba(X_test_scaled)
 
             avg_proba = (proba_lda + proba_svm) / 2
             preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
@@ -921,7 +936,13 @@ def train_within_subject_cv_svm(
             X_train_scaled = scaler.fit_transform(X_train_sel)
             X_test_scaled = scaler.transform(X_test_sel)
 
-            svm = SVC(kernel="rbf", C=20.0, gamma="scale")
+            svm = SVC(
+                kernel="rbf",
+                C=20.0,
+                gamma="scale",
+                probability=True,
+                random_state=42,
+            )
             svm.fit(X_train_scaled, y_train)
             fold_scores.append(svm.score(X_test_scaled, y_test))
 
@@ -1015,31 +1036,41 @@ def _evaluate_classifiers_batch(
     _, counts = np.unique(y_train, return_counts=True)
     priors = counts / counts.sum()
 
-    if "lda" in fbcsp_names:
-        lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
-        lda.fit(X_train_scaled, y_train)
-        scores["lda"] = float(lda.score(X_test_scaled, y_test))
-
-    if "svm" in fbcsp_names:
-        svm = SVC(kernel="rbf", C=20.0, gamma="scale")
-        svm.fit(X_train_scaled, y_train)
-        scores["svm"] = float(svm.score(X_test_scaled, y_test))
-
-    if "ensemble" in fbcsp_names:
-        lda_ens = LinearDiscriminantAnalysis(
+    lda_model: LinearDiscriminantAnalysis | None = None
+    if "lda" in fbcsp_names or "ensemble" in fbcsp_names:
+        lda_model = LinearDiscriminantAnalysis(
             solver="lsqr", shrinkage="auto", priors=priors
         )
-        lda_ens.fit(X_train_scaled, y_train)
-        proba_lda = lda_ens.predict_proba(X_test_scaled)
+        lda_model.fit(X_train_scaled, y_train)
 
-        svm_prob = SVC(
-            kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
+    if "lda" in fbcsp_names and lda_model is not None:
+        scores["lda"] = float(lda_model.score(X_test_scaled, y_test))
+
+    svm_model: SVC | None = None
+    if "svm" in fbcsp_names or "ensemble" in fbcsp_names:
+        svm_model = SVC(
+            kernel="rbf",
+            C=20.0,
+            gamma="scale",
+            probability=True,
+            random_state=42,
         )
-        svm_prob.fit(X_train_scaled, y_train)
-        proba_svm = svm_prob.predict_proba(X_test_scaled)
+        svm_model.fit(X_train_scaled, y_train)
+
+    if "svm" in fbcsp_names and svm_model is not None:
+        scores["svm"] = float(svm_model.score(X_test_scaled, y_test))
+
+    if "ensemble" in fbcsp_names:
+        if lda_model is None:
+            raise RuntimeError("Internal error: LDA model missing for ensemble")
+        proba_lda = lda_model.predict_proba(X_test_scaled)
+
+        if svm_model is None:
+            raise RuntimeError("Internal error: SVM model missing for ensemble")
+        proba_svm = svm_model.predict_proba(X_test_scaled)
 
         avg_proba = (proba_lda + proba_svm) / 2
-        preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
+        preds = lda_model.classes_[np.argmax(avg_proba, axis=1)]
         scores["ensemble"] = float(np.mean(preds == y_test))
 
     return scores
