@@ -33,7 +33,7 @@
   "n_subjects": 10,
   "fbcsp_scores": {
     "subject0001": 0.48500000000000004,
-    "subject0002": 0.40123015873015877,
+    "subject0002": 0.43873015873015875,
     "subject0004": 0.42777777777777776,
     "subject0005": 0.5675,
     "subject0006": 0.9,
@@ -81,7 +81,7 @@
   },
   "best_scores": {
     "subject0001": 0.49333333333333335,
-    "subject0002": 0.41730158730158734,
+    "subject0002": 0.43873015873015875,
     "subject0004": 0.6288888888888888,
     "subject0005": 0.5675,
     "subject0006": 0.9,
@@ -93,7 +93,7 @@
   },
   "best_methods_posthoc": {
     "subject0001": "SVM",
-    "subject0002": "Riemann",
+    "subject0002": "FBCSP",
     "subject0004": "SVM",
     "subject0005": "FBCSP",
     "subject0006": "FBCSP",
@@ -104,16 +104,16 @@
     "subject0011": "Riemann"
   },
   "nested_scores": {
-    "subject0001": 0.47250000000000003,
-    "subject0002": 0.39884920634920634,
-    "subject0004": 0.6288888888888888,
-    "subject0005": 0.5588888888888889,
-    "subject0006": 0.8799999999999999,
-    "subject0007": 0.64,
-    "subject0008": 0.6555555555555556,
-    "subject0009": 0.5396825396825398,
-    "subject0010": 0.821111111111111,
-    "subject0011": 0.6039682539682539
+    "subject0001": 0.4947222222222222,
+    "subject0002": 0.3196825396825397,
+    "subject0004": 0.46111111111111114,
+    "subject0005": 0.565,
+    "subject0006": 0.85,
+    "subject0007": 0.61,
+    "subject0008": 0.6144444444444445,
+    "subject0009": 0.4533730158730158,
+    "subject0010": 0.8311111111111111,
+    "subject0011": 0.4962301587301587
   },
   "nested_methods": {
     "subject0001": "SVM",
@@ -127,27 +127,27 @@
     "subject0010": "FBCSP",
     "subject0011": "Riemann"
   },
-  "fbcsp_mean_accuracy": 0.5926269841269842,
+  "fbcsp_mean_accuracy": 0.5963769841269841,
   "riemann_mean_accuracy": 0.48059523809523813,
   "svm_mean_accuracy": 0.595845238095238,
   "ensemble_mean_accuracy": 0.5733730158730159,
-  "best_mean_accuracy": 0.6379285714285714,
-  "best_std_accuracy": 0.14076085944439354,
-  "nested_mean_accuracy": 0.6199444444444444,
-  "nested_std_accuracy": 0.13816485109135931,
+  "best_mean_accuracy": 0.6400714285714286,
+  "best_std_accuracy": 0.13751146084763075,
+  "nested_mean_accuracy": 0.5695674603174603,
+  "nested_std_accuracy": 0.15792519047948578,
   "subjects_with_signal": [
-    "subject0004",
     "subject0006",
     "subject0007",
     "subject0008",
-    "subject0010",
-    "subject0011"
+    "subject0010"
   ],
   "subjects_at_chance": [
     "subject0001",
     "subject0002",
+    "subject0004",
     "subject0005",
-    "subject0009"
+    "subject0009",
+    "subject0011"
   ],
   "model_paths": {
     "subject0001": "models/subject0001_svm.joblib",
@@ -162,11 +162,11 @@
     "subject0011": "models/subject0011_riemann.joblib"
   },
   "runtime_seconds": {
-    "find_recordings": 0.7377930830116384,
-    "load_preprocess": 5.415396999975201,
-    "cross_validation": 13.299748875026125,
-    "cross_session_eval": 0.9031716249883175,
-    "train_and_save_models": 4.225424791977275,
-    "total": 24.582270624989178
+    "find_recordings": 0.7670630000066012,
+    "load_preprocess": 5.443925375002436,
+    "cross_validation": 13.662212124967482,
+    "cross_session_eval": 0.8663385409745388,
+    "train_and_save_models": 2.354451458028052,
+    "total": 23.094168291951064
   }
 }
