@@ -37,6 +37,7 @@ CSV files (8ch, 250Hz)
   -> features.py       45 handcrafted features (Laplacian C3/C4, ERD, Hjorth, coherence, entropy)
   -> train.py          4 classifiers with in-fold artifact rejection + nested CV
   -> pipeline.py       Orchestration, model saving, optional held-out & cross-session eval
+  -> transfer.py       Cross-subject Riemannian transfer learning (EA + LOSO CV)
 ```
 
 ### Classifiers
@@ -45,6 +46,17 @@ CSV files (8ch, 250Hz)
 2. **Riemannian**: Covariances (OAS) -> TangentSpace (Riemann) -> LogisticRegression
 3. **FBCSP+SVM**: Same FBCSP features -> SelectKBest -> SVC (RBF, C=20)
 4. **Ensemble**: LDA + SVM soft voting (averaged probabilities)
+
+### Cross-Subject Transfer Learning
+
+`src/transfer.py` implements Euclidean Alignment (EA) for cross-subject Riemannian transfer:
+
+1. Estimate covariance matrices per subject using Ledoit-Wolf shrinkage
+2. Euclidean Alignment: re-center each subject's covariances to identity (removes inter-subject impedance/placement variability)
+3. Leave-one-subject-out CV: train on aligned data from all other subjects, test on held-out
+4. Optional fine-tuning: re-center tangent space on target subject's mean
+
+Loads data from both `Data/unicorn-data/` and `Data/MI_DATA_NEW/`, accepting recordings with any number of trials (not just 100).
 
 ### Key design choices
 
@@ -91,8 +103,11 @@ Place Unicorn CSV exports in `Data/unicorn-data/subject{NNNN}/session{NNN}/recor
 ## Usage
 
 ```bash
-# Run full pipeline
+# Run full pipeline (includes cross-subject transfer eval if MI_DATA_NEW exists)
 uv run python -m src.pipeline
+
+# Run cross-subject transfer evaluation standalone
+uv run python -m src.transfer
 
 # Run tests
 uv run pytest tests/ -v
