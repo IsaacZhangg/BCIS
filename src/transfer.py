@@ -266,6 +266,115 @@ def regularized_within_subject_cv(
     return scores
 
 
+def adaptive_augmented_cv(
+    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    sfreq: float = 250.0,
+    weakness_threshold: float = 0.55,
+    n_folds: int = 10,
+    random_state: int = 42,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Within-subject FBCSP+LDA CV, augmenting weak subjects with closest neighbor's data.
+
+    For each subject:
+    1. Run baseline FBCSP+LDA within-subject CV
+    2. If baseline < weakness_threshold, re-run with closest subject's data added
+       to training folds (CSP refitted on pooled data)
+    3. Strong subjects keep their baseline score
+
+    Closest subject is determined by Riemannian distance between raw covariance means.
+
+    Args:
+        subjects: Dict mapping subject_id to (X_multichannel, y).
+        sfreq: Sampling frequency.
+        weakness_threshold: Subjects below this accuracy get augmented.
+        n_folds: Number of CV folds.
+        random_state: Random seed.
+
+    Returns:
+        Tuple of (baseline_scores, adaptive_scores) dicts mapping subject_id to accuracy.
+    """
+    from sklearn.feature_selection import SelectKBest, f_classif
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.preprocessing import StandardScaler
+
+    from src.train import (
+        DEFAULT_K_CANDIDATES,
+        _extract_fbcsp_features,
+        _safe_k_values,
+    )
+
+    # Compute raw covariance distances for nearest-neighbor lookup
+    cov_estimator = Covariances(estimator="lwf")
+    raw_means: dict[str, np.ndarray] = {}
+    for sid in sorted(subjects.keys()):
+        X_mc, y = subjects[sid]
+        covs = cov_estimator.fit_transform(X_mc)
+        raw_means[sid] = mean_covariance(covs, metric="riemann")
+
+    def _find_closest(target_sid: str) -> str:
+        from pyriemann.utils.distance import distance_riemann
+
+        dists = {
+            s: float(distance_riemann(raw_means[target_sid], raw_means[s]))
+            for s in subjects
+            if s != target_sid
+        }
+        return min(dists, key=dists.get)
+
+    def _run_fbcsp_cv(target_sid: str, aug_sid: str | None = None) -> float:
+        X_mc_target, y_target = subjects[target_sid]
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        fold_scores: list[float] = []
+
+        for tr_idx, te_idx in skf.split(X_mc_target, y_target):
+            X_mc_tr = X_mc_target[tr_idx]
+            y_tr = y_target[tr_idx]
+
+            if aug_sid is not None:
+                X_mc_aug, y_aug = subjects[aug_sid]
+                X_mc_tr = np.vstack([X_mc_tr, X_mc_aug])
+                y_tr = np.concatenate([y_tr, y_aug])
+
+            fbcsp_tr, fbcsp_te, _ = _extract_fbcsp_features(
+                X_mc_tr, X_mc_target[te_idx], y_tr, sfreq
+            )
+            if fbcsp_tr.shape[1] == 0:
+                continue
+            k_vals = _safe_k_values(
+                fbcsp_tr.shape[1], len(y_tr), 10, DEFAULT_K_CANDIDATES
+            )
+            if not k_vals:
+                continue
+
+            sel = SelectKBest(f_classif, k=k_vals[-1])
+            X_tr = sel.fit_transform(fbcsp_tr, y_tr)
+            X_te = sel.transform(fbcsp_te)
+            sc = StandardScaler()
+            from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+            lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+            lda.fit(sc.fit_transform(X_tr), y_tr)
+            fold_scores.append(float(lda.score(sc.transform(X_te), y_target[te_idx])))
+
+        return float(np.mean(fold_scores)) if fold_scores else 0.5
+
+    baseline_scores: dict[str, float] = {}
+    adaptive_scores: dict[str, float] = {}
+
+    for sid in sorted(subjects.keys()):
+        baseline = _run_fbcsp_cv(sid)
+        baseline_scores[sid] = baseline
+
+        if baseline < weakness_threshold:
+            closest = _find_closest(sid)
+            augmented = _run_fbcsp_cv(sid, aug_sid=closest)
+            adaptive_scores[sid] = augmented
+        else:
+            adaptive_scores[sid] = baseline
+
+    return baseline_scores, adaptive_scores
+
+
 def loso_cv(
     subjects: dict[str, tuple[np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
@@ -377,64 +486,55 @@ def run_transfer_evaluation(
         n_right = int(np.sum(y == 1))
         print(f"  {sid}: {len(y)} trials ({n_left}L/{n_right}R)")
 
-    print("\nRunning Riemannian within-subject CV (baseline, no shrinkage)...")
-    baseline_scores = regularized_within_subject_cv(
-        subjects, sfreq=sfreq, shrinkage_k=0.0
-    )
-    baseline_mean = float(np.mean(list(baseline_scores.values())))
+    print("\nRunning adaptive augmented FBCSP+LDA CV...")
+    fbcsp_base, fbcsp_adaptive = adaptive_augmented_cv(subjects, sfreq=sfreq)
+    fbcsp_base_mean = float(np.mean(list(fbcsp_base.values())))
+    fbcsp_adp_mean = float(np.mean(list(fbcsp_adaptive.values())))
 
-    print("Running regularized within-subject CV (covariance shrinkage)...")
-    reg_scores = regularized_within_subject_cv(subjects, sfreq=sfreq)
-    reg_mean = float(np.mean(list(reg_scores.values())))
-
-    print("Running LOSO CV (no fine-tuning)...")
+    print("Running LOSO CV...")
     loso_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=False)
     loso_mean = float(np.mean(list(loso_scores.values())))
 
-    print("Running LOSO CV (with fine-tuning)...")
-    loso_ft_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=True)
-    loso_ft_mean = float(np.mean(list(loso_ft_scores.values())))
-
     # Print comparison table
-    header = f"\n{'Subject':<16}{'Riemann':>10}{'Reg-Riem':>10}{'Delta':>8}"
+    header = f"\n{'Subject':<16}{'FBCSP':>8}{'Adaptive':>10}{'Delta':>8}"
     if within_subject_scores:
-        header += f"  {'Nested':>10}"
-    header += f"{'LOSO':>10}"
+        header += f"  {'Nested':>8}"
+    header += f"{'LOSO':>8}"
     print(header)
     print("-" * len(header))
 
-    for sid in sorted(reg_scores.keys()):
-        base = baseline_scores.get(sid, 0.5)
-        reg = reg_scores[sid]
-        delta = reg - base
+    for sid in sorted(fbcsp_base.keys()):
+        base = fbcsp_base[sid]
+        adp = fbcsp_adaptive[sid]
+        delta = adp - base
         sign = "+" if delta >= 0 else ""
-        row = f"  {sid:<14}{base:>9.1%}{reg:>9.1%}{sign}{delta:>6.1%}"
+        weak = " *" if base < 0.55 else ""
+        row = f"  {sid:<14}{base:>7.1%}{adp:>9.1%}{sign}{delta:>6.1%}"
         if within_subject_scores and sid in within_subject_scores:
-            row += f"  {within_subject_scores[sid]:>9.1%}"
+            row += f"  {within_subject_scores[sid]:>7.1%}"
         elif within_subject_scores:
-            row += f"  {'n/a':>10}"
-        row += f"{loso_scores[sid]:>9.1%}"
+            row += f"  {'n/a':>8}"
+        row += f"{loso_scores[sid]:>7.1%}{weak}"
         print(row)
 
     if within_subject_scores:
         ws_mean = float(np.mean(list(within_subject_scores.values())))
-        print(f"\n  Nested (best-of-4) mean: {ws_mean:.1%}")
-    print(f"  Riemann baseline mean:   {baseline_mean:.1%}")
-    print(f"  Reg-Riemann mean:        {reg_mean:.1%}")
-    delta_mean = reg_mean - baseline_mean
+        print(f"\n  Nested (best-of-4) mean:  {ws_mean:.1%}")
+    print(f"  FBCSP+LDA baseline mean:  {fbcsp_base_mean:.1%}")
+    print(f"  Adaptive augmented mean:  {fbcsp_adp_mean:.1%}")
+    delta_mean = fbcsp_adp_mean - fbcsp_base_mean
     sign = "+" if delta_mean >= 0 else ""
-    print(f"  Shrinkage delta:         {sign}{delta_mean:.1%}")
-    print(f"  LOSO mean:               {loso_mean:.1%}")
+    print(f"  Augmentation delta:       {sign}{delta_mean:.1%}")
+    print(f"  LOSO mean:                {loso_mean:.1%}")
+    print("  (* = weak subject, augmented with closest neighbor)")
 
     return {
-        "baseline_scores": baseline_scores,
-        "baseline_mean": baseline_mean,
-        "reg_scores": reg_scores,
-        "reg_mean": reg_mean,
+        "fbcsp_base_scores": fbcsp_base,
+        "fbcsp_base_mean": fbcsp_base_mean,
+        "fbcsp_adaptive_scores": fbcsp_adaptive,
+        "fbcsp_adaptive_mean": fbcsp_adp_mean,
         "loso_scores": loso_scores,
-        "loso_ft_scores": loso_ft_scores,
         "loso_mean": loso_mean,
-        "loso_ft_mean": loso_ft_mean,
         "n_subjects": len(subjects),
     }
 

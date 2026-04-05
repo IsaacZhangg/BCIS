@@ -188,10 +188,10 @@ def test_run_transfer_evaluation_returns_results(tmp_path):
 
     results = run_transfer_evaluation(data_dirs=[tmp_path])
 
+    assert "fbcsp_base_scores" in results
+    assert "fbcsp_adaptive_scores" in results
     assert "loso_scores" in results
-    assert "loso_ft_scores" in results
     assert "loso_mean" in results
-    assert "loso_ft_mean" in results
     assert len(results["loso_scores"]) == 3
 
 
