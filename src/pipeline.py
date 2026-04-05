@@ -170,7 +170,7 @@ def _augment_weak_subjects(
     subject_ids: list[str],
     nested_scores: list[float],
     donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    weakness_threshold: float = 0.55,
+    weakness_threshold: float = 0.50,
     sfreq: float = 250.0,
     trial_group_size: int = 1,
 ) -> tuple[
@@ -179,51 +179,54 @@ def _augment_weak_subjects(
     list[np.ndarray],
     list[np.ndarray],
 ]:
-    """Augment weak subjects' data with their closest neighbor from the donor pool.
+    """Augment weak subjects' data with the best donor selected by inner CV.
 
-    For each subject whose nested_score < weakness_threshold, find the closest
-    subject in donor_subjects by Riemannian distance (raw covariance means),
-    then concatenate the donor's features, multichannel data, labels, PTPs,
-    and trial groups into the target's arrays.
+    For each subject whose nested_score < weakness_threshold:
+    1. Try each candidate donor via 5-fold FBCSP+LDA CV
+    2. Pick the donor that gives the highest augmented CV accuracy
+    3. Concatenate the best donor's data into the target's arrays
 
     Strong subjects are left unchanged.
-
-    Args:
-        X_by_subject: List of (X_features, X_multichannel) per subject.
-        y_by_subject: List of label arrays per subject.
-        trial_ptps_by_subject: List of per-trial PTP arrays per subject.
-        trial_groups_by_subject: List of per-trial group arrays per subject.
-        subject_ids: Subject ID strings (parallel to the lists above).
-        nested_scores: Per-subject nested CV scores from the first pass.
-        donor_subjects: Dict from load_all_subjects() with (X_features, X_mc, y) 3-tuples.
-            This pool includes subjects from ALL data directories (unicorn-data + MI_DATA_NEW).
-        weakness_threshold: Subjects below this nested score get augmented.
-        sfreq: Sampling frequency.
-        trial_group_size: Group size for trial group construction.
-
-    Returns:
-        Augmented versions of (X_by_subject, y_by_subject, trial_ptps_by_subject, trial_groups_by_subject).
     """
-    from pyriemann.estimation import Covariances
-    from pyriemann.utils.distance import distance_riemann
-    from pyriemann.utils.mean import mean_covariance
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.feature_selection import SelectKBest, f_classif
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.preprocessing import StandardScaler
 
     from src.epochs import compute_trial_max_ptp
+    from src.train import (
+        DEFAULT_K_CANDIDATES,
+        _extract_fbcsp_features,
+        _safe_k_values,
+    )
     from src.validation import build_classwise_trial_groups
 
-    # Compute Riemannian means for distance computation
-    cov_est = Covariances(estimator="lwf")
-    donor_means: dict[str, np.ndarray] = {}
-    for sid, (_, X_mc_d, _) in donor_subjects.items():
-        covs = cov_est.fit_transform(X_mc_d)
-        donor_means[sid] = mean_covariance(covs, metric="riemann")
-
-    # Also compute means for current subjects
-    target_means: dict[str, np.ndarray] = {}
-    for i, sid in enumerate(subject_ids):
-        _, X_mc = X_by_subject[i]
-        covs = cov_est.fit_transform(X_mc)
-        target_means[sid] = mean_covariance(covs, metric="riemann")
+    def _score_donor(target_feat, target_mc, target_y, donor_feat, donor_mc, donor_y):
+        """5-fold FBCSP+handcrafted CV score with donor-augmented training."""
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        scores = []
+        for tr, te in skf.split(target_mc, target_y):
+            mc_tr = np.vstack([target_mc[tr], donor_mc])
+            y_tr = np.concatenate([target_y[tr], donor_y])
+            fbcsp_tr, fbcsp_te, _ = _extract_fbcsp_features(
+                mc_tr, target_mc[te], y_tr, sfreq
+            )
+            if fbcsp_tr.shape[1] == 0:
+                continue
+            hc_tr = np.vstack([target_feat[tr], donor_feat])
+            X_tr = np.hstack([fbcsp_tr, hc_tr])
+            X_te = np.hstack([fbcsp_te, target_feat[te]])
+            k_vals = _safe_k_values(X_tr.shape[1], len(y_tr), 10, DEFAULT_K_CANDIDATES)
+            if not k_vals:
+                continue
+            sel = SelectKBest(f_classif, k=k_vals[-1])
+            Xtr = sel.fit_transform(X_tr, y_tr)
+            Xte = sel.transform(X_te)
+            sc = StandardScaler()
+            lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+            lda.fit(sc.fit_transform(Xtr), y_tr)
+            scores.append(float(lda.score(sc.transform(Xte), target_y[te])))
+        return float(np.mean(scores)) if scores else 0.5
 
     aug_X = list(X_by_subject)
     aug_y = list(y_by_subject)
@@ -234,24 +237,27 @@ def _augment_weak_subjects(
         if score >= weakness_threshold:
             continue
 
-        # Find closest donor (excluding self)
+        target_feat, target_mc = X_by_subject[i]
+        target_y = y_by_subject[i]
+
+        # Try all donors, pick the best by inner CV
         best_donor = None
-        best_dist = float("inf")
-        for donor_sid, donor_mean in donor_means.items():
+        best_cv_score = 0.0
+        for donor_sid, (donor_feat, donor_mc, donor_y) in donor_subjects.items():
             if donor_sid == sid:
                 continue
-            d = float(distance_riemann(target_means[sid], donor_mean))
-            if d < best_dist:
-                best_dist = d
+            cv_score = _score_donor(
+                target_feat, target_mc, target_y, donor_feat, donor_mc, donor_y
+            )
+            if cv_score > best_cv_score:
+                best_cv_score = cv_score
                 best_donor = donor_sid
 
         if best_donor is None:
             continue
 
         donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
-        target_feat, target_mc = aug_X[i]
 
-        # Concatenate target + donor
         new_feat = np.vstack([target_feat, donor_feat])
         new_mc = np.vstack([target_mc, donor_mc])
         new_y = np.concatenate([aug_y[i], donor_y])
@@ -264,7 +270,8 @@ def _augment_weak_subjects(
         aug_groups[i] = new_groups
 
         print(
-            f"    {sid}: augmented with {best_donor} (d={best_dist:.2f}, +{len(donor_y)} trials)"
+            f"    {sid}: augmented with {best_donor} "
+            f"(inner-CV={best_cv_score:.1%}, +{len(donor_y)} trials)"
         )
 
     return aug_X, aug_y, aug_ptps, aug_groups
@@ -554,7 +561,7 @@ def run_pipeline(
             subject_ids,
             nested_scores,
             donor_subjects,
-            weakness_threshold=0.55,
+            weakness_threshold=0.50,
             sfreq=sfreq,
             trial_group_size=cfg.trial_group_size,
         )
