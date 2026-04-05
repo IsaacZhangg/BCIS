@@ -162,6 +162,114 @@ def _pairs_to_features(
     return X_features, X_multichannel, y
 
 
+def _augment_weak_subjects(
+    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
+    y_by_subject: list[np.ndarray],
+    trial_ptps_by_subject: list[np.ndarray],
+    trial_groups_by_subject: list[np.ndarray],
+    subject_ids: list[str],
+    nested_scores: list[float],
+    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    weakness_threshold: float = 0.55,
+    sfreq: float = 250.0,
+    trial_group_size: int = 1,
+) -> tuple[
+    list[tuple[np.ndarray, np.ndarray]],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+]:
+    """Augment weak subjects' data with their closest neighbor from the donor pool.
+
+    For each subject whose nested_score < weakness_threshold, find the closest
+    subject in donor_subjects by Riemannian distance (raw covariance means),
+    then concatenate the donor's features, multichannel data, labels, PTPs,
+    and trial groups into the target's arrays.
+
+    Strong subjects are left unchanged.
+
+    Args:
+        X_by_subject: List of (X_features, X_multichannel) per subject.
+        y_by_subject: List of label arrays per subject.
+        trial_ptps_by_subject: List of per-trial PTP arrays per subject.
+        trial_groups_by_subject: List of per-trial group arrays per subject.
+        subject_ids: Subject ID strings (parallel to the lists above).
+        nested_scores: Per-subject nested CV scores from the first pass.
+        donor_subjects: Dict from load_all_subjects() with (X_features, X_mc, y) 3-tuples.
+            This pool includes subjects from ALL data directories (unicorn-data + MI_DATA_NEW).
+        weakness_threshold: Subjects below this nested score get augmented.
+        sfreq: Sampling frequency.
+        trial_group_size: Group size for trial group construction.
+
+    Returns:
+        Augmented versions of (X_by_subject, y_by_subject, trial_ptps_by_subject, trial_groups_by_subject).
+    """
+    from pyriemann.estimation import Covariances
+    from pyriemann.utils.distance import distance_riemann
+    from pyriemann.utils.mean import mean_covariance
+
+    from src.epochs import compute_trial_max_ptp
+    from src.validation import build_classwise_trial_groups
+
+    # Compute Riemannian means for distance computation
+    cov_est = Covariances(estimator="lwf")
+    donor_means: dict[str, np.ndarray] = {}
+    for sid, (_, X_mc_d, _) in donor_subjects.items():
+        covs = cov_est.fit_transform(X_mc_d)
+        donor_means[sid] = mean_covariance(covs, metric="riemann")
+
+    # Also compute means for current subjects
+    target_means: dict[str, np.ndarray] = {}
+    for i, sid in enumerate(subject_ids):
+        _, X_mc = X_by_subject[i]
+        covs = cov_est.fit_transform(X_mc)
+        target_means[sid] = mean_covariance(covs, metric="riemann")
+
+    aug_X = list(X_by_subject)
+    aug_y = list(y_by_subject)
+    aug_ptps = list(trial_ptps_by_subject)
+    aug_groups = list(trial_groups_by_subject)
+
+    for i, (sid, score) in enumerate(zip(subject_ids, nested_scores)):
+        if score >= weakness_threshold:
+            continue
+
+        # Find closest donor (excluding self)
+        best_donor = None
+        best_dist = float("inf")
+        for donor_sid, donor_mean in donor_means.items():
+            if donor_sid == sid:
+                continue
+            d = float(distance_riemann(target_means[sid], donor_mean))
+            if d < best_dist:
+                best_dist = d
+                best_donor = donor_sid
+
+        if best_donor is None:
+            continue
+
+        donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
+        target_feat, target_mc = aug_X[i]
+
+        # Concatenate target + donor
+        new_feat = np.vstack([target_feat, donor_feat])
+        new_mc = np.vstack([target_mc, donor_mc])
+        new_y = np.concatenate([aug_y[i], donor_y])
+        new_ptps = np.concatenate([aug_ptps[i], compute_trial_max_ptp(donor_mc)])
+        new_groups = build_classwise_trial_groups(new_y, group_size=trial_group_size)
+
+        aug_X[i] = (new_feat, new_mc)
+        aug_y[i] = new_y
+        aug_ptps[i] = new_ptps
+        aug_groups[i] = new_groups
+
+        print(
+            f"    {sid}: augmented with {best_donor} (d={best_dist:.2f}, +{len(donor_y)} trials)"
+        )
+
+    return aug_X, aug_y, aug_ptps, aug_groups
+
+
 def run_pipeline(
     data_dir: Path,
     output_dir: Path,
@@ -418,6 +526,73 @@ def run_pipeline(
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
 
+    # Step 3b: Augmented nested CV for weak subjects
+    aug_nested_scores = None
+    aug_nested_mean = None
+    step_start_aug = time.perf_counter()
+    mi_new_dir = Path("Data/MI_DATA_NEW")
+    if mi_new_dir.exists():
+        print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
+        from src.transfer import load_all_subjects
+
+        transfer_data_dirs = [data_dir]
+        transfer_data_dirs.append(mi_new_dir)
+        donor_subjects = load_all_subjects(
+            transfer_data_dirs,
+            sfreq=sfreq,
+            subject_merge={"subject0100_2": "subject0100"},
+        )
+        print(
+            f"  Donor pool: {len(donor_subjects)} subjects from {len(transfer_data_dirs)} directories"
+        )
+
+        aug_X, aug_y, aug_ptps, aug_groups = _augment_weak_subjects(
+            X_by_subject,
+            y_by_subject,
+            trial_ptps_by_subject,
+            trial_groups_by_subject,
+            subject_ids,
+            nested_scores,
+            donor_subjects,
+            weakness_threshold=0.55,
+            sfreq=sfreq,
+            trial_group_size=cfg.trial_group_size,
+        )
+
+        aug_nested_scores, aug_nested_mean, aug_nested_std, aug_nested_methods = (
+            train_nested_model_selection_cv(
+                aug_X,
+                aug_y,
+                sfreq=sfreq,
+                n_outer_folds=cfg.n_outer_folds,
+                n_inner_folds=cfg.n_inner_folds,
+                k_best=cfg.k_best,
+                trial_ptps_by_subject=aug_ptps,
+                split_strategy=cfg.split_strategy,
+                trial_groups_by_subject=aug_groups,
+                trial_group_size=cfg.trial_group_size,
+                random_state=cfg.random_state,
+                n_jobs=cfg.n_jobs,
+                parallel_backend=cfg.parallel_backend,
+                max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
+                enable_band_cache=cfg.enable_band_cache,
+                cache_scope=cfg.cache_scope,
+            )
+        )
+
+        print(f"\n  {'Subject':<14} {'Original':>10} {'Augmented':>10} {'Delta':>8}")
+        print("  " + "-" * 42)
+        for sid, orig, aug in zip(subject_ids, nested_scores, aug_nested_scores):
+            delta = aug - orig
+            sign = "+" if delta >= 0 else ""
+            weak = " *" if orig < 0.55 else ""
+            print(f"  {sid:<14} {orig:>9.1%} {aug:>9.1%} {sign}{delta:>6.1%}{weak}")
+        print(f"\n  Original nested mean:  {nested_mean:.1%}")
+        print(f"  Augmented nested mean: {aug_nested_mean:.1%}")
+        print(f"  Delta:                 {aug_nested_mean - nested_mean:+.1%}")
+        print("  (* = weak subject, augmented with closest neighbor)")
+    runtime_seconds["augmented_nested_cv"] = time.perf_counter() - step_start_aug
+
     holdout_results: dict[str, float] = {}
     if holdout_fraction > 0 and X_holdout_by_subject:
         print("\n[3b/5] Evaluating held-out test sets")
@@ -616,6 +791,12 @@ def run_pipeline(
 
     if transfer_results is not None:
         results["transfer_results"] = transfer_results
+
+    if aug_nested_scores is not None:
+        results["augmented_nested_scores"] = {
+            sid: float(s) for sid, s in zip(subject_ids, aug_nested_scores)
+        }
+        results["augmented_nested_mean"] = float(aug_nested_mean)
 
     results_path = output_dir / "training_results.json"
     runtime_seconds["total"] = time.perf_counter() - total_start
