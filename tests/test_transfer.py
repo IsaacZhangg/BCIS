@@ -2,9 +2,8 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from src.transfer import load_all_subjects
+from src.transfer import align_subjects, load_all_subjects
 
 
 def _make_recording_csv(
@@ -79,3 +78,35 @@ def test_load_all_subjects_merges_sessions(tmp_path):
     assert X_mc.shape[0] == len(y)
     # Two sessions x 100 trials each; most should survive artifact rejection
     assert X_mc.shape[0] >= 150
+
+
+def test_align_subjects_centers_covariances():
+    """After EA, each subject's mean covariance should be close to identity."""
+    rng = np.random.default_rng(42)
+    n_channels = 8
+
+    # Create 3 subjects with different covariance structures
+    subjects = {}
+    for i in range(3):
+        A = rng.standard_normal((n_channels, n_channels))
+        cov_mean = A @ A.T + np.eye(n_channels)
+        X = rng.standard_normal((20, n_channels, 375))
+        X = np.einsum("ij,njt->nit", np.linalg.cholesky(cov_mean), X)
+        y = np.array([0] * 10 + [1] * 10)
+        subjects[f"subj{i:02d}"] = (X, y)
+
+    aligned_covs, aligned_labels, subject_ids = align_subjects(subjects, sfreq=250.0)
+
+    assert aligned_covs.ndim == 3  # (total_trials, 8, 8)
+    assert aligned_covs.shape[0] == 60  # 3 subjects * 20 trials
+    assert aligned_covs.shape[1] == n_channels
+    assert aligned_covs.shape[2] == n_channels
+    assert len(aligned_labels) == 60
+    assert len(subject_ids) == 60
+
+    # Check each subject's aligned covariances are centered near identity
+    for i in range(3):
+        mask = np.array(subject_ids) == f"subj{i:02d}"
+        subj_covs = aligned_covs[mask]
+        mean_cov = np.mean(subj_covs, axis=0)
+        np.testing.assert_allclose(mean_cov, np.eye(n_channels), atol=0.5)

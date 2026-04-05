@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from pyriemann.estimation import Covariances
+from pyriemann.utils.mean import mean_covariance
+from scipy.linalg import fractional_matrix_power
 
 from src.data_loader import CHANNELS, get_recordings_by_subject, load_recording
 from src.epochs import (
@@ -96,3 +99,42 @@ def load_all_subjects(
         subjects[sid] = (X_mc, y)
 
     return subjects
+
+
+def align_subjects(
+    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    sfreq: float = 250.0,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Compute covariance matrices and apply Euclidean Alignment across subjects.
+
+    EA re-centers each subject's covariance distribution to the identity matrix,
+    removing inter-subject variability from electrode impedance and placement.
+
+    Args:
+        subjects: Dict mapping subject_id to (X_multichannel, y).
+        sfreq: Sampling frequency (unused, kept for API consistency).
+
+    Returns:
+        Tuple of:
+        - aligned_covs: (total_trials, n_channels, n_channels) aligned SPD matrices
+        - labels: (total_trials,) class labels
+        - subject_ids: list of subject_id per trial (for LOSO indexing)
+    """
+    cov_estimator = Covariances(estimator="lwf")
+
+    all_covs = []
+    all_labels = []
+    all_subject_ids: list[str] = []
+
+    for sid in sorted(subjects.keys()):
+        X_mc, y = subjects[sid]
+        covs = cov_estimator.fit_transform(X_mc)
+        ref = mean_covariance(covs, metric="riemann")
+        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
+        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+
+        all_covs.append(covs_aligned)
+        all_labels.append(y)
+        all_subject_ids.extend([sid] * len(y))
+
+    return np.vstack(all_covs), np.concatenate(all_labels), all_subject_ids
