@@ -613,7 +613,7 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    data_dir = Path("unicorn-data")
+    data_dir = Path("Data/unicorn-data")
     output_dir = Path("models")
 
     results = run_pipeline(data_dir, output_dir)

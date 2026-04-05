@@ -7,7 +7,7 @@ from src.data_loader import load_recording, get_complete_recordings
 
 def test_load_recording_returns_data_and_events():
     """Test that load_recording returns EEG data and event markers."""
-    data_dir = Path("unicorn-data")
+    data_dir = Path("Data/unicorn-data")
     csv_path = data_dir / "subject0001/session000/recording_2025-11-12-21.33.31.csv"
 
     data, events, sfreq = load_recording(csv_path)
@@ -27,7 +27,7 @@ def test_load_recording_returns_data_and_events():
 
 def test_get_complete_recordings_finds_all_subjects():
     """Test that we find all complete recordings (100 imagery trials)."""
-    data_dir = Path("unicorn-data")
+    data_dir = Path("Data/unicorn-data")
 
     recordings = get_complete_recordings(data_dir)
 

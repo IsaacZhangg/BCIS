@@ -70,7 +70,9 @@ BCIS/
 │   └── validation.py      # Split policies
 ├── tests/                 # 60 tests across all pipeline stages
 ├── models/                # Per-subject .joblib models + training_results.json
-├── unicorn-data/          # EEG recordings (gitignored)
+├── Data/
+│   ├── unicorn-data/      # EEG recordings
+│   └── MI_DATA_NEW/       # New MI data recordings
 └── pyproject.toml
 ```
 
@@ -84,7 +86,7 @@ cd BCIS
 uv sync
 ```
 
-Place Unicorn CSV exports in `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`.
+Place Unicorn CSV exports in `Data/unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`.
 
 ## Usage
 
