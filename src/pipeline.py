@@ -23,6 +23,7 @@ from src.epochs import (
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
 from src.runtime_output import configure_console_output
+from src.transfer import run_transfer_evaluation
 from src.train import (
     cross_session_evaluate,
     train_final_model,
@@ -486,6 +487,25 @@ def run_pipeline(
         )
     runtime_seconds["cross_session_eval"] = time.perf_counter() - step_start
 
+    # Step 4b: Cross-subject transfer evaluation
+    step_start = time.perf_counter()
+    print("\n[4b/5] Cross-subject transfer evaluation (Euclidean Alignment + LOSO)")
+    transfer_results: dict | None = None
+    try:
+        transfer_data_dirs = [data_dir]
+        mi_new_dir = Path("Data/MI_DATA_NEW")
+        if mi_new_dir.exists():
+            transfer_data_dirs.append(mi_new_dir)
+        within_scores = {sid: float(s) for sid, s in zip(subject_ids, nested_scores)}
+        transfer_results = run_transfer_evaluation(
+            data_dirs=transfer_data_dirs,
+            sfreq=sfreq,
+            within_subject_scores=within_scores,
+        )
+    except Exception as e:
+        print(f"  Transfer evaluation failed: {e}")
+    runtime_seconds["transfer_eval"] = time.perf_counter() - step_start
+
     # Step 5: Train & save per-subject models (nested CV method)
     step_start = time.perf_counter()
     _print_step(5, 5, "Training and saving per-subject models")
@@ -593,6 +613,9 @@ def run_pipeline(
 
     if cross_session_results:
         results["cross_session_results"] = cross_session_results
+
+    if transfer_results is not None:
+        results["transfer_results"] = transfer_results
 
     results_path = output_dir / "training_results.json"
     runtime_seconds["total"] = time.perf_counter() - total_start
