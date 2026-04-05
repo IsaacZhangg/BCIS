@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
+from pyriemann.utils.geodesic import geodesic_riemann
 from pyriemann.utils.mean import mean_covariance
 from scipy.linalg import fractional_matrix_power
 from sklearn.linear_model import LogisticRegression
@@ -165,6 +166,104 @@ def align_subjects(
         all_subject_ids.extend([sid] * len(y))
 
     return np.vstack(all_covs), np.concatenate(all_labels), all_subject_ids
+
+
+def shrink_covariances(
+    covs: np.ndarray,
+    target: np.ndarray,
+    alpha: float,
+) -> np.ndarray:
+    """Shrink covariance matrices toward a target along the Riemannian geodesic.
+
+    Uses affine-invariant Riemannian geodesic interpolation:
+    C_shrunk = geodesic(C, target, alpha)
+
+    Args:
+        covs: (n_trials, n, n) SPD matrices.
+        target: (n, n) SPD matrix to shrink toward (e.g., group Riemannian mean).
+        alpha: Shrinkage strength in [0, 1]. 0 = no shrinkage, 1 = full shrinkage.
+
+    Returns:
+        (n_trials, n, n) shrunk SPD matrices.
+    """
+    if alpha <= 0.0:
+        return covs.copy()
+    if alpha >= 1.0:
+        return np.broadcast_to(target, covs.shape).copy()
+    # geodesic_riemann(A, B, alpha): moves from A toward B by alpha
+    return geodesic_riemann(covs, np.broadcast_to(target, covs.shape), alpha)
+
+
+def regularized_within_subject_cv(
+    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    sfreq: float = 250.0,
+    shrinkage_k: float = 20.0,
+    n_folds: int = 10,
+    random_state: int = 42,
+) -> dict[str, float]:
+    """Within-subject CV with covariance shrinkage toward cross-subject group mean.
+
+    For each subject:
+    1. Estimate covariances with LWF, align via EA
+    2. Shrink toward group Riemannian mean (alpha = k / (k + n_trials))
+    3. Run stratified K-fold CV: TangentSpace + LogisticRegression
+
+    Args:
+        subjects: Dict mapping subject_id to (X_multichannel, y).
+        sfreq: Sampling frequency.
+        shrinkage_k: Controls shrinkage strength. Higher = more shrinkage.
+            alpha = shrinkage_k / (shrinkage_k + n_trials).
+        n_folds: Number of CV folds.
+        random_state: Random seed.
+
+    Returns:
+        Dict mapping subject_id to regularized within-subject accuracy.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    cov_estimator = Covariances(estimator="lwf")
+
+    # Step 1: Compute aligned covariances per subject
+    aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    all_aligned_covs = []
+    for sid in sorted(subjects.keys()):
+        X_mc, y = subjects[sid]
+        covs = cov_estimator.fit_transform(X_mc)
+        ref = mean_covariance(covs, metric="riemann")
+        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
+        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        aligned_per_subject[sid] = (covs_aligned, y)
+        all_aligned_covs.append(covs_aligned)
+
+    # Step 2: Compute group Riemannian mean
+    all_covs = np.vstack(all_aligned_covs)
+    group_mean = mean_covariance(all_covs, metric="riemann")
+
+    # Step 3: Per-subject within-subject CV with shrinkage
+    scores: dict[str, float] = {}
+    for sid in sorted(subjects.keys()):
+        covs, y = aligned_per_subject[sid]
+        n_trials = len(y)
+        alpha = shrinkage_k / (shrinkage_k + n_trials)
+
+        # Shrink toward group mean
+        covs_shrunk = shrink_covariances(covs, group_mean, alpha)
+
+        # Stratified K-fold CV
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        fold_scores = []
+        for train_idx, test_idx in skf.split(covs_shrunk, y):
+            ts = TangentSpace(metric="riemann")
+            X_train = ts.fit_transform(covs_shrunk[train_idx])
+            X_test = ts.transform(covs_shrunk[test_idx])
+
+            clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
+            clf.fit(X_train, y[train_idx])
+            fold_scores.append(float(clf.score(X_test, y[test_idx])))
+
+        scores[sid] = float(np.mean(fold_scores))
+
+    return scores
 
 
 def loso_cv(

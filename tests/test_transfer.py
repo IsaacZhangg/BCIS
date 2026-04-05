@@ -7,7 +7,9 @@ from src.transfer import (
     align_subjects,
     load_all_subjects,
     loso_cv,
+    regularized_within_subject_cv,
     run_transfer_evaluation,
+    shrink_covariances,
 )
 
 
@@ -191,3 +193,66 @@ def test_run_transfer_evaluation_returns_results(tmp_path):
     assert "loso_mean" in results
     assert "loso_ft_mean" in results
     assert len(results["loso_scores"]) == 3
+
+
+def test_shrink_covariances_alpha_zero():
+    """alpha=0 returns original covariances unchanged."""
+    rng = np.random.default_rng(42)
+    n = 8
+    covs = np.array([rng.standard_normal((n, n)) for _ in range(5)])
+    covs = covs @ covs.transpose(0, 2, 1) + np.eye(n)  # make SPD
+    target = np.eye(n) * 2
+
+    result = shrink_covariances(covs, target, alpha=0.0)
+    np.testing.assert_allclose(result, covs, atol=1e-10)
+
+
+def test_shrink_covariances_alpha_one():
+    """alpha=1 returns the target for every trial."""
+    rng = np.random.default_rng(42)
+    n = 8
+    covs = np.array([rng.standard_normal((n, n)) for _ in range(5)])
+    covs = covs @ covs.transpose(0, 2, 1) + np.eye(n)
+    target = np.eye(n) * 2
+
+    result = shrink_covariances(covs, target, alpha=1.0)
+    for i in range(5):
+        np.testing.assert_allclose(result[i], target, atol=1e-10)
+
+
+def test_shrink_covariances_intermediate():
+    """0 < alpha < 1 moves covariances toward target."""
+    rng = np.random.default_rng(42)
+    n = 8
+    covs = np.array([rng.standard_normal((n, n)) for _ in range(5)])
+    covs = covs @ covs.transpose(0, 2, 1) + np.eye(n)
+    target = np.eye(n)
+
+    result = shrink_covariances(covs, target, alpha=0.5)
+
+    # Each shrunk covariance should be closer to target than the original
+    from pyriemann.utils.distance import distance_riemann
+
+    for i in range(5):
+        d_original = distance_riemann(covs[i], target)
+        d_shrunk = distance_riemann(result[i], target)
+        assert d_shrunk < d_original
+
+
+def test_regularized_within_subject_cv_returns_scores():
+    """Regularized within-subject CV returns per-subject scores."""
+    rng = np.random.default_rng(42)
+    n_channels = 8
+
+    subjects = {}
+    for i in range(3):
+        X = rng.standard_normal((30, n_channels, 375))
+        y = np.array([0] * 15 + [1] * 15)
+        subjects[f"subj{i:02d}"] = (X, y)
+
+    scores = regularized_within_subject_cv(subjects, sfreq=250.0, n_folds=5)
+
+    assert isinstance(scores, dict)
+    assert len(scores) == 3
+    for sid, score in scores.items():
+        assert 0.0 <= score <= 1.0
