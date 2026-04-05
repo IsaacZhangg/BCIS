@@ -1,0 +1,81 @@
+"""Tests for cross-subject Riemannian transfer learning."""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.transfer import load_all_subjects
+
+
+def _make_recording_csv(
+    path,
+    sfreq: float = 250.0,
+    n_left: int = 50,
+    n_right: int = 50,
+    seed: int = 42,
+) -> None:
+    """Create a synthetic EEG recording CSV with phase-3 trials.
+
+    Generates exactly n_left + n_right phase-3 trials so the file passes
+    ``get_complete_recordings``'s 100-trial filter when n_left=50, n_right=50.
+    """
+    n_trials = n_left + n_right
+    n_samples_per_trial = int(sfreq * 5)
+    # Enough padding before first event and after last event
+    n_total = 2000 + n_samples_per_trial * n_trials
+
+    rng = np.random.default_rng(seed)
+    data = rng.standard_normal((n_total, 8)) * 50
+
+    stim = np.zeros(n_total)
+    for i in range(n_trials):
+        event_idx = 1000 + i * n_samples_per_trial
+        # stim 31 = phase 3, movement 1 (left); 32 = phase 3, movement 2 (right)
+        stim[event_idx] = 31 if i < n_left else 32
+
+    df = pd.DataFrame(data, columns=["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"])
+    df["stim"] = stim
+    df["timestamps"] = np.arange(n_total) / sfreq
+    df = df[["timestamps", "Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8", "stim"]]
+    df.to_csv(path, index=False)
+
+
+def test_load_all_subjects_returns_dict(tmp_path):
+    """load_all_subjects returns a dict mapping subject_id to (X_mc, y) tuples."""
+    sfreq = 250.0
+
+    for subj_name in ["subject0001", "subject0002"]:
+        subj_dir = tmp_path / subj_name / "session001"
+        subj_dir.mkdir(parents=True)
+        _make_recording_csv(subj_dir / "recording_test.csv", sfreq=sfreq)
+
+    result = load_all_subjects([tmp_path], sfreq=sfreq)
+
+    assert isinstance(result, dict)
+    assert len(result) == 2
+    for sid, (X_mc, y) in result.items():
+        assert X_mc.ndim == 3
+        assert X_mc.shape[1] == 8
+        assert len(y) == X_mc.shape[0]
+        assert set(np.unique(y)) == {0, 1}
+
+
+def test_load_all_subjects_merges_sessions(tmp_path):
+    """Sessions for the same subject are pooled into one entry."""
+    sfreq = 250.0
+
+    subj_dir_s1 = tmp_path / "subject0001" / "session001"
+    subj_dir_s2 = tmp_path / "subject0001" / "session002"
+    subj_dir_s1.mkdir(parents=True)
+    subj_dir_s2.mkdir(parents=True)
+
+    _make_recording_csv(subj_dir_s1 / "recording_test.csv", sfreq=sfreq, seed=42)
+    _make_recording_csv(subj_dir_s2 / "recording_test.csv", sfreq=sfreq, seed=99)
+
+    result = load_all_subjects([tmp_path], sfreq=sfreq)
+
+    assert "subject0001" in result
+    X_mc, y = result["subject0001"]
+    assert X_mc.shape[0] == len(y)
+    # Two sessions x 100 trials each; most should survive artifact rejection
+    assert X_mc.shape[0] >= 150
