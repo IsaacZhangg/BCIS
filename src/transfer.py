@@ -18,6 +18,7 @@ from src.epochs import (
     extract_left_right_epochs,
     reject_bad_epochs,
 )
+from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
 
 
@@ -56,7 +57,7 @@ def load_all_subjects(
     sfreq: float = 250.0,
     subject_merge: dict[str, str] | None = None,
     min_trials: int = 10,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Load and preprocess data from multiple directories, merging by subject.
 
     Args:
@@ -67,8 +68,9 @@ def load_all_subjects(
         min_trials: Minimum phase-3 trials per recording to include.
 
     Returns:
-        Dict mapping subject_id to (X_multichannel, y) where
-        X_multichannel is (n_trials, 8, n_samples) and y is (n_trials,).
+        Dict mapping subject_id to (X_features, X_multichannel, y) where
+        X_features is (n_trials, 45) handcrafted features,
+        X_multichannel is (n_trials, 8, n_samples), and y is (n_trials,).
     """
     if subject_merge is None:
         subject_merge = {}
@@ -79,7 +81,7 @@ def load_all_subjects(
             canonical = subject_merge.get(sid, sid)
             all_recordings.setdefault(canonical, []).extend(paths)
 
-    subjects: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
     for sid, rec_paths in sorted(all_recordings.items()):
         all_left: dict[str, list] = {ch: [] for ch in CHANNELS}
@@ -122,15 +124,18 @@ def load_all_subjects(
         if n_left == 0 or n_right == 0:
             continue
 
+        left_features = extract_lateralization_features(all_left, sfreq)
+        right_features = extract_lateralization_features(all_right, sfreq)
+        X_features = np.vstack([left_features, right_features])
         X_mc = np.vstack([_task_epochs(all_left), _task_epochs(all_right)])
         y = np.array([0] * n_left + [1] * n_right)
-        subjects[sid] = (X_mc, y)
+        subjects[sid] = (X_features, X_mc, y)
 
     return subjects
 
 
 def align_subjects(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Compute covariance matrices and apply Euclidean Alignment across subjects.
@@ -155,7 +160,7 @@ def align_subjects(
     all_subject_ids: list[str] = []
 
     for sid in sorted(subjects.keys()):
-        X_mc, y = subjects[sid]
+        _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
         ref = mean_covariance(covs, metric="riemann")
         ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
@@ -195,7 +200,7 @@ def shrink_covariances(
 
 
 def regularized_within_subject_cv(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
     shrinkage_k: float = 20.0,
     n_folds: int = 10,
@@ -227,7 +232,7 @@ def regularized_within_subject_cv(
     aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     all_aligned_covs = []
     for sid in sorted(subjects.keys()):
-        X_mc, y = subjects[sid]
+        _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
         ref = mean_covariance(covs, metric="riemann")
         ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
@@ -267,7 +272,7 @@ def regularized_within_subject_cv(
 
 
 def adaptive_augmented_cv(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
     weakness_threshold: float = 0.55,
     n_folds: int = 10,
@@ -307,7 +312,7 @@ def adaptive_augmented_cv(
     cov_estimator = Covariances(estimator="lwf")
     raw_means: dict[str, np.ndarray] = {}
     for sid in sorted(subjects.keys()):
-        X_mc, y = subjects[sid]
+        _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
         raw_means[sid] = mean_covariance(covs, metric="riemann")
 
@@ -322,7 +327,7 @@ def adaptive_augmented_cv(
         return min(dists, key=dists.get)
 
     def _run_fbcsp_cv(target_sid: str, aug_sid: str | None = None) -> float:
-        X_mc_target, y_target = subjects[target_sid]
+        _, X_mc_target, y_target = subjects[target_sid]
         skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
         fold_scores: list[float] = []
 
@@ -331,7 +336,7 @@ def adaptive_augmented_cv(
             y_tr = y_target[tr_idx]
 
             if aug_sid is not None:
-                X_mc_aug, y_aug = subjects[aug_sid]
+                _, X_mc_aug, y_aug = subjects[aug_sid]
                 X_mc_tr = np.vstack([X_mc_tr, X_mc_aug])
                 y_tr = np.concatenate([y_tr, y_aug])
 
@@ -376,7 +381,7 @@ def adaptive_augmented_cv(
 
 
 def loso_cv(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
     fine_tune: bool = False,
 ) -> dict[str, float]:
@@ -402,7 +407,7 @@ def loso_cv(
     # Pre-compute aligned covariances per subject
     aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for sid in sorted(subjects.keys()):
-        X_mc, y = subjects[sid]
+        _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
         ref = mean_covariance(covs, metric="riemann")
         ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
@@ -481,7 +486,7 @@ def run_transfer_evaluation(
     subjects = load_all_subjects(data_dirs, sfreq=sfreq, subject_merge=subject_merge)
     print(f"Loaded {len(subjects)} subjects: {', '.join(sorted(subjects.keys()))}")
     for sid in sorted(subjects.keys()):
-        X_mc, y = subjects[sid]
+        _, X_mc, y = subjects[sid]
         n_left = int(np.sum(y == 0))
         n_right = int(np.sum(y == 1))
         print(f"  {sid}: {len(y)} trials ({n_left}L/{n_right}R)")

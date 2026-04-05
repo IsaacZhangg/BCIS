@@ -59,7 +59,9 @@ def test_load_all_subjects_returns_dict(tmp_path):
 
     assert isinstance(result, dict)
     assert len(result) == 2
-    for sid, (X_mc, y) in result.items():
+    for sid, (X_feat, X_mc, y) in result.items():
+        assert X_feat.ndim == 2
+        assert X_feat.shape[0] == len(y)
         assert X_mc.ndim == 3
         assert X_mc.shape[1] == 8
         assert len(y) == X_mc.shape[0]
@@ -81,8 +83,9 @@ def test_load_all_subjects_merges_sessions(tmp_path):
     result = load_all_subjects([tmp_path], sfreq=sfreq)
 
     assert "subject0001" in result
-    X_mc, y = result["subject0001"]
+    X_feat, X_mc, y = result["subject0001"]
     assert X_mc.shape[0] == len(y)
+    assert X_feat.shape[0] == len(y)
     # Two sessions x 100 trials each; most should survive artifact rejection
     assert X_mc.shape[0] >= 150
 
@@ -100,7 +103,7 @@ def test_align_subjects_centers_covariances():
         X = rng.standard_normal((20, n_channels, 375))
         X = np.einsum("ij,njt->nit", np.linalg.cholesky(cov_mean), X)
         y = np.array([0] * 10 + [1] * 10)
-        subjects[f"subj{i:02d}"] = (X, y)
+        subjects[f"subj{i:02d}"] = (np.zeros((len(y), 45)), X, y)
 
     aligned_covs, aligned_labels, subject_ids = align_subjects(subjects, sfreq=250.0)
 
@@ -128,7 +131,7 @@ def test_loso_cv_returns_per_subject_scores():
     for i in range(4):
         X = rng.standard_normal((20, n_channels, 375))
         y = np.array([0] * 10 + [1] * 10)
-        subjects[f"subj{i:02d}"] = (X, y)
+        subjects[f"subj{i:02d}"] = (np.zeros((len(y), 45)), X, y)
 
     scores = loso_cv(subjects, sfreq=250.0)
 
@@ -148,7 +151,7 @@ def test_loso_cv_on_random_data_near_chance():
     for i in range(5):
         X = rng.standard_normal((30, n_channels, 375))
         y = np.array([0] * 15 + [1] * 15)
-        subjects[f"subj{i:02d}"] = (X, y)
+        subjects[f"subj{i:02d}"] = (np.zeros((len(y), 45)), X, y)
 
     scores = loso_cv(subjects, sfreq=250.0)
 
@@ -165,7 +168,7 @@ def test_loso_cv_fine_tune_returns_scores():
     for i in range(4):
         X = rng.standard_normal((20, n_channels, 375))
         y = np.array([0] * 10 + [1] * 10)
-        subjects[f"subj{i:02d}"] = (X, y)
+        subjects[f"subj{i:02d}"] = (np.zeros((len(y), 45)), X, y)
 
     scores = loso_cv(subjects, sfreq=250.0, fine_tune=True)
 
@@ -248,7 +251,7 @@ def test_regularized_within_subject_cv_returns_scores():
     for i in range(3):
         X = rng.standard_normal((30, n_channels, 375))
         y = np.array([0] * 15 + [1] * 15)
-        subjects[f"subj{i:02d}"] = (X, y)
+        subjects[f"subj{i:02d}"] = (np.zeros((len(y), 45)), X, y)
 
     scores = regularized_within_subject_cv(subjects, sfreq=250.0, n_folds=5)
 
