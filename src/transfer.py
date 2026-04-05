@@ -145,6 +145,7 @@ def align_subjects(
 def loso_cv(
     subjects: dict[str, tuple[np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
+    fine_tune: bool = False,
 ) -> dict[str, float]:
     """Leave-one-subject-out CV with Euclidean Alignment.
 
@@ -152,10 +153,13 @@ def loso_cv(
     1. Align all subjects independently (EA per subject)
     2. Train TangentSpace + LR on aligned data from all other subjects
     3. Test on held-out subject's aligned data
+    4. (If fine_tune) Re-center tangent space reference on held-out subject's mean
 
     Args:
         subjects: Dict mapping subject_id to (X_multichannel, y).
         sfreq: Sampling frequency.
+        fine_tune: If True, re-center the tangent space reference point
+            to the held-out subject's Riemannian mean before testing.
 
     Returns:
         Dict mapping subject_id to LOSO accuracy.
@@ -190,9 +194,21 @@ def loso_cv(
 
         X_test, y_test = aligned_per_subject[held_out]
 
-        pipe_ts = TangentSpace(metric="riemann")
-        X_train_ts = pipe_ts.fit_transform(X_train)
-        X_test_ts = pipe_ts.transform(X_test)
+        if fine_tune:
+            # Re-center tangent space on held-out subject's mean
+            test_ref = mean_covariance(X_test, metric="riemann")
+            # Train projection uses pooled training data reference
+            train_ts = TangentSpace(metric="riemann")
+            X_train_ts = train_ts.fit_transform(X_train)
+            # Test projection uses held-out subject's own reference
+            test_ts = TangentSpace(metric="riemann")
+            test_ts.fit(X_train)  # fit to get consistent dimensionality
+            test_ts.reference_ = test_ref  # override reference point
+            X_test_ts = test_ts.transform(X_test)
+        else:
+            pipe_ts = TangentSpace(metric="riemann")
+            X_train_ts = pipe_ts.fit_transform(X_train)
+            X_test_ts = pipe_ts.transform(X_test)
 
         clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
         clf.fit(X_train_ts, y_train)

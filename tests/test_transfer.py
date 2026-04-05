@@ -147,3 +147,22 @@ def test_loso_cv_on_random_data_near_chance():
 
     mean_acc = np.mean(list(scores.values()))
     assert 0.3 <= mean_acc <= 0.7
+
+
+def test_loso_cv_fine_tune_returns_scores():
+    """LOSO CV with fine-tuning returns a score for each subject."""
+    rng = np.random.default_rng(42)
+    n_channels = 8
+
+    subjects = {}
+    for i in range(4):
+        X = rng.standard_normal((20, n_channels, 375))
+        y = np.array([0] * 10 + [1] * 10)
+        subjects[f"subj{i:02d}"] = (X, y)
+
+    scores = loso_cv(subjects, sfreq=250.0, fine_tune=True)
+
+    assert isinstance(scores, dict)
+    assert len(scores) == 4
+    for sid, score in scores.items():
+        assert 0.0 <= score <= 1.0
