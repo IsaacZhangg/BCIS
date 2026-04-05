@@ -6,8 +6,10 @@ from pathlib import Path
 
 import numpy as np
 from pyriemann.estimation import Covariances
+from pyriemann.tangentspace import TangentSpace
 from pyriemann.utils.mean import mean_covariance
 from scipy.linalg import fractional_matrix_power
+from sklearn.linear_model import LogisticRegression
 
 from src.data_loader import CHANNELS, get_recordings_by_subject, load_recording
 from src.epochs import (
@@ -138,3 +140,62 @@ def align_subjects(
         all_subject_ids.extend([sid] * len(y))
 
     return np.vstack(all_covs), np.concatenate(all_labels), all_subject_ids
+
+
+def loso_cv(
+    subjects: dict[str, tuple[np.ndarray, np.ndarray]],
+    sfreq: float = 250.0,
+) -> dict[str, float]:
+    """Leave-one-subject-out CV with Euclidean Alignment.
+
+    For each held-out subject:
+    1. Align all subjects independently (EA per subject)
+    2. Train TangentSpace + LR on aligned data from all other subjects
+    3. Test on held-out subject's aligned data
+
+    Args:
+        subjects: Dict mapping subject_id to (X_multichannel, y).
+        sfreq: Sampling frequency.
+
+    Returns:
+        Dict mapping subject_id to LOSO accuracy.
+    """
+    cov_estimator = Covariances(estimator="lwf")
+
+    # Pre-compute aligned covariances per subject
+    aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for sid in sorted(subjects.keys()):
+        X_mc, y = subjects[sid]
+        covs = cov_estimator.fit_transform(X_mc)
+        ref = mean_covariance(covs, metric="riemann")
+        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
+        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        aligned_per_subject[sid] = (covs_aligned, y)
+
+    subject_ids = sorted(subjects.keys())
+    scores: dict[str, float] = {}
+
+    for held_out in subject_ids:
+        train_covs = []
+        train_labels = []
+        for sid in subject_ids:
+            if sid == held_out:
+                continue
+            covs, y = aligned_per_subject[sid]
+            train_covs.append(covs)
+            train_labels.append(y)
+
+        X_train = np.vstack(train_covs)
+        y_train = np.concatenate(train_labels)
+
+        X_test, y_test = aligned_per_subject[held_out]
+
+        pipe_ts = TangentSpace(metric="riemann")
+        X_train_ts = pipe_ts.fit_transform(X_train)
+        X_test_ts = pipe_ts.transform(X_test)
+
+        clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
+        clf.fit(X_train_ts, y_train)
+        scores[held_out] = float(clf.score(X_test_ts, y_test))
+
+    return scores
