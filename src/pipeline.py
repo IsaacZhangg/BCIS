@@ -162,119 +162,124 @@ def _pairs_to_features(
     return X_features, X_multichannel, y
 
 
-def _augment_weak_subjects(
-    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
-    y_by_subject: list[np.ndarray],
-    trial_ptps_by_subject: list[np.ndarray],
-    trial_groups_by_subject: list[np.ndarray],
-    subject_ids: list[str],
-    nested_scores: list[float],
-    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    weakness_threshold: float = 0.50,
-    sfreq: float = 250.0,
-    trial_group_size: int = 1,
-) -> tuple[
-    list[tuple[np.ndarray, np.ndarray]],
-    list[np.ndarray],
-    list[np.ndarray],
-    list[np.ndarray],
-]:
-    """Augment weak subjects' data with the best donor selected by inner CV.
+def _augmented_nested_cv_subject(
+    X_features: np.ndarray,
+    X_multichannel: np.ndarray,
+    y: np.ndarray,
+    donor_feat: np.ndarray,
+    donor_mc: np.ndarray,
+    donor_y: np.ndarray,
+    sfreq: float,
+    n_outer_folds: int,
+    n_inner_folds: int,
+    k_best: int,
+    trial_ptps: np.ndarray | None,
+    split_strategy: str,
+    groups: np.ndarray | None,
+    random_state: int,
+) -> float:
+    """Leakage-free augmented nested CV for a single subject.
 
-    For each subject whose nested_score < weakness_threshold:
-    1. Try each candidate donor via 5-fold FBCSP+LDA CV
-    2. Pick the donor that gives the highest augmented CV accuracy
-    3. Concatenate the best donor's data into the target's arrays
-
-    Strong subjects are left unchanged.
+    Outer/inner CV splits are on TARGET data only. Donor data augments
+    training portions only — never appears in validation or test folds.
     """
-    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-    from sklearn.feature_selection import SelectKBest, f_classif
-    from sklearn.model_selection import StratifiedKFold
-    from sklearn.preprocessing import StandardScaler
-
-    from src.epochs import compute_trial_max_ptp
     from src.train import (
-        DEFAULT_K_CANDIDATES,
-        _extract_fbcsp_features,
-        _safe_k_values,
+        ALL_CLASSIFIERS,
+        _evaluate_classifier,
+        _evaluate_classifiers_batch,
+        _reject_in_fold,
     )
-    from src.validation import build_classwise_trial_groups
+    from src.validation import make_cv_splits
 
-    def _score_donor(target_feat, target_mc, target_y, donor_feat, donor_mc, donor_y):
-        """5-fold FBCSP+handcrafted CV score with donor-augmented training."""
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        scores = []
-        for tr, te in skf.split(target_mc, target_y):
-            mc_tr = np.vstack([target_mc[tr], donor_mc])
-            y_tr = np.concatenate([target_y[tr], donor_y])
-            fbcsp_tr, fbcsp_te, _ = _extract_fbcsp_features(
-                mc_tr, target_mc[te], y_tr, sfreq
-            )
-            if fbcsp_tr.shape[1] == 0:
-                continue
-            hc_tr = np.vstack([target_feat[tr], donor_feat])
-            X_tr = np.hstack([fbcsp_tr, hc_tr])
-            X_te = np.hstack([fbcsp_te, target_feat[te]])
-            k_vals = _safe_k_values(X_tr.shape[1], len(y_tr), 10, DEFAULT_K_CANDIDATES)
-            if not k_vals:
-                continue
-            sel = SelectKBest(f_classif, k=k_vals[-1])
-            Xtr = sel.fit_transform(X_tr, y_tr)
-            Xte = sel.transform(X_te)
-            sc = StandardScaler()
-            lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-            lda.fit(sc.fit_transform(Xtr), y_tr)
-            scores.append(float(lda.score(sc.transform(Xte), target_y[te])))
-        return float(np.mean(scores)) if scores else 0.5
+    classifier_names = list(ALL_CLASSIFIERS)
+    outer_splits = make_cv_splits(
+        y,
+        n_splits=n_outer_folds,
+        strategy=split_strategy,
+        groups=groups,
+        random_state=random_state,
+    )
+    fold_scores: list[float] = []
 
-    aug_X = list(X_by_subject)
-    aug_y = list(y_by_subject)
-    aug_ptps = list(trial_ptps_by_subject)
-    aug_groups = list(trial_groups_by_subject)
-
-    for i, (sid, score) in enumerate(zip(subject_ids, nested_scores)):
-        if score >= weakness_threshold:
+    for outer_train_idx, outer_test_idx in outer_splits:
+        outer_train_idx, outer_test_idx = _reject_in_fold(
+            trial_ptps, outer_train_idx, outer_test_idx
+        )
+        if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
             continue
 
-        target_feat, target_mc = X_by_subject[i]
-        target_y = y_by_subject[i]
+        # Test fold: TARGET data only (no donor)
+        X_feat_otest = X_features[outer_test_idx]
+        X_mc_otest = X_multichannel[outer_test_idx]
+        y_otest = y[outer_test_idx]
 
-        # Try all donors, pick the best by inner CV
-        best_donor = None
-        best_cv_score = 0.0
-        for donor_sid, (donor_feat, donor_mc, donor_y) in donor_subjects.items():
-            if donor_sid == sid:
-                continue
-            cv_score = _score_donor(
-                target_feat, target_mc, target_y, donor_feat, donor_mc, donor_y
-            )
-            if cv_score > best_cv_score:
-                best_cv_score = cv_score
-                best_donor = donor_sid
+        # Training fold: TARGET train + ALL donor data
+        X_feat_otrain = np.vstack([X_features[outer_train_idx], donor_feat])
+        X_mc_otrain = np.vstack([X_multichannel[outer_train_idx], donor_mc])
+        y_otrain = np.concatenate([y[outer_train_idx], donor_y])
 
-        if best_donor is None:
-            continue
-
-        donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
-
-        new_feat = np.vstack([target_feat, donor_feat])
-        new_mc = np.vstack([target_mc, donor_mc])
-        new_y = np.concatenate([aug_y[i], donor_y])
-        new_ptps = np.concatenate([aug_ptps[i], compute_trial_max_ptp(donor_mc)])
-        new_groups = build_classwise_trial_groups(new_y, group_size=trial_group_size)
-
-        aug_X[i] = (new_feat, new_mc)
-        aug_y[i] = new_y
-        aug_ptps[i] = new_ptps
-        aug_groups[i] = new_groups
-
-        print(
-            f"    {sid}: augmented with {best_donor} "
-            f"(inner-CV={best_cv_score:.1%}, +{len(donor_y)} trials)"
+        # Inner CV for model selection: splits on TARGET train indices only
+        inner_groups = groups[outer_train_idx] if groups is not None else None
+        inner_splits = make_cv_splits(
+            y[outer_train_idx],
+            n_splits=n_inner_folds,
+            strategy=split_strategy,
+            groups=inner_groups,
+            random_state=random_state,
         )
 
-    return aug_X, aug_y, aug_ptps, aug_groups
+        inner_scores_by_clf: dict[str, list[float]] = {n: [] for n in classifier_names}
+        for inner_train_idx, inner_val_idx in inner_splits:
+            # Inner train: target inner train + ALL donor data
+            inner_feat_train = np.vstack(
+                [X_features[outer_train_idx[inner_train_idx]], donor_feat]
+            )
+            inner_mc_train = np.vstack(
+                [X_multichannel[outer_train_idx[inner_train_idx]], donor_mc]
+            )
+            inner_y_train = np.concatenate(
+                [y[outer_train_idx[inner_train_idx]], donor_y]
+            )
+            # Inner val: TARGET only (no donor)
+            inner_feat_val = X_features[outer_train_idx[inner_val_idx]]
+            inner_mc_val = X_multichannel[outer_train_idx[inner_val_idx]]
+            inner_y_val = y[outer_train_idx[inner_val_idx]]
+
+            split_scores = _evaluate_classifiers_batch(
+                classifier_names,
+                inner_feat_train,
+                inner_feat_val,
+                inner_y_train,
+                inner_y_val,
+                inner_mc_train,
+                inner_mc_val,
+                sfreq,
+                k_best,
+            )
+            for clf_name, score in split_scores.items():
+                inner_scores_by_clf[clf_name].append(score)
+
+        inner_means = {
+            name: float(np.mean(scores)) if scores else 0.5
+            for name, scores in inner_scores_by_clf.items()
+        }
+        best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+
+        # Retrain best on augmented outer train, test on TARGET outer test
+        outer_score = _evaluate_classifier(
+            best_clf,
+            X_feat_otrain,
+            X_feat_otest,
+            y_otrain,
+            y_otest,
+            X_mc_otrain,
+            X_mc_otest,
+            sfreq,
+            k_best,
+        )
+        fold_scores.append(outer_score)
+
+    return float(np.mean(fold_scores)) if fold_scores else 0.5
 
 
 def run_pipeline(
@@ -533,66 +538,88 @@ def run_pipeline(
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
 
-    # Step 3b: Augmented nested CV for weak subjects
+    # Step 3b: Augmented nested CV for weak subjects (leakage-free)
     aug_nested_scores = None
     aug_nested_mean = None
     step_start_aug = time.perf_counter()
     mi_new_dir = Path("Data/MI_DATA_NEW")
     if mi_new_dir.exists():
         print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
+        from pyriemann.estimation import Covariances as _Cov
+        from pyriemann.utils.distance import distance_riemann as _dist_riemann
+        from pyriemann.utils.mean import mean_covariance as _mean_cov
+
         from src.transfer import load_all_subjects
 
-        transfer_data_dirs = [data_dir]
-        transfer_data_dirs.append(mi_new_dir)
+        transfer_data_dirs = [data_dir, mi_new_dir]
         donor_subjects = load_all_subjects(
             transfer_data_dirs,
             sfreq=sfreq,
             subject_merge={"subject0100_2": "subject0100"},
         )
-        print(
-            f"  Donor pool: {len(donor_subjects)} subjects from {len(transfer_data_dirs)} directories"
-        )
+        print(f"  Donor pool: {len(donor_subjects)} subjects")
 
-        aug_X, aug_y, aug_ptps, aug_groups = _augment_weak_subjects(
-            X_by_subject,
-            y_by_subject,
-            trial_ptps_by_subject,
-            trial_groups_by_subject,
-            subject_ids,
-            nested_scores,
-            donor_subjects,
-            weakness_threshold=0.50,
-            sfreq=sfreq,
-            trial_group_size=cfg.trial_group_size,
-        )
+        # Compute Riemannian means for donor selection
+        _cov_est = _Cov(estimator="lwf")
+        donor_means = {
+            sid: _mean_cov(_cov_est.fit_transform(d[1]), metric="riemann")
+            for sid, d in donor_subjects.items()
+        }
+        target_means = {
+            subject_ids[i]: _mean_cov(
+                _cov_est.fit_transform(X_by_subject[i][1]), metric="riemann"
+            )
+            for i in range(len(subject_ids))
+        }
 
-        aug_nested_scores, aug_nested_mean, aug_nested_std, aug_nested_methods = (
-            train_nested_model_selection_cv(
-                aug_X,
-                aug_y,
+        weakness_threshold = 0.50
+        aug_nested_scores = list(nested_scores)  # start with original scores
+
+        for i, (sid, score) in enumerate(zip(subject_ids, nested_scores)):
+            if score >= weakness_threshold:
+                continue
+
+            # Find closest donor by Riemannian distance
+            dists = {
+                dsid: float(_dist_riemann(target_means[sid], donor_means[dsid]))
+                for dsid in donor_subjects
+                if dsid != sid
+            }
+            best_donor = min(dists, key=dists.get)
+
+            donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
+            target_feat, target_mc = X_by_subject[i]
+
+            aug_score = _augmented_nested_cv_subject(
+                target_feat,
+                target_mc,
+                y_by_subject[i],
+                donor_feat,
+                donor_mc,
+                donor_y,
                 sfreq=sfreq,
                 n_outer_folds=cfg.n_outer_folds,
                 n_inner_folds=cfg.n_inner_folds,
                 k_best=cfg.k_best,
-                trial_ptps_by_subject=aug_ptps,
+                trial_ptps=trial_ptps_by_subject[i],
                 split_strategy=cfg.split_strategy,
-                trial_groups_by_subject=aug_groups,
-                trial_group_size=cfg.trial_group_size,
+                groups=trial_groups_by_subject[i],
                 random_state=cfg.random_state,
-                n_jobs=cfg.n_jobs,
-                parallel_backend=cfg.parallel_backend,
-                max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
-                enable_band_cache=cfg.enable_band_cache,
-                cache_scope=cfg.cache_scope,
             )
-        )
+            aug_nested_scores[i] = aug_score
+            print(
+                f"    {sid}: +{best_donor} (d={dists[best_donor]:.1f}) "
+                f"{score:.1%} -> {aug_score:.1%} ({aug_score - score:+.1%})"
+            )
+
+        aug_nested_mean = float(np.mean(aug_nested_scores))
 
         print(f"\n  {'Subject':<14} {'Original':>10} {'Augmented':>10} {'Delta':>8}")
         print("  " + "-" * 42)
         for sid, orig, aug in zip(subject_ids, nested_scores, aug_nested_scores):
             delta = aug - orig
             sign = "+" if delta >= 0 else ""
-            weak = " *" if orig < 0.55 else ""
+            weak = " *" if orig < weakness_threshold else ""
             print(f"  {sid:<14} {orig:>9.1%} {aug:>9.1%} {sign}{delta:>6.1%}{weak}")
         print(f"\n  Original nested mean:  {nested_mean:.1%}")
         print(f"  Augmented nested mean: {aug_nested_mean:.1%}")
