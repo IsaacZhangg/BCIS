@@ -215,3 +215,84 @@ def loso_cv(
         scores[held_out] = float(clf.score(X_test_ts, y_test))
 
     return scores
+
+
+def run_transfer_evaluation(
+    data_dirs: list[Path] | None = None,
+    sfreq: float = 250.0,
+    subject_merge: dict[str, str] | None = None,
+    within_subject_scores: dict[str, float] | None = None,
+) -> dict:
+    """Run cross-subject transfer learning evaluation and print comparison.
+
+    Args:
+        data_dirs: Directories to scan. Defaults to Data/unicorn-data + Data/MI_DATA_NEW.
+        sfreq: Sampling frequency.
+        subject_merge: Subject ID merging map.
+        within_subject_scores: Optional dict of subject_id -> nested CV accuracy
+            for comparison table.
+
+    Returns:
+        Results dict with LOSO and LOSO+FT scores.
+    """
+    if data_dirs is None:
+        data_dirs = [Path("Data/unicorn-data"), Path("Data/MI_DATA_NEW")]
+    if subject_merge is None:
+        subject_merge = {"subject0100_2": "subject0100"}
+
+    print("=" * 68)
+    print("Cross-Subject Transfer Learning (Euclidean Alignment + LOSO)")
+    print("=" * 68)
+
+    print("\nLoading subjects from all data directories...")
+    subjects = load_all_subjects(data_dirs, sfreq=sfreq, subject_merge=subject_merge)
+    print(f"Loaded {len(subjects)} subjects: {', '.join(sorted(subjects.keys()))}")
+    for sid in sorted(subjects.keys()):
+        X_mc, y = subjects[sid]
+        n_left = int(np.sum(y == 0))
+        n_right = int(np.sum(y == 1))
+        print(f"  {sid}: {len(y)} trials ({n_left}L/{n_right}R)")
+
+    print("\nRunning LOSO CV (no fine-tuning)...")
+    loso_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=False)
+
+    print("Running LOSO CV (with fine-tuning)...")
+    loso_ft_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=True)
+
+    # Print comparison table
+    loso_mean = float(np.mean(list(loso_scores.values())))
+    loso_ft_mean = float(np.mean(list(loso_ft_scores.values())))
+
+    header = f"\n{'Subject':<16}"
+    if within_subject_scores:
+        header += f"{'Within-Subj':>12}"
+    header += f"{'LOSO':>10}{'LOSO+FT':>10}"
+    print(header)
+    print("-" * len(header))
+
+    for sid in sorted(loso_scores.keys()):
+        row = f"  {sid:<14}"
+        if within_subject_scores and sid in within_subject_scores:
+            row += f"{within_subject_scores[sid]:>11.1%}"
+        elif within_subject_scores:
+            row += f"{'n/a':>12}"
+        row += f"{loso_scores[sid]:>9.1%}{loso_ft_scores[sid]:>9.1%}"
+        print(row)
+
+    print(f"\n  LOSO mean:       {loso_mean:.1%}")
+    print(f"  LOSO+FT mean:    {loso_ft_mean:.1%}")
+    if within_subject_scores:
+        ws_mean = float(np.mean(list(within_subject_scores.values())))
+        print(f"  Within-subj mean: {ws_mean:.1%}")
+
+    return {
+        "loso_scores": loso_scores,
+        "loso_ft_scores": loso_ft_scores,
+        "loso_mean": loso_mean,
+        "loso_ft_mean": loso_ft_mean,
+        "n_subjects": len(subjects),
+    }
+
+
+if __name__ == "__main__":
+    results = run_transfer_evaluation()

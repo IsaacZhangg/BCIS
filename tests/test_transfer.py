@@ -3,7 +3,12 @@
 import numpy as np
 import pandas as pd
 
-from src.transfer import align_subjects, load_all_subjects, loso_cv
+from src.transfer import (
+    align_subjects,
+    load_all_subjects,
+    loso_cv,
+    run_transfer_evaluation,
+)
 
 
 def _make_recording_csv(
@@ -166,3 +171,23 @@ def test_loso_cv_fine_tune_returns_scores():
     assert len(scores) == 4
     for sid, score in scores.items():
         assert 0.0 <= score <= 1.0
+
+
+def test_run_transfer_evaluation_returns_results(tmp_path):
+    """run_transfer_evaluation returns a results dict with expected keys."""
+    for subj_name in ["subject0001", "subject0002", "subject0003"]:
+        subj_dir = tmp_path / subj_name / "session001"
+        subj_dir.mkdir(parents=True)
+        _make_recording_csv(
+            subj_dir / "recording_test.csv",
+            sfreq=250.0,
+            seed=hash(subj_name) % 2**31,
+        )
+
+    results = run_transfer_evaluation(data_dirs=[tmp_path])
+
+    assert "loso_scores" in results
+    assert "loso_ft_scores" in results
+    assert "loso_mean" in results
+    assert "loso_ft_mean" in results
+    assert len(results["loso_scores"]) == 3
