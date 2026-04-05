@@ -377,39 +377,60 @@ def run_transfer_evaluation(
         n_right = int(np.sum(y == 1))
         print(f"  {sid}: {len(y)} trials ({n_left}L/{n_right}R)")
 
-    print("\nRunning LOSO CV (no fine-tuning)...")
+    print("\nRunning Riemannian within-subject CV (baseline, no shrinkage)...")
+    baseline_scores = regularized_within_subject_cv(
+        subjects, sfreq=sfreq, shrinkage_k=0.0
+    )
+    baseline_mean = float(np.mean(list(baseline_scores.values())))
+
+    print("Running regularized within-subject CV (covariance shrinkage)...")
+    reg_scores = regularized_within_subject_cv(subjects, sfreq=sfreq)
+    reg_mean = float(np.mean(list(reg_scores.values())))
+
+    print("Running LOSO CV (no fine-tuning)...")
     loso_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=False)
+    loso_mean = float(np.mean(list(loso_scores.values())))
 
     print("Running LOSO CV (with fine-tuning)...")
     loso_ft_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=True)
-
-    # Print comparison table
-    loso_mean = float(np.mean(list(loso_scores.values())))
     loso_ft_mean = float(np.mean(list(loso_ft_scores.values())))
 
-    header = f"\n{'Subject':<16}"
+    # Print comparison table
+    header = f"\n{'Subject':<16}{'Riemann':>10}{'Reg-Riem':>10}{'Delta':>8}"
     if within_subject_scores:
-        header += f"{'Within-Subj':>12}"
-    header += f"{'LOSO':>10}{'LOSO+FT':>10}"
+        header += f"  {'Nested':>10}"
+    header += f"{'LOSO':>10}"
     print(header)
     print("-" * len(header))
 
-    for sid in sorted(loso_scores.keys()):
-        row = f"  {sid:<14}"
+    for sid in sorted(reg_scores.keys()):
+        base = baseline_scores.get(sid, 0.5)
+        reg = reg_scores[sid]
+        delta = reg - base
+        sign = "+" if delta >= 0 else ""
+        row = f"  {sid:<14}{base:>9.1%}{reg:>9.1%}{sign}{delta:>6.1%}"
         if within_subject_scores and sid in within_subject_scores:
-            row += f"{within_subject_scores[sid]:>11.1%}"
+            row += f"  {within_subject_scores[sid]:>9.1%}"
         elif within_subject_scores:
-            row += f"{'n/a':>12}"
-        row += f"{loso_scores[sid]:>9.1%}{loso_ft_scores[sid]:>9.1%}"
+            row += f"  {'n/a':>10}"
+        row += f"{loso_scores[sid]:>9.1%}"
         print(row)
 
-    print(f"\n  LOSO mean:       {loso_mean:.1%}")
-    print(f"  LOSO+FT mean:    {loso_ft_mean:.1%}")
     if within_subject_scores:
         ws_mean = float(np.mean(list(within_subject_scores.values())))
-        print(f"  Within-subj mean: {ws_mean:.1%}")
+        print(f"\n  Nested (best-of-4) mean: {ws_mean:.1%}")
+    print(f"  Riemann baseline mean:   {baseline_mean:.1%}")
+    print(f"  Reg-Riemann mean:        {reg_mean:.1%}")
+    delta_mean = reg_mean - baseline_mean
+    sign = "+" if delta_mean >= 0 else ""
+    print(f"  Shrinkage delta:         {sign}{delta_mean:.1%}")
+    print(f"  LOSO mean:               {loso_mean:.1%}")
 
     return {
+        "baseline_scores": baseline_scores,
+        "baseline_mean": baseline_mean,
+        "reg_scores": reg_scores,
+        "reg_mean": reg_mean,
         "loso_scores": loso_scores,
         "loso_ft_scores": loso_ft_scores,
         "loso_mean": loso_mean,
