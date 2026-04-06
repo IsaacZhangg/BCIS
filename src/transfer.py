@@ -12,21 +12,16 @@ from pyriemann.utils.mean import mean_covariance
 from scipy.linalg import fractional_matrix_power
 from sklearn.linear_model import LogisticRegression
 
+from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR
 from src.data_loader import CHANNELS, load_recording
 from src.epochs import (
     compute_rejection_threshold,
     extract_left_right_epochs,
     reject_bad_epochs,
+    task_epochs,
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
-
-
-def _task_epochs(pairs_by_ch: dict) -> np.ndarray:
-    """Convert per-channel epoch pairs to (n_trials, n_channels, n_samples)."""
-    return np.array(
-        [[trial[1] for trial in pairs_by_ch[ch]] for ch in CHANNELS]
-    ).transpose(1, 0, 2)
 
 
 def _get_recordings_with_trials(
@@ -127,7 +122,9 @@ def load_all_subjects(
         left_features = extract_lateralization_features(all_left, sfreq)
         right_features = extract_lateralization_features(all_right, sfreq)
         X_features = np.vstack([left_features, right_features])
-        X_mc = np.vstack([_task_epochs(all_left), _task_epochs(all_right)])
+        X_mc = np.vstack(
+            [task_epochs(all_left, CHANNELS), task_epochs(all_right, CHANNELS)]
+        )
         y = np.array([0] * n_left + [1] * n_right)
         subjects[sid] = (X_features, X_mc, y)
 
@@ -474,9 +471,9 @@ def run_transfer_evaluation(
         Results dict with LOSO and LOSO+FT scores.
     """
     if data_dirs is None:
-        data_dirs = [Path("Data/unicorn-data"), Path("Data/MI_DATA_NEW")]
+        data_dirs = [Path("Data/unicorn-data"), MI_DATA_NEW_DIR]
     if subject_merge is None:
-        subject_merge = {"subject0100_2": "subject0100"}
+        subject_merge = DEFAULT_SUBJECT_MERGE
 
     print("=" * 68)
     print("Cross-Subject Transfer Learning (Euclidean Alignment + LOSO)")

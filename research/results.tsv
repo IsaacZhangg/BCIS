@@ -1,0 +1,14 @@
+experiment	nested_mean	augmented_mean	status	description
+baseline	0.620	0.646	kept	Current best configuration (seed=42)
+exp1_lightgbm	0.620	0.638	reverted	LightGBM 5th classifier: nested same, augmented worse (threshold interaction)
+exp2_asr	0.604	0.620	reverted	ASR preprocessing: both metrics worse, removes discriminative signal
+exp3a_thresh055	0.620	0.646	reverted	Augmentation threshold 0.55: same (subject0009 augmentation neutral)
+exp3b_thresh060	0.620	0.642	reverted	Augmentation threshold 0.60: worse (subject0005 hurt by donor data)
+exp5_timefreq	0.602	0.595	reverted	Early/late ERD temporal features: both metrics worse, diluted feature pool
+exp6_multidonor	0.620	0.635	reverted	Top-2 donors: subject0001 improved but subject0002 hurt by weak 2nd donor
+exp7_fb_riemann	0.599	0.625	reverted	Filter-bank Riemannian (3 bands): 108 tangent features overfit ~90 samples
+exp8_plv	0.623	0.642	reverted	PLV features (mu+beta): nested +0.3% but augmented -0.4%, within noise
+exp9_xdawn	n/a	n/a	skipped	xDAWN designed for P300 evoked responses, not oscillatory motor imagery
+exp10_svm_c	0.620	0.646	reverted	Per-subject SVM C selection: completely neutral, inner CV picks C~20 anyway
+exp11_noise_aug	0.620	0.646	reverted	Noise augmentation (Riemannian only): completely neutral
+exp12_reduced_feat	0.601	0.629	reverted	Removed Cz+Fz+Hjorth features (45->34): both metrics worse, those features carry signal

@@ -7,7 +7,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from src.config import TrainingConfig
+from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR, TrainingConfig
 from src.data_loader import (
     CHANNELS,
     get_complete_recordings,
@@ -19,6 +19,7 @@ from src.epochs import (
     compute_trial_max_ptp,
     extract_left_right_epochs,
     reject_bad_epochs,
+    task_epochs,
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
@@ -54,13 +55,6 @@ def _print_header(title: str) -> None:
 def _print_step(step_idx: int, total_steps: int, title: str) -> None:
     """Print a clean step marker."""
     print(f"\n[{step_idx}/{total_steps}] {title}")
-
-
-def _task_epochs(pairs_by_ch: dict) -> np.ndarray:
-    """Convert per-channel epoch pairs to (n_trials, n_channels, n_samples)."""
-    return np.array(
-        [[trial[1] for trial in pairs_by_ch[ch]] for ch in CHANNELS]
-    ).transpose(1, 0, 2)
 
 
 def _process_recording(
@@ -156,7 +150,9 @@ def _pairs_to_features(
     left_features = extract_lateralization_features(left_pairs, sfreq)
     right_features = extract_lateralization_features(right_pairs, sfreq)
 
-    X_multichannel = np.vstack([_task_epochs(left_pairs), _task_epochs(right_pairs)])
+    X_multichannel = np.vstack(
+        [task_epochs(left_pairs, CHANNELS), task_epochs(right_pairs, CHANNELS)]
+    )
     X_features = np.vstack([left_features, right_features])
     y = np.array([0] * n_left + [1] * n_right)
     return X_features, X_multichannel, y
@@ -542,8 +538,7 @@ def run_pipeline(
     aug_nested_scores = None
     aug_nested_mean = None
     step_start_aug = time.perf_counter()
-    mi_new_dir = Path("Data/MI_DATA_NEW")
-    if mi_new_dir.exists():
+    if MI_DATA_NEW_DIR.exists():
         print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
         from pyriemann.estimation import Covariances as _Cov
         from pyriemann.utils.distance import distance_riemann as _dist_riemann
@@ -551,11 +546,11 @@ def run_pipeline(
 
         from src.transfer import load_all_subjects
 
-        transfer_data_dirs = [data_dir, mi_new_dir]
+        transfer_data_dirs = [data_dir, MI_DATA_NEW_DIR]
         donor_subjects = load_all_subjects(
             transfer_data_dirs,
             sfreq=sfreq,
-            subject_merge={"subject0100_2": "subject0100"},
+            subject_merge=DEFAULT_SUBJECT_MERGE,
         )
         print(f"  Donor pool: {len(donor_subjects)} subjects")
 
@@ -702,9 +697,8 @@ def run_pipeline(
     transfer_results: dict | None = None
     try:
         transfer_data_dirs = [data_dir]
-        mi_new_dir = Path("Data/MI_DATA_NEW")
-        if mi_new_dir.exists():
-            transfer_data_dirs.append(mi_new_dir)
+        if MI_DATA_NEW_DIR.exists():
+            transfer_data_dirs.append(MI_DATA_NEW_DIR)
         within_scores = {sid: float(s) for sid, s in zip(subject_ids, nested_scores)}
         transfer_results = run_transfer_evaluation(
             data_dirs=transfer_data_dirs,

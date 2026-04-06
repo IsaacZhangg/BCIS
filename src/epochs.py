@@ -210,6 +210,16 @@ def compute_trial_max_ptp(X_multichannel: np.ndarray) -> np.ndarray:
     return np.max(np.ptp(X_multichannel, axis=2), axis=1)
 
 
+def task_epochs(
+    pairs_by_ch: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    channels: list[str],
+) -> np.ndarray:
+    """Convert per-channel epoch pairs to (n_trials, n_channels, n_samples)."""
+    return np.array(
+        [[trial[1] for trial in pairs_by_ch[ch]] for ch in channels]
+    ).transpose(1, 0, 2)
+
+
 def reject_bad_epochs(
     left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],

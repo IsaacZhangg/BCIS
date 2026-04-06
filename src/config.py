@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Literal
+
+MI_DATA_NEW_DIR = Path("Data/MI_DATA_NEW")
+DEFAULT_SUBJECT_MERGE: dict[str, str] = {"subject0100_2": "subject0100"}
 
 SplitStrategy = Literal["stratified", "stratified_group"]
 ParallelBackend = Literal["loky", "threading"]
@@ -32,6 +36,7 @@ class TrainingConfig:
     max_blas_threads_per_worker: int = 1
     enable_band_cache: bool = True
     cache_scope: CacheScope = "subject"
+    augmentation_weakness_threshold: float = 0.50
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""
