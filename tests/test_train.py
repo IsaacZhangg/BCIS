@@ -82,6 +82,7 @@ def test_train_final_model_returns_complete_model():
         "classifier",
         "sfreq",
         "k_best",
+        "bands",
     }
     assert model["sfreq"] == 250.0
     assert isinstance(model["k_best"], int)
@@ -208,6 +209,7 @@ def test_svm_final_model_and_predict():
         "classifier",
         "sfreq",
         "k_best",
+        "bands",
     }
     assert model["sfreq"] == 250.0
     assert isinstance(model["k_best"], int)
@@ -607,6 +609,35 @@ def test_evaluate_classifiers_batch_with_custom_bands():
         assert "svm" in scores
         assert 0 <= scores["lda"] <= 1
         assert 0 <= scores["svm"] <= 1
+
+
+def test_train_final_model_with_custom_bands():
+    """train_final_model accepts a bands parameter."""
+    rng = np.random.default_rng(77)
+    X_feat, X_mc = _make_subject_data(rng)
+    y = LABELS
+
+    bands = FBCSP_BAND_CANDIDATES["high_mu"]
+    model = train_final_model(X_feat, X_mc, y, bands=bands)
+
+    assert "bands" in model
+    assert model["bands"] == bands
+
+    preds = predict(model, X_feat, X_mc)
+    assert len(preds) == len(y)
+
+
+def test_train_final_model_svm_with_custom_bands():
+    """train_final_model_svm accepts a bands parameter."""
+    rng = np.random.default_rng(78)
+    X_feat, X_mc = _make_subject_data(rng)
+    y = LABELS
+
+    bands = FBCSP_BAND_CANDIDATES["wide_mu"]
+    model = train_final_model_svm(X_feat, X_mc, y, bands=bands)
+
+    assert "bands" in model
+    assert model["bands"] == bands
 
 
 def test_nested_cv_returns_band_config():

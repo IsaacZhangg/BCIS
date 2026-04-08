@@ -714,6 +714,8 @@ def run_pipeline(
     _print_step(5, 5, "Training and saving per-subject models")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    from src.train import FBCSP_BAND_CANDIDATES, FBCSP_BANDS
+
     model_paths = {}
     for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
         zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
@@ -731,9 +733,18 @@ def run_pipeline(
                 print(f"  Skipping {sid} - too few clean trials for deployment model")
                 continue
 
+        # Look up the selected band config for this subject
+        selected_band_name = nested_band_configs[i]
+        selected_bands = FBCSP_BAND_CANDIDATES.get(selected_band_name, FBCSP_BANDS)
+
         if method == "SVM":
             model = train_final_model_svm(
-                X_features, X_multichannel, y, sfreq=sfreq, k_best=cfg.k_best
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                k_best=cfg.k_best,
+                bands=selected_bands,
             )
             model_path = output_dir / f"{sid}_svm.joblib"
         elif method == "Riemann":
@@ -742,12 +753,22 @@ def run_pipeline(
         elif method == "Ensemble":
             # Ensemble is CV-only; save FBCSP+LDA as deployable model
             model = train_final_model(
-                X_features, X_multichannel, y, sfreq=sfreq, k_best=cfg.k_best
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                k_best=cfg.k_best,
+                bands=selected_bands,
             )
             model_path = output_dir / f"{sid}_ensemble_lda.joblib"
         else:
             model = train_final_model(
-                X_features, X_multichannel, y, sfreq=sfreq, k_best=cfg.k_best
+                X_features,
+                X_multichannel,
+                y,
+                sfreq=sfreq,
+                k_best=cfg.k_best,
+                bands=selected_bands,
             )
             model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
         joblib.dump(model, model_path)

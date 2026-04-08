@@ -699,14 +699,16 @@ def train_final_model(
     y: np.ndarray,
     sfreq: float = 250.0,
     k_best: int = 10,
+    bands: list[tuple[float, float]] | None = None,
 ) -> dict:
     """Train a deployable FBCSP + LDA model on all data for a single subject.
 
     Returns:
-        Dict with keys: csp_models, selector, scaler, classifier, sfreq, k_best.
+        Dict with keys: csp_models, selector, scaler, classifier, sfreq, k_best, bands.
     """
+    effective_bands = bands if bands is not None else FBCSP_BANDS
     fbcsp_features, _, csp_models = _extract_fbcsp_features(
-        X_multichannel, X_multichannel, y, sfreq
+        X_multichannel, X_multichannel, y, sfreq, bands=effective_bands
     )
 
     X_combined = np.hstack([fbcsp_features, X_features])
@@ -728,6 +730,7 @@ def train_final_model(
         "classifier": classifier,
         "sfreq": sfreq,
         "k_best": k,
+        "bands": effective_bands,
     }
 
 
@@ -1525,14 +1528,16 @@ def train_final_model_svm(
     y: np.ndarray,
     sfreq: float = 250.0,
     k_best: int = 10,
+    bands: list[tuple[float, float]] | None = None,
 ) -> dict:
     """Train a deployable FBCSP + SVM model on all data for a single subject.
 
     Returns:
-        Dict with keys: csp_models, selector, scaler, classifier, sfreq, k_best.
+        Dict with keys: csp_models, selector, scaler, classifier, sfreq, k_best, bands.
     """
+    effective_bands = bands if bands is not None else FBCSP_BANDS
     fbcsp_features, _, csp_models = _extract_fbcsp_features(
-        X_multichannel, X_multichannel, y, sfreq
+        X_multichannel, X_multichannel, y, sfreq, bands=effective_bands
     )
 
     X_combined = np.hstack([fbcsp_features, X_features])
@@ -1554,6 +1559,7 @@ def train_final_model_svm(
         "classifier": classifier,
         "sfreq": sfreq,
         "k_best": k,
+        "bands": effective_bands,
     }
 
 
