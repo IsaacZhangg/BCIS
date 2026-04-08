@@ -1000,6 +1000,7 @@ def _evaluate_classifiers_batch(
     k_best: int,
     prefiltered_train: BandCache | None = None,
     prefiltered_test: BandCache | None = None,
+    bands: list[tuple[float, float]] | None = None,
 ) -> dict[str, float]:
     """Train and score one or more classifiers on a fixed split.
 
@@ -1028,17 +1029,20 @@ def _evaluate_classifiers_batch(
     if not fbcsp_names:
         return scores
 
+    effective_bands = bands if bands is not None else FBCSP_BANDS
+
     if prefiltered_train is not None and prefiltered_test is not None:
         fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
             prefiltered_train,
             prefiltered_test,
             y_train,
+            bands=effective_bands,
             n_train_trials=X_mc_train.shape[0],
             n_test_trials=X_mc_test.shape[0],
         )
     else:
         fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-            X_mc_train, X_mc_test, y_train, sfreq
+            X_mc_train, X_mc_test, y_train, sfreq, bands=effective_bands
         )
     X_train_combined = np.hstack([fbcsp_train, X_train])
     X_test_combined = np.hstack([fbcsp_test, X_test])
@@ -1118,6 +1122,7 @@ def _evaluate_classifier(
     k_best: int,
     prefiltered_train: BandCache | None = None,
     prefiltered_test: BandCache | None = None,
+    bands: list[tuple[float, float]] | None = None,
 ) -> float:
     """Train and score a single classifier on pre-split data."""
     scores = _evaluate_classifiers_batch(
@@ -1132,6 +1137,7 @@ def _evaluate_classifier(
         k_best,
         prefiltered_train=prefiltered_train,
         prefiltered_test=prefiltered_test,
+        bands=bands,
     )
     return scores[name]
 

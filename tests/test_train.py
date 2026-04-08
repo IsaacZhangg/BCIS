@@ -4,6 +4,7 @@ import numpy as np
 
 from src.epochs import compute_trial_max_ptp
 from src.train import (
+    FBCSP_BAND_CANDIDATES,
     _evaluate_classifiers_batch,
     _precompute_bandpassed,
     _reject_in_fold,
@@ -570,3 +571,36 @@ def test_per_fold_rejection_excludes_artifacts():
     assert len(scores) == 1
     assert 0 <= mean_acc <= 1
     assert std_acc >= 0
+
+
+# ---------- Custom bands parameter tests ----------
+
+
+def test_evaluate_classifiers_batch_with_custom_bands():
+    """_evaluate_classifiers_batch accepts a custom bands parameter."""
+    rng = np.random.default_rng(99)
+    X_feat_train = rng.standard_normal((30, N_FEATURES))
+    X_feat_test = rng.standard_normal((10, N_FEATURES))
+    X_mc_train = rng.standard_normal((30, N_CHANNELS, N_SAMPLES))
+    X_mc_test = rng.standard_normal((10, N_CHANNELS, N_SAMPLES))
+    y_train = np.array([0] * 15 + [1] * 15)
+    y_test = np.array([0] * 5 + [1] * 5)
+
+    # Should work with each band candidate
+    for band_name, bands in FBCSP_BAND_CANDIDATES.items():
+        scores = _evaluate_classifiers_batch(
+            ["lda", "svm"],
+            X_feat_train,
+            X_feat_test,
+            y_train,
+            y_test,
+            X_mc_train,
+            X_mc_test,
+            sfreq=250.0,
+            k_best=10,
+            bands=bands,
+        )
+        assert "lda" in scores
+        assert "svm" in scores
+        assert 0 <= scores["lda"] <= 1
+        assert 0 <= scores["svm"] <= 1
