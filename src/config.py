@@ -37,6 +37,7 @@ class TrainingConfig:
     enable_band_cache: bool = True
     cache_scope: CacheScope = "subject"
     augmentation_weakness_threshold: float = 0.50
+    fbcsp_band_candidates: tuple[str, ...] = ("standard", "high_mu", "wide_mu")
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""

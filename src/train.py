@@ -31,6 +31,36 @@ FBCSP_BANDS = [
     (24, 30),
 ]
 
+FBCSP_BAND_CANDIDATES: dict[str, list[tuple[float, float]]] = {
+    "standard": [
+        (8, 10),
+        (10, 12),
+        (12, 14),
+        (14, 16),
+        (16, 18),
+        (18, 20),
+        (20, 24),
+        (24, 30),
+    ],
+    "high_mu": [
+        (9, 11),
+        (11, 13),
+        (13, 15),
+        (15, 18),
+        (18, 22),
+        (22, 26),
+        (26, 30),
+    ],
+    "wide_mu": [
+        (8, 12),
+        (10, 14),
+        (12, 16),
+        (16, 20),
+        (20, 24),
+        (24, 30),
+    ],
+}
+
 N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
