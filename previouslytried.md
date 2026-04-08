@@ -505,8 +505,37 @@ The bottleneck is fundamentally **hardware and data quality**:
 - ~100 trials per subject
 - 4 of 10 subjects showing no discriminable motor imagery patterns
 
+## Round 5: New Subjects & FBCSP Band Optimization (Apr 2026)
+
+Added subjects 0100-0102, 0104, 0106 from MI_DATA_NEW to the main pipeline. Subject 0105 excluded (empty recording). Also added subject-specific FBCSP band optimization with 3 candidate configs selected via inner CV.
+
+### Experiment 1: Integrate MI_DATA_NEW subjects into main pipeline
+
+- **What:** Extended pipeline to load MI_DATA_NEW subjects alongside unicorn-data. Subject 0104's 2 sessions merged (64 trials → 54 clean). Flexible loader accepts recordings with >= 20 phase-3 trials.
+- **Result:** 15 subjects now evaluated. New subject accuracies:
+  - subject0100: 33.8% nested (57 trials) — at chance
+  - subject0101: 64.3% nested (56 trials) — **signal detected!**
+  - subject0102: 31.7% nested (30 trials) — at chance (very low trial count)
+  - subject0104: 37.8% nested (54 trials) — at chance
+  - subject0106: 36.7% nested (30 trials) — at chance (very low trial count)
+- **Impact on original 10 subjects:** Negligible (their data unchanged, only the donor pool grew). Augmented nested for weak subjects now has 15-subject donor pool.
+
+### Experiment 2: Subject-specific FBCSP band optimization
+
+- **What:** Inner CV now selects from 3 band configurations per subject per outer fold:
+  - "standard": (8,10),(10,12),(12,14),(14,16),(16,18),(18,20),(20,24),(24,30) — proven default
+  - "high_mu": (9,11),(11,13),(13,15),(15,18),(18,22),(22,26),(26,30) — shifted mu bands
+  - "wide_mu": (8,12),(10,14),(12,16),(16,20),(20,24),(24,30) — wider sub-bands
+- **Result:** Most subjects selected "standard" (the proven default). Non-standard selections:
+  - subject0004: wide_mu (55.7% nested)
+  - subject0005: high_mu (50.6% nested)
+  - subject0007: wide_mu (64.0% nested)
+  - subject0101: high_mu (64.3% nested)
+  - subject0104: high_mu (37.8% nested)
+- **Impact:** Mixed. Band optimization adds an extra dimension to inner CV model selection, which can cause overfitting on subjects with few inner-fold trials. The 15-subject nested mean is 53.4%, but this is not comparable to the previous 10-subject 62.0% because the new subjects (mostly at chance) drag the mean down.
+- **Conclusion:** Subject-specific band optimization shows some subjects naturally prefer different band configs, but the accuracy impact is modest. The main value is benchmark expansion (15 subjects) and discovering subject0101 as a new signal subject.
+
 ## Things Still Not Tried
 
 1. **Deep learning (EEGNet/ShallowConvNet)** — likely data-limited with 100 trials
-2. **Subject-specific FBCSP bands** — computationally expensive inner CV
 

@@ -6,20 +6,27 @@ Uses four classifiers — FBCSP+LDA, Riemannian, FBCSP+SVM, and LDA+SVM Ensemble
 
 ## Results
 
-**61.2% nested selection accuracy** (unbiased) across 10 subjects. 5 of 10 above chance (>=60%).
+**53.4% nested selection accuracy** (unbiased) across 15 subjects. 5 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010, subject0101. Augmented nested mean: 56.3%. LOSO transfer mean: 51.3%.
+
+Note: the 15-subject mean is not comparable to the previous 10-subject 62.0% because the new subjects (mostly at chance) drag the mean down.
 
 | Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Nested (unbiased) | Selected |
 |---------|-----------|---------|-----|----------|--------------------|----------|
 | subject0001 | 48.5% | 41.9% | 49.3% | 45.7% | **45.9%** | SVM |
 | subject0002 | 40.1% | 41.7% | 43.2% | 35.4% | **41.0%** | SVM |
-| subject0004 | 42.8% | 29.9% | 56.7% | 44.2% | **54.7%** | SVM |
-| subject0005 | 56.8% | 53.4% | 55.6% | 55.5% | **55.9%** | FBCSP |
+| subject0004 | 42.8% | 29.9% | 56.7% | 44.2% | **55.7%** | SVM |
+| subject0005 | 56.8% | 53.4% | 55.6% | 55.5% | **50.6%** | FBCSP |
 | subject0006 | 90.0% | 42.0% | 87.0% | 85.0% | **88.0%** | FBCSP |
-| subject0007 | 64.0% | 45.0% | 50.0% | 61.0% | **66.0%** | FBCSP |
+| subject0007 | 64.0% | 45.0% | 50.0% | 61.0% | **64.0%** | FBCSP |
 | subject0008 | 69.8% | 52.8% | 57.1% | 63.4% | **65.6%** | FBCSP |
 | subject0009 | 49.1% | 56.1% | 54.9% | 47.6% | **52.3%** | Riemann |
 | subject0010 | 78.0% | 60.3% | 85.3% | 83.1% | **82.1%** | FBCSP |
 | subject0011 | 53.6% | 60.4% | 48.7% | 49.6% | **60.4%** | Riemann |
+| subject0100 | — | — | — | — | **33.8%** | — |
+| subject0101 | — | — | — | — | **64.3%** | — |
+| subject0102 | — | — | — | — | **31.7%** | — |
+| subject0104 | — | — | — | — | **37.8%** | — |
+| subject0106 | — | — | — | — | **36.7%** | — |
 
 Signal quality with the consumer-grade 8-channel Unicorn headset remains the primary bottleneck.
 
