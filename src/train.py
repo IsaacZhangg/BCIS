@@ -1157,12 +1157,28 @@ def _evaluate_subject_nested_model_selection(
     enable_band_cache: bool,
     cache_scope: CacheScope,
     max_blas_threads_per_worker: int,
-) -> tuple[float, str]:
-    """Nested model-selection CV for a single subject."""
-    classifier_names = list(ALL_CLASSIFIERS)
+    band_candidates: dict[str, list[tuple[float, float]]] | None = None,
+) -> tuple[float, str, str]:
+    """Nested model-selection CV for a single subject.
+
+    When *band_candidates* is provided, the inner loop searches over every
+    (classifier, band_config) pair.  Riemann is band-independent so it is
+    evaluated only once per inner split.  Tie-break: prefer ``"standard"``
+    band config when inner-CV scores are equal.
+    """
+    effective_candidates = (
+        band_candidates if band_candidates is not None else {"standard": FBCSP_BANDS}
+    )
+    fbcsp_classifier_names = [n for n in ALL_CLASSIFIERS if n != "riemann"]
+
+    # Union of all candidate bands for precompute cache
+    all_bands = sorted(
+        {band for bands in effective_candidates.values() for band in bands}
+    )
+
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq)
+            _precompute_bandpassed(X_multichannel, sfreq, bands=all_bands)
             if enable_band_cache and cache_scope == "subject"
             else None
         )
@@ -1174,7 +1190,8 @@ def _evaluate_subject_nested_model_selection(
             random_state=random_state,
         )
         fold_scores: list[float] = []
-        fold_winners: list[str] = []
+        fold_clf_winners: list[str] = []
+        fold_band_winners: list[str] = []
 
         for outer_train_idx, outer_test_idx in outer_splits:
             outer_train_idx, outer_test_idx = _reject_in_fold(
@@ -1200,8 +1217,12 @@ def _evaluate_subject_nested_model_selection(
                     subject_band_cache, outer_test_idx
                 )
             elif enable_band_cache:
-                outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
-                outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
+                outer_train_cache = _precompute_bandpassed(
+                    X_mc_otrain, sfreq, bands=all_bands
+                )
+                outer_test_cache = _precompute_bandpassed(
+                    X_mc_otest, sfreq, bands=all_bands
+                )
 
             inner_groups = groups[outer_train_idx] if groups is not None else None
             inner_splits = make_cv_splits(
@@ -1211,7 +1232,16 @@ def _evaluate_subject_nested_model_selection(
                 groups=inner_groups,
                 random_state=random_state,
             )
-            inner_scores_by_clf = {name: [] for name in classifier_names}
+
+            # Inner scores keyed by (classifier_name, band_config_name).
+            # Riemann uses a sentinel band key since it is band-independent.
+            _RIEMANN_BAND_KEY = "__riemann__"
+            inner_scores: dict[tuple[str, str], list[float]] = {}
+            for band_cfg_name in effective_candidates:
+                for clf_name in fbcsp_classifier_names:
+                    inner_scores[(clf_name, band_cfg_name)] = []
+            inner_scores[("riemann", _RIEMANN_BAND_KEY)] = []
+
             for inner_train_idx, inner_val_idx in inner_splits:
                 inner_train_cache: BandCache | None = None
                 inner_val_cache: BandCache | None = None
@@ -1222,8 +1252,10 @@ def _evaluate_subject_nested_model_selection(
                     inner_val_cache = _subset_band_cache(
                         outer_train_cache, inner_val_idx
                     )
-                split_scores = _evaluate_classifiers_batch(
-                    classifier_names,
+
+                # Evaluate Riemann once (band-independent)
+                riemann_score = _evaluate_classifiers_batch(
+                    ["riemann"],
                     X_feat_otrain[inner_train_idx],
                     X_feat_otrain[inner_val_idx],
                     y_otrain[inner_train_idx],
@@ -1232,38 +1264,92 @@ def _evaluate_subject_nested_model_selection(
                     X_mc_otrain[inner_val_idx],
                     sfreq,
                     k_best,
-                    prefiltered_train=inner_train_cache,
-                    prefiltered_test=inner_val_cache,
                 )
-                for clf_name, score in split_scores.items():
-                    inner_scores_by_clf[clf_name].append(score)
+                inner_scores[("riemann", _RIEMANN_BAND_KEY)].append(
+                    riemann_score["riemann"]
+                )
+
+                # Evaluate FBCSP classifiers for each band config
+                for band_cfg_name, bands in effective_candidates.items():
+                    fbcsp_scores = _evaluate_classifiers_batch(
+                        fbcsp_classifier_names,
+                        X_feat_otrain[inner_train_idx],
+                        X_feat_otrain[inner_val_idx],
+                        y_otrain[inner_train_idx],
+                        y_otrain[inner_val_idx],
+                        X_mc_otrain[inner_train_idx],
+                        X_mc_otrain[inner_val_idx],
+                        sfreq,
+                        k_best,
+                        prefiltered_train=inner_train_cache,
+                        prefiltered_test=inner_val_cache,
+                        bands=bands,
+                    )
+                    for clf_name, sc in fbcsp_scores.items():
+                        inner_scores[(clf_name, band_cfg_name)].append(sc)
+
+            # Pick best (classifier, band_config) pair.
             inner_means = {
-                name: float(np.mean(scores)) if scores else 0.5
-                for name, scores in inner_scores_by_clf.items()
+                key: float(np.mean(scores)) if scores else 0.5
+                for key, scores in inner_scores.items()
             }
 
-            best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+            # Tie-break: prefer "standard" band config
+            def _sort_key(item: tuple[tuple[str, str], float]) -> tuple[float, int]:
+                (_, band_name), mean_score = item
+                # Higher score first; among ties prefer "standard" (priority 0)
+                prefer_standard = 0 if band_name == "standard" else 1
+                return (mean_score, -prefer_standard)
 
-            outer_score = _evaluate_classifier(
-                best_clf,
-                X_feat_otrain,
-                X_feat_otest,
-                y_otrain,
-                y_otest,
-                X_mc_otrain,
-                X_mc_otest,
-                sfreq,
-                k_best,
-                prefiltered_train=outer_train_cache,
-                prefiltered_test=outer_test_cache,
-            )
+            best_key = max(inner_means.items(), key=_sort_key)[0]
+            best_clf, best_band_key = best_key
+
+            # Determine the actual band config for outer evaluation
+            if best_clf == "riemann":
+                # Riemann is band-independent; assign "standard" as its band config
+                best_band_cfg_name = "standard"
+                outer_score = _evaluate_classifier(
+                    best_clf,
+                    X_feat_otrain,
+                    X_feat_otest,
+                    y_otrain,
+                    y_otest,
+                    X_mc_otrain,
+                    X_mc_otest,
+                    sfreq,
+                    k_best,
+                    prefiltered_train=outer_train_cache,
+                    prefiltered_test=outer_test_cache,
+                )
+            else:
+                best_band_cfg_name = best_band_key
+                outer_score = _evaluate_classifier(
+                    best_clf,
+                    X_feat_otrain,
+                    X_feat_otest,
+                    y_otrain,
+                    y_otest,
+                    X_mc_otrain,
+                    X_mc_otest,
+                    sfreq,
+                    k_best,
+                    prefiltered_train=outer_train_cache,
+                    prefiltered_test=outer_test_cache,
+                    bands=effective_candidates[best_band_cfg_name],
+                )
+
             fold_scores.append(outer_score)
-            fold_winners.append(best_clf)
+            fold_clf_winners.append(best_clf)
+            fold_band_winners.append(best_band_cfg_name)
 
         score = float(np.mean(fold_scores)) if fold_scores else 0.5
-        winner_counts = Counter(fold_winners)
-        best_method = winner_counts.most_common(1)[0][0] if winner_counts else "lda"
-        return score, best_method
+        clf_counts = Counter(fold_clf_winners)
+        best_method = clf_counts.most_common(1)[0][0] if clf_counts else "lda"
+        band_counts = Counter(fold_band_winners)
+        best_band_config = (
+            band_counts.most_common(1)[0][0] if band_counts else "standard"
+        )
+        return score, best_method, best_band_config
 
 
 def train_nested_model_selection_cv(
@@ -1283,13 +1369,14 @@ def train_nested_model_selection_cv(
     max_blas_threads_per_worker: int = 1,
     enable_band_cache: bool = True,
     cache_scope: CacheScope = "subject",
-) -> tuple[list[float], float, float, list[str]]:
+    band_candidates: dict[str, list[tuple[float, float]]] | None = None,
+) -> tuple[list[float], float, float, list[str], list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
     Outer loop: StratifiedKFold(n_outer_folds) per subject.
-    Inner loop: for each outer fold, evaluate all 4 classifiers via inner CV
-    on the outer-train split, pick the best, retrain on full outer-train, and
-    evaluate on outer-test.
+    Inner loop: for each outer fold, evaluate all 4 classifiers (and all band
+    configs when *band_candidates* is provided) via inner CV on the outer-train
+    split, pick the best, retrain on full outer-train, and evaluate on outer-test.
 
     This gives an unbiased estimate of the "pick the best classifier" strategy
     because the classifier selection is done inside the CV loop.
@@ -1308,10 +1395,12 @@ def train_nested_model_selection_cv(
         trial_groups_by_subject: Optional explicit CV groups per subject.
         trial_group_size: Group size when groups are auto-generated.
         random_state: Random seed for deterministic splits.
+        band_candidates: Named FBCSP band configurations to search over.
+            When ``None``, defaults to ``{"standard": FBCSP_BANDS}``.
 
     Returns:
-        Tuple of (per_subject_scores, mean, std, per_subject_best_methods).
-        per_subject_best_methods is the most frequent inner-CV winner per subject.
+        Tuple of (per_subject_scores, mean, std, per_subject_best_methods,
+        per_subject_best_band_configs).
 
     Extra controls:
         n_jobs: Subject-level parallel jobs (1 disables parallelism).
@@ -1353,6 +1442,7 @@ def train_nested_model_selection_cv(
                 enable_band_cache=enable_band_cache,
                 cache_scope=cache_scope,
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
+                band_candidates=band_candidates,
             )
             for X_features, X_multichannel, y, groups, trial_ptps in payloads
         ]
@@ -1373,16 +1463,18 @@ def train_nested_model_selection_cv(
                 enable_band_cache=enable_band_cache,
                 cache_scope=cache_scope,
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
+                band_candidates=band_candidates,
             )
             for X_features, X_multichannel, y, groups, trial_ptps in payloads
         )
 
-    scores = [score for score, _ in per_subject_results]
-    best_methods = [method for _, method in per_subject_results]
+    scores = [score for score, _, _ in per_subject_results]
+    best_methods = [method for _, method, _ in per_subject_results]
+    best_band_configs = [band_cfg for _, _, band_cfg in per_subject_results]
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc, best_methods
+    return scores, mean_acc, std_acc, best_methods, best_band_configs
 
 
 # ---------------------------------------------------------------------------

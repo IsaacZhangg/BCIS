@@ -482,7 +482,7 @@ def run_pipeline(
     best_std = float(np.std(best_scores))
 
     print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
-    nested_scores, nested_mean, nested_std, nested_methods = (
+    nested_scores, nested_mean, nested_std, nested_methods, nested_band_configs = (
         train_nested_model_selection_cv(
             X_by_subject,
             y_by_subject,
