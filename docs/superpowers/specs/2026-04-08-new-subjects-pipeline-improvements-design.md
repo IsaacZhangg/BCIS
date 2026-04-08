@@ -1,12 +1,20 @@
-# New Subjects Integration & Pipeline Improvements
+# New Subjects Integration & Pipeline Improvements (Revised)
 
-**Date**: 2026-04-08
+**Date**: 2026-04-08 (revised after Codex review)
 **Branch**: P3LR
-**Scope**: Integrate subjects 104-106, enhance augmentation, add subject-specific FBCSP bands
+**Scope**: Integrate subjects 104/106 into main pipeline, add subject-specific FBCSP band optimization
 
 ## Context
 
-Three new subjects (104, 105, 106) have been recorded. The current pipeline achieves 60.1% nested CV mean across 10 subjects (unicorn-data) with 62.9% augmented. The accuracy ceiling from 31+ experiments was ~62% — adding more data and the one untried classical approach (subject-specific FBCSP bands) are the remaining levers within the current stack.
+Three new subjects (104, 105, 106) have been recorded. The current pipeline achieves 62.0% nested CV mean (seed=42) across 10 subjects (unicorn-data) with 64.6% augmented. The multi-seed mean is 58.9% +/- 1.4%. After 31+ experiments, this is the established algorithmic ceiling.
+
+Subject-specific FBCSP bands are the only remaining untried classical approach (`previouslytried.md` "Things Still Not Tried" #2). Adding more subjects expands the benchmark and improves the donor/transfer pool.
+
+### What was dropped from v1 (per Codex review)
+
+- **Multi-donor weighted augmentation**: Experiment 6 in `previouslytried.md` showed multi-donor (top-2) was "worse" overall — subject0002 dropped badly with the 2nd donor.
+- **Weakness threshold 0.50 → 0.55**: Experiment 3a showed "no change" — only subject0009 was newly eligible, and it didn't benefit.
+- **Extended frequency bands (6-8 Hz, 30-36+ Hz)**: Prior experiments showed these ranges hurt globally ("6-8Hz worse", "30-36 band is mostly noise").
 
 ### New Subject Data
 
@@ -24,92 +32,110 @@ Stim encoding uses multi-digit values (e.g., 131 = trial 1/phase 3/left, 232 = t
 
 **Goal**: Include MI_DATA_NEW subjects in the main 4-classifier evaluation pipeline, not just as transfer donors.
 
+**Key refactoring note**: The current main pipeline is per-recording (`run_pipeline` loops over `rec_path` and appends one subject entry per recording — `pipeline.py:326`). MI_DATA_NEW subjects have multiple recordings per subject that need merging. The transfer path already handles this via `load_all_subjects` (`transfer.py:50`), which does subject-level aggregation with multi-recording concatenation and per-recording artifact rejection. The main pipeline needs a similar subject-level loading step for MI_DATA_NEW data.
+
 **Changes to `data_loader.py`**:
-- Add `get_recordings_flexible(data_dir, min_trials=20)` function that accepts any recording with >= `min_trials` phase-3 events (replaces the hard-coded `== 100` check for MI_DATA_NEW subjects).
-- The existing `get_complete_recordings` stays unchanged for backward compatibility.
-
-**Changes to `config.py`**:
-- No merge mapping needed for subject0104 — both sessions live under `subject0104/` and will be auto-discovered and concatenated by the flexible loader (same pattern as `load_all_subjects` in transfer.py).
+- Add `get_recordings_flexible(data_dir, min_trials=20)` — accepts recordings with >= `min_trials` phase-3 events. Groups by subject ID, returns `dict[str, list[Path]]`.
+- The existing `get_complete_recordings` stays unchanged for unicorn-data backward compatibility.
 
 **Changes to `pipeline.py`**:
-- After loading unicorn-data subjects, also scan `MI_DATA_NEW` for additional subjects using the flexible loader.
-- Skip subjects already loaded from unicorn-data (e.g., subject0000).
-- Skip subject0105 (empty recording — no stim events).
-- Merge multi-session subjects (subject0104's two sessions concatenated).
-- All discovered subjects run through the same preprocessing → epoching → feature extraction → 4-classifier nested CV path.
-- Subjects with fewer trials naturally produce smaller CV folds but the nested CV handles this.
+- After processing unicorn-data recordings (existing per-recording loop), load MI_DATA_NEW subjects via a subject-level loader that:
+  - Discovers all recordings per subject using `get_recordings_flexible`
+  - Skips subjects already loaded from unicorn-data (e.g., subject0000)
+  - Applies `DEFAULT_SUBJECT_MERGE` (subject0100_2 → subject0100, already configured)
+  - For each subject: loads all recordings, preprocesses, extracts epochs per recording, applies per-recording artifact rejection, then concatenates across recordings
+  - Extracts features from the concatenated epoch set
+- All MI_DATA_NEW subjects then run through the same 4-classifier nested CV path.
+- Report low-trial subjects separately in output (flag subjects with < 60 clean trials as "low-trial" in results).
 
-**Expected outcome**: ~12-13 subjects in the main evaluation (10 unicorn-data + subject0100, subject0101, subject0102, subject0104, subject0106 from MI_DATA_NEW, minus duplicates like subject0000).
+**Statistical stability caveat**: Subjects with ~30 trials will have very small CV folds (3 trials/fold in 10-fold). Inner CV model selection will be noisy. These subjects' individual accuracy estimates should be interpreted cautiously, but they still contribute to the donor pool and transfer evaluation.
 
-### 2. Enhanced Augmented Nested CV
+**Expected outcome**: ~15 subjects in the main evaluation (10 unicorn-data + subject0100, subject0101, subject0102, subject0104, subject0106 from MI_DATA_NEW, minus subject0000 which is a duplicate).
 
-**Goal**: Better donor matching and augmentation with the larger subject pool.
+### 2. Subject-Specific FBCSP Band Optimization
 
-**Multi-donor weighted augmentation**:
-- Instead of the single closest donor, use top-K donors (K=3).
-- Weight each donor's contribution by inverse Riemannian distance: `w_i = 1/d_i`, normalized so `sum(w_i) = 1`.
-- Sample trials from each donor proportionally to their weight, keeping total augmentation size similar to before (matched to the size of the closest single donor's dataset).
-- Leakage-free structure unchanged: donor data only in training folds.
+**Goal**: Allow the inner CV to select the best FBCSP filter-bank configuration per subject, capturing individual mu/beta rhythm frequency variations.
 
-**Raise weakness threshold**:
-- Change `augmentation_weakness_threshold` from 0.50 to 0.55 in `TrainingConfig`.
-- More borderline subjects get augmentation, and the larger pool provides better donors.
+This is the only genuinely untried classical lever. The current fixed bands are:
+```
+(8,10), (10,12), (12,14), (14,16), (16,18), (18,20), (20,24), (24,30)
+```
 
-**Changes to `pipeline.py`**:
-- Modify `_augmented_nested_cv_subject` call site to pass multi-donor data.
-- New helper `_select_weighted_donors(target_mean, donor_means, donor_subjects, k=3)` that returns concatenated (feat, mc, y) arrays with distance-weighted sampling.
+**Design constraints** (informed by previous experiments):
+- Do NOT extend below 8 Hz — theta/low-mu bands hurt globally (previouslytried.md Idea 8)
+- Do NOT extend above 30 Hz — "(30,36) band is mostly noise" (previouslytried.md)
+- Keep candidate set small (2-3 alternatives) to avoid overfitting on inner CV
+- Candidates must be close to the proven current band set
 
-### 3. Subject-Specific FBCSP Band Optimization
+**Candidate band configurations**:
 
-**Goal**: Optimize the filter-bank frequency bands per subject within the inner CV, capturing individual variations in mu/beta rhythm frequencies.
+| Name | Bands | Rationale |
+|------|-------|-----------|
+| `standard` | `(8,10),(10,12),(12,14),(14,16),(16,18),(18,20),(20,24),(24,30)` | Current proven set |
+| `high_mu` | `(9,11),(11,13),(13,15),(15,18),(18,22),(22,26),(26,30)` | Shifts mu bands up 1 Hz for subjects with higher mu peaks |
+| `wide_mu` | `(8,12),(10,14),(12,16),(16,20),(20,24),(24,30)` | Wider mu bands, fewer total bands — may help with low trial counts |
 
-**Candidate band pools**:
-- Current fixed bands: `(8,10), (10,12), (12,16), (16,20), (20,24), (24,28), (28,32), (32,36)`.
-- Extended candidate set with finer mu granularity:
-  - Mu region: `(6,8), (7,9), (8,10), (9,11), (10,12), (11,13), (12,14)`
-  - Beta region: `(13,17), (16,20), (20,24), (24,28), (28,32), (32,36), (36,40)`
-- Define 3-4 pre-built band configurations (e.g., "standard", "low-mu", "high-mu", "wide-beta") as candidates.
-- Inner CV tests each configuration alongside the existing band set and selects the one with best inner accuracy.
-- This avoids combinatorial explosion — we're comparing a small number of curated band sets, not searching all combinations.
+**Implementation**:
+- Define `FBCSP_BAND_CANDIDATES` in `train.py` as the 3 configurations above.
+- **Selection is per-subject, per-outer-fold**: In the inner CV of `train_nested_model_selection_cv`, for FBCSP-based classifiers (LDA, SVM), evaluate each band configuration. The winning (classifier, band_config) pair from inner CV is used for the outer fold.
+- **Band cache**: Precompute bandpassed signals for the **union** of all candidate bands once per subject. `_precompute_bandpassed` (`train.py:42`) takes a `bands` parameter — call it once with the union set, then index into the cache for each candidate configuration.
+- **Final model training**: The selected band configuration must propagate to `train_final_model` / `train_final_model_svm`. Store the winning band config per subject alongside the winning classifier method.
+- **Tie-breaking**: If two band configs tie on inner CV accuracy, prefer `standard` (the proven default).
 
 **Changes to `train.py`**:
-- Define `FBCSP_BAND_CANDIDATES` as a list of band configurations.
-- In the inner CV loop (within `train_nested_model_selection_cv`), for FBCSP-based classifiers (LDA, SVM), also vary the band configuration alongside `k_best`.
-- The band configuration that yields the best inner CV accuracy is used for the outer fold.
+- Add `FBCSP_BAND_CANDIDATES` constant
+- Modify `_evaluate_classifiers_batch` to accept a `bands` parameter
+- In nested CV inner loop, iterate over band candidates for FBCSP classifiers
+- Propagate winning band config to outer fold evaluation and final model
 
 **Changes to `config.py`**:
-- Add `fbcsp_band_candidates` to `TrainingConfig` with the default candidate set.
+- Add `fbcsp_band_candidates` to `TrainingConfig` (default: the 3 configs above)
 
-### 4. Improved LOSO Transfer
+**Changes to `pipeline.py`**:
+- Pass band candidates into nested CV
+- Store selected band config per subject in results
+- Use selected band config when training deployment models
 
-No architectural changes. The larger subject pool (16 subjects in the donor pool) naturally improves:
-- More training data per LOSO fold
-- Better diversity for Euclidean Alignment
-- Improved donor matching for adaptive augmented CV
+### 3. Improved LOSO Transfer (Automatic)
 
-The existing `run_transfer_evaluation` and `load_all_subjects` already scan both data directories and will automatically pick up the new subjects.
+No code changes needed. The existing `run_transfer_evaluation` and `load_all_subjects` already scan both data directories (`pipeline.py:699`). The new subjects will automatically appear in the donor pool (~15 subjects), providing more training data per LOSO fold.
+
+**Clarification**: The spec v1 said more subjects help "Euclidean Alignment." This is imprecise — EA in `loso_cv` aligns each subject to its own covariance reference independently (`transfer.py:404`). More donors help the downstream classifier's training set, not EA itself.
+
+**Known transductive element**: `loso_cv` uses all of a held-out subject's unlabeled test trials for its EA reference computation (`transfer.py:430`). This is not label leakage but is more generous than strict online transfer. Documenting, not changing.
+
+### 4. Known Leakage Risk in Augmented CV (Document Only)
+
+The current augmented nested CV selects the closest donor using the full target subject's covariance mean computed before the outer CV split (`pipeline.py:557-577`). This means donor identity is informed by test-fold data. This is a pre-existing issue, not introduced by this spec.
+
+**Not fixing now** because: (a) the donor pool is fixed per subject regardless of fold, (b) moving donor selection inside each outer fold would require recomputing Riemannian means per fold, which is expensive and the augmented path is already the slowest step, (c) the selection uses only second-order statistics (covariance mean), not labels.
+
+Flagging for future consideration.
 
 ## Files Changed
 
 | File | Changes |
 |------|---------|
-| `src/config.py` | Add `fbcsp_band_candidates`, update `augmentation_weakness_threshold` to 0.55 |
-| `src/data_loader.py` | Add flexible recording discovery for MI_DATA_NEW |
-| `src/pipeline.py` | Load MI_DATA_NEW subjects into main pipeline, multi-donor augmentation |
-| `src/train.py` | Subject-specific FBCSP band selection in inner CV |
+| `src/config.py` | Add `fbcsp_band_candidates` to `TrainingConfig` |
+| `src/data_loader.py` | Add `get_recordings_flexible` for MI_DATA_NEW discovery |
+| `src/pipeline.py` | Subject-level MI_DATA_NEW loading, pass band candidates to nested CV, store per-subject band config |
+| `src/train.py` | `FBCSP_BAND_CANDIDATES`, band selection in inner CV, propagate to final model |
 | `tests/test_data_loader.py` | Tests for flexible loader |
 | `tests/test_train.py` | Tests for band selection logic |
 
 ## Success Criteria
 
-- All valid new subjects (0104, 0106) appear in the main pipeline results table.
-- Augmented nested CV uses multi-donor weighted augmentation.
-- Inner CV selects best FBCSP band configuration per subject.
-- No data leakage — verified by existing test suite + leakage reviewer.
-- Pipeline runs without errors and produces `training_results.json` with updated results.
+- All valid new subjects (0104, 0106 + existing 0100-0102) appear in the main pipeline results table with per-subject accuracy
+- Low-trial subjects flagged in output
+- Inner CV selects best FBCSP band configuration per subject; selected config recorded in results
+- Selected band config used for deployment model training
+- No new data leakage introduced — verified by existing test suite + leakage reviewer
+- Pipeline runs without errors and produces updated `training_results.json`
 
 ## Non-Goals
 
 - Deep learning / EEGNet (deferred — user chose conservative approach)
+- Multi-donor augmentation or threshold changes (already tried, failed)
 - Changing the 4-classifier architecture
-- New feature types beyond band configuration changes
+- New feature types (current 45-feature set is balanced — adding/removing features hurts)
+- Fixing the pre-existing donor-selection leakage in augmented CV
