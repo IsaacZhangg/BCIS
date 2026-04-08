@@ -46,3 +46,24 @@ def get_recordings_by_subject(data_dir: Path) -> dict[str, list[Path]]:
         subject_id = rec_path.parent.parent.name
         grouped.setdefault(subject_id, []).append(rec_path)
     return grouped
+
+
+def get_recordings_flexible(
+    data_dir: Path,
+    min_trials: int = 20,
+) -> dict[str, list[Path]]:
+    """Find recordings with >= min_trials phase-3 events, grouped by subject.
+
+    Unlike get_complete_recordings (which requires exactly 100 trials), this
+    accepts any recording with sufficient phase-3 events — needed for MI_DATA_NEW
+    recordings that have 32 trials each.
+    """
+    grouped: dict[str, list[Path]] = {}
+    for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
+        stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].to_numpy(copy=False)
+        nonzero = stim[stim != 0].astype(int)
+        phase3_count = int(np.sum((nonzero // 10) % 10 == 3))
+        if phase3_count >= min_trials:
+            subject_id = csv_path.parent.parent.name
+            grouped.setdefault(subject_id, []).append(csv_path)
+    return grouped
