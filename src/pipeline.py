@@ -12,6 +12,7 @@ from src.data_loader import (
     CHANNELS,
     get_complete_recordings,
     get_recordings_by_subject,
+    get_recordings_flexible,
     load_recording,
 )
 from src.epochs import (
@@ -26,6 +27,8 @@ from src.preprocess import preprocess_multichannel_eeg
 from src.runtime_output import configure_console_output
 from src.transfer import run_transfer_evaluation
 from src.train import (
+    FBCSP_BAND_CANDIDATES,
+    FBCSP_BANDS,
     cross_session_evaluate,
     train_final_model,
     train_final_model_riemann,
@@ -441,6 +444,81 @@ def run_pipeline(
         raise ValueError("No valid subjects found")
     runtime_seconds["load_preprocess"] = time.perf_counter() - step_start
 
+    # Load additional subjects from MI_DATA_NEW (subject-level merge)
+    if MI_DATA_NEW_DIR.exists():
+        mi_new_grouped = get_recordings_flexible(MI_DATA_NEW_DIR, min_trials=20)
+
+        # Apply subject merge mapping
+        merged_grouped: dict[str, list[Path]] = {}
+        for sid, paths in mi_new_grouped.items():
+            canonical = DEFAULT_SUBJECT_MERGE.get(sid, sid)
+            merged_grouped.setdefault(canonical, []).extend(paths)
+
+        # Skip subjects already loaded from unicorn-data
+        for sid in sorted(merged_grouped.keys()):
+            if sid in subject_ids:
+                continue
+
+            rec_paths = merged_grouped[sid]
+            print(f"  Processing {sid} (MI_DATA_NEW, {len(rec_paths)} recording(s))...")
+
+            all_left: dict[str, list] = {ch: [] for ch in CHANNELS}
+            all_right: dict[str, list] = {ch: [] for ch in CHANNELS}
+
+            for rec_path in rec_paths:
+                data, events, rec_sfreq = load_recording(rec_path)
+                if abs(rec_sfreq - sfreq) > 1e-6:
+                    continue
+                preprocessed = preprocess_multichannel_eeg(data, sfreq)
+
+                left_pairs: dict[str, list] = {}
+                right_pairs: dict[str, list] = {}
+                for ch_idx, ch_name in enumerate(CHANNELS):
+                    signal = preprocessed[ch_idx]
+                    left, right = extract_left_right_epochs(
+                        signal,
+                        events,
+                        sfreq,
+                        task_duration=3.0,
+                        baseline_duration=1.0,
+                        skip_duration=0.25,
+                    )
+                    left_pairs[ch_name] = left
+                    right_pairs[ch_name] = right
+
+                # Per-recording artifact rejection
+                threshold = compute_rejection_threshold(left_pairs, right_pairs)
+                left_pairs, right_pairs, _, _ = reject_bad_epochs(
+                    left_pairs,
+                    right_pairs,
+                    threshold_uv=threshold,
+                )
+
+                for ch in CHANNELS:
+                    all_left[ch].extend(left_pairs[ch])
+                    all_right[ch].extend(right_pairs[ch])
+
+            n_left = len(all_left[CHANNELS[0]])
+            n_right = len(all_right[CHANNELS[0]])
+            if n_left == 0 or n_right == 0:
+                print(f"    Skipping {sid} — no clean epochs")
+                continue
+
+            print(
+                f"    Epochs: {n_left}L/{n_right}R (merged from {len(rec_paths)} recording(s))"
+            )
+
+            X_feat, X_mc, y = _pairs_to_features(all_left, all_right, sfreq)
+            trial_ptps = compute_trial_max_ptp(X_mc)
+
+            X_by_subject.append((X_feat, X_mc))
+            y_by_subject.append(y)
+            subject_ids.append(sid)
+            trial_ptps_by_subject.append(trial_ptps)
+            trial_groups_by_subject.append(
+                build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
+            )
+
     # Step 3: Cross-validation (four classifiers + nested model selection)
     step_start = time.perf_counter()
     _print_step(3, 5, "Running cross-validation")
@@ -500,6 +578,7 @@ def run_pipeline(
             max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
             enable_band_cache=cfg.enable_band_cache,
             cache_scope=cfg.cache_scope,
+            band_candidates=FBCSP_BAND_CANDIDATES,
         )
     )
     runtime_seconds["cross_validation"] = time.perf_counter() - step_start
@@ -510,7 +589,7 @@ def run_pipeline(
         f"{'Ensemble':>10} {'Best':>10} {'Nested':>10}"
     )
     print("-" * 84)
-    for sid, fs, rs, ss, es, bs, bm, ns, nm in zip(
+    for sid, fs, rs, ss, es, bs, bm, ns, nm, bc in zip(
         subject_ids,
         fbcsp_scores,
         riemann_scores,
@@ -520,11 +599,12 @@ def run_pipeline(
         best_methods_posthoc,
         nested_scores,
         nested_methods_display,
+        nested_band_configs,
     ):
         status = "signal" if ns >= 0.60 else "chance"
         print(
             f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {es:>9.1%} "
-            f"{bs:>9.1%} {ns:>9.1%}  [{nm}, {status}]"
+            f"{bs:>9.1%} {ns:>9.1%}  [{nm}, {bc}, {status}]"
         )
 
     print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
@@ -714,8 +794,6 @@ def run_pipeline(
     _print_step(5, 5, "Training and saving per-subject models")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    from src.train import FBCSP_BAND_CANDIDATES, FBCSP_BANDS
-
     model_paths = {}
     for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
         zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
@@ -816,6 +894,9 @@ def run_pipeline(
         "nested_scores": {sid: float(s) for sid, s in zip(subject_ids, nested_scores)},
         "nested_methods": {
             sid: m for sid, m in zip(subject_ids, nested_methods_display)
+        },
+        "nested_band_configs": {
+            sid: bc for sid, bc in zip(subject_ids, nested_band_configs)
         },
         "fbcsp_mean_accuracy": float(fbcsp_mean),
         "riemann_mean_accuracy": float(riemann_mean),
