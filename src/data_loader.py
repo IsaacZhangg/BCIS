@@ -27,22 +27,34 @@ def load_recording(
     return data, events, SFREQ
 
 
-def get_complete_recordings(data_dir: Path) -> list[Path]:
-    """Find all complete recordings (those with 100 imagery trials)."""
-    complete = []
+def get_recordings(data_dir: Path, min_trials: int = 100) -> list[Path]:
+    """Find recordings with at least *min_trials* phase-3 imagery events.
+
+    Args:
+        data_dir: Root directory containing subject*/session*/*.csv files.
+        min_trials: Minimum number of phase-3 trials to include a recording.
+            Default 100 matches the original "complete recording" criterion.
+    """
+    matched = []
     for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
         stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].to_numpy(copy=False)
         nonzero = stim[stim != 0].astype(int)
-        phase3_count = np.sum((nonzero // 10) % 10 == 3)
-        if phase3_count == 100:
-            complete.append(csv_path)
-    return complete
+        phase3_count = int(np.sum((nonzero // 10) % 10 == 3))
+        if phase3_count >= min_trials:
+            matched.append(csv_path)
+    return matched
 
 
-def get_recordings_by_subject(data_dir: Path) -> dict[str, list[Path]]:
-    """Group complete recordings by subject ID."""
+# Backward compatibility alias
+get_complete_recordings = get_recordings
+
+
+def get_recordings_by_subject(
+    data_dir: Path, min_trials: int = 100
+) -> dict[str, list[Path]]:
+    """Group recordings by subject ID, filtering by minimum trial count."""
     grouped: dict[str, list[Path]] = {}
-    for rec_path in get_complete_recordings(data_dir):
+    for rec_path in get_recordings(data_dir, min_trials=min_trials):
         subject_id = rec_path.parent.parent.name
         grouped.setdefault(subject_id, []).append(rec_path)
     return grouped

@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from src.data_loader import load_recording, get_complete_recordings
+from src.data_loader import (
+    get_complete_recordings,
+    get_recordings,
+    get_recordings_by_subject,
+    load_recording,
+)
 
 
 def test_load_recording_returns_data_and_events():
@@ -25,12 +30,51 @@ def test_load_recording_returns_data_and_events():
     assert sfreq == 250.0
 
 
-def test_get_complete_recordings_finds_all_subjects():
-    """Test that we find all complete recordings (100 imagery trials)."""
+def test_get_recordings_default_finds_complete():
+    """Test that get_recordings with default min_trials=100 finds complete recordings."""
+    data_dir = Path("Data/unicorn-data")
+
+    recordings = get_recordings(data_dir)
+
+    # Default min_trials=100 should find exactly the same as the old function
+    assert len(recordings) == 10
+    assert all(Path(r).exists() for r in recordings)
+
+
+def test_get_recordings_low_threshold_finds_more():
+    """Test that lowering min_trials finds recordings that have fewer trials."""
+    data_dir = Path("Data/unicorn-data")
+
+    recordings_strict = get_recordings(data_dir, min_trials=100)
+    recordings_loose = get_recordings(data_dir, min_trials=30)
+
+    # Loose threshold should find at least as many as strict
+    assert len(recordings_loose) >= len(recordings_strict)
+    # All strict recordings should also appear in loose results
+    assert set(recordings_strict).issubset(set(recordings_loose))
+
+
+def test_get_recordings_by_subject_groups():
+    """Test that get_recordings_by_subject groups recordings correctly."""
+    data_dir = Path("Data/unicorn-data")
+
+    grouped = get_recordings_by_subject(data_dir)
+
+    # Should have subjects
+    assert len(grouped) > 0
+    # Each key should be a subject directory name
+    for sid, paths in grouped.items():
+        assert sid.startswith("subject")
+        assert len(paths) >= 1
+        for p in paths:
+            assert p.parent.parent.name == sid
+
+
+def test_backward_compat_alias():
+    """Test that get_complete_recordings still works as backward compat alias."""
     data_dir = Path("Data/unicorn-data")
 
     recordings = get_complete_recordings(data_dir)
 
-    # Should find 10 complete recordings
     assert len(recordings) == 10
     assert all(Path(r).exists() for r in recordings)

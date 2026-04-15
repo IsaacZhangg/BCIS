@@ -10,7 +10,7 @@ import numpy as np
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR, TrainingConfig
 from src.data_loader import (
     CHANNELS,
-    get_complete_recordings,
+    get_recordings,
     get_recordings_by_subject,
     load_recording,
 )
@@ -296,7 +296,7 @@ def run_pipeline(
     # Step 1: Find complete recordings
     step_start = time.perf_counter()
     _print_step(1, 5, "Finding complete recordings")
-    recordings = get_complete_recordings(data_dir)
+    recordings = get_recordings(data_dir, min_trials=30)
     print(f"Found {len(recordings)} complete recordings")
 
     if holdout_fraction > 0:
