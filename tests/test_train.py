@@ -2,11 +2,11 @@
 
 import numpy as np
 
+from src.band_cache import precompute_bandpassed
 from src.epochs import compute_trial_max_ptp
+from src.rejection import reject_in_fold
 from src.train import (
     _evaluate_classifiers_batch,
-    _precompute_bandpassed,
-    _reject_in_fold,
     cross_session_evaluate,
     predict,
     predict_riemann,
@@ -361,8 +361,8 @@ def test_batched_classifier_eval_prefiltered_matches_uncached():
         X_multichannel[test_idx],
         sfreq=250.0,
         k_best=10,
-        prefiltered_train=_precompute_bandpassed(X_multichannel[train_idx], 250.0),
-        prefiltered_test=_precompute_bandpassed(X_multichannel[test_idx], 250.0),
+        prefiltered_train=precompute_bandpassed(X_multichannel[train_idx], 250.0),
+        prefiltered_test=precompute_bandpassed(X_multichannel[test_idx], 250.0),
     )
 
     for name in ("lda", "riemann", "svm", "ensemble"):
@@ -523,12 +523,12 @@ def test_cross_session_no_leakage():
 
 
 def test_reject_in_fold_removes_outliers():
-    """_reject_in_fold drops trials with extreme PTP amplitudes."""
+    """reject_in_fold drops trials with extreme PTP amplitudes."""
     ptps = np.array([10.0, 12.0, 11.0, 500.0, 9.0, 0.5, 13.0, 11.5])
     train_idx = np.array([0, 1, 2, 3, 4])
     test_idx = np.array([5, 6, 7])
 
-    clean_train, clean_test = _reject_in_fold(ptps, train_idx, test_idx)
+    clean_train, clean_test = reject_in_fold(ptps, train_idx, test_idx)
 
     # Trial 3 (ptp=500) should be removed from train; trial 5 (ptp=0.5 < 1.0) from test
     assert 3 not in clean_train
@@ -543,7 +543,7 @@ def test_reject_in_fold_none_is_noop():
     train_idx = np.array([0, 1, 2])
     test_idx = np.array([3, 4])
 
-    clean_train, clean_test = _reject_in_fold(None, train_idx, test_idx)
+    clean_train, clean_test = reject_in_fold(None, train_idx, test_idx)
 
     np.testing.assert_array_equal(clean_train, train_idx)
     np.testing.assert_array_equal(clean_test, test_idx)

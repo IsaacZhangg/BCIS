@@ -26,10 +26,6 @@ from src.rejection import reject_in_fold
 from src.config import CacheScope, ParallelBackend, SplitStrategy
 from src.validation import build_classwise_trial_groups, make_cv_splits
 
-# Backward-compatible aliases (tests import these private names)
-_precompute_bandpassed = precompute_bandpassed
-_subset_band_cache = subset_band_cache
-
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 
@@ -95,7 +91,7 @@ def _extract_fbcsp_features(
     """
     # Final-model training passes the same tensor as train/test; avoid filtering it twice.
     if X_train is X_test:
-        shared_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
+        shared_filtered = precompute_bandpassed(X_train, sfreq, bands=bands)
         return _extract_fbcsp_features_prefiltered(
             shared_filtered,
             shared_filtered,
@@ -106,8 +102,8 @@ def _extract_fbcsp_features(
             n_test_trials=X_test.shape[0],
         )
 
-    train_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
-    test_filtered = _precompute_bandpassed(X_test, sfreq, bands=bands)
+    train_filtered = precompute_bandpassed(X_train, sfreq, bands=bands)
+    test_filtered = precompute_bandpassed(X_test, sfreq, bands=bands)
     return _extract_fbcsp_features_prefiltered(
         train_filtered,
         test_filtered,
@@ -138,10 +134,6 @@ def _extract_fbcsp_features_pretrained(
         return np.empty((X.shape[0], 0))
 
     return np.hstack(parts)
-
-
-# Backward-compatible alias (tests and pipeline.py import this private name)
-_reject_in_fold = reject_in_fold
 
 
 def _resolve_subject_groups(
@@ -200,11 +192,11 @@ def _evaluate_subject_all_models(
         )
         fold_scores: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+            precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
         )
 
         for train_idx, test_idx in splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            train_idx, test_idx = reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
 
@@ -223,8 +215,8 @@ def _evaluate_subject_all_models(
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
             if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                train_band_cache = subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = subset_band_cache(subject_band_cache, test_idx)
                 fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
                     train_band_cache,
                     test_band_cache,
@@ -500,19 +492,19 @@ def train_within_subject_cv(
         )
         trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+            precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
         )
         fold_scores = []
 
         for train_idx, test_idx in outer_splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            train_idx, test_idx = reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
             if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                train_band_cache = subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = subset_band_cache(subject_band_cache, test_idx)
                 fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
                     train_band_cache,
                     test_band_cache,
@@ -721,7 +713,7 @@ def train_within_subject_cv_riemann(
             trial_ptps = (
                 trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
             )
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            train_idx, test_idx = reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             pipe = make_pipeline(
@@ -825,19 +817,19 @@ def train_within_subject_cv_svm(
         )
         trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+            precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
         )
         fold_scores = []
 
         for train_idx, test_idx in splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            train_idx, test_idx = reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
             if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                train_band_cache = subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = subset_band_cache(subject_band_cache, test_idx)
                 fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
                     train_band_cache,
                     test_band_cache,
@@ -1060,7 +1052,7 @@ def _evaluate_subject_nested_model_selection(
     classifier_names = list(ALL_CLASSIFIERS)
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq)
+            precompute_bandpassed(X_multichannel, sfreq)
             if enable_band_cache and cache_scope == "subject"
             else None
         )
@@ -1075,7 +1067,7 @@ def _evaluate_subject_nested_model_selection(
         fold_winners: list[str] = []
 
         for outer_train_idx, outer_test_idx in outer_splits:
-            outer_train_idx, outer_test_idx = _reject_in_fold(
+            outer_train_idx, outer_test_idx = reject_in_fold(
                 trial_ptps, outer_train_idx, outer_test_idx
             )
             if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
@@ -1091,15 +1083,13 @@ def _evaluate_subject_nested_model_selection(
             outer_train_cache: BandCache | None = None
             outer_test_cache: BandCache | None = None
             if enable_band_cache and subject_band_cache is not None:
-                outer_train_cache = _subset_band_cache(
+                outer_train_cache = subset_band_cache(
                     subject_band_cache, outer_train_idx
                 )
-                outer_test_cache = _subset_band_cache(
-                    subject_band_cache, outer_test_idx
-                )
+                outer_test_cache = subset_band_cache(subject_band_cache, outer_test_idx)
             elif enable_band_cache:
-                outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
-                outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
+                outer_train_cache = precompute_bandpassed(X_mc_otrain, sfreq)
+                outer_test_cache = precompute_bandpassed(X_mc_otest, sfreq)
 
             inner_groups = groups[outer_train_idx] if groups is not None else None
             inner_splits = make_cv_splits(
@@ -1114,10 +1104,10 @@ def _evaluate_subject_nested_model_selection(
                 inner_train_cache: BandCache | None = None
                 inner_val_cache: BandCache | None = None
                 if outer_train_cache is not None:
-                    inner_train_cache = _subset_band_cache(
+                    inner_train_cache = subset_band_cache(
                         outer_train_cache, inner_train_idx
                     )
-                    inner_val_cache = _subset_band_cache(
+                    inner_val_cache = subset_band_cache(
                         outer_train_cache, inner_val_idx
                     )
                 split_scores = _evaluate_classifiers_batch(
@@ -1444,19 +1434,19 @@ def train_within_subject_cv_ensemble(
         )
         trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+            precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
         )
         fold_scores = []
 
         for train_idx, test_idx in splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
+            train_idx, test_idx = reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
             y_train, y_test = y[train_idx], y[test_idx]
 
             if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
+                train_band_cache = subset_band_cache(subject_band_cache, train_idx)
+                test_band_cache = subset_band_cache(subject_band_cache, test_idx)
                 fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
                     train_band_cache,
                     test_band_cache,
@@ -1545,7 +1535,7 @@ def _augmented_nested_cv_subject(
     fold_scores: list[float] = []
 
     for outer_train_idx, outer_test_idx in outer_splits:
-        outer_train_idx, outer_test_idx = _reject_in_fold(
+        outer_train_idx, outer_test_idx = reject_in_fold(
             trial_ptps, outer_train_idx, outer_test_idx
         )
         if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
