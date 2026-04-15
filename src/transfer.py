@@ -131,6 +131,17 @@ def load_all_subjects(
     return subjects
 
 
+def _euclidean_align(
+    X_mc: np.ndarray,
+    cov_estimator: Covariances,
+) -> np.ndarray:
+    """Apply Euclidean Alignment: re-center covariances to the identity matrix."""
+    covs = cov_estimator.fit_transform(X_mc)
+    ref = mean_covariance(covs, metric="riemann")
+    ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
+    return ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+
+
 def align_subjects(
     subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
@@ -158,10 +169,7 @@ def align_subjects(
 
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        ref = mean_covariance(covs, metric="riemann")
-        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        covs_aligned = _euclidean_align(X_mc, cov_estimator)
 
         all_covs.append(covs_aligned)
         all_labels.append(y)
@@ -225,23 +233,17 @@ def regularized_within_subject_cv(
 
     cov_estimator = Covariances(estimator="lwf")
 
-    # Step 1: Compute aligned covariances per subject
     aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     all_aligned_covs = []
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        ref = mean_covariance(covs, metric="riemann")
-        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        covs_aligned = _euclidean_align(X_mc, cov_estimator)
         aligned_per_subject[sid] = (covs_aligned, y)
         all_aligned_covs.append(covs_aligned)
 
-    # Step 2: Compute group Riemannian mean
     all_covs = np.vstack(all_aligned_covs)
     group_mean = mean_covariance(all_covs, metric="riemann")
 
-    # Step 3: Per-subject within-subject CV with shrinkage
     scores: dict[str, float] = {}
     for sid in sorted(subjects.keys()):
         covs, y = aligned_per_subject[sid]
@@ -401,14 +403,10 @@ def loso_cv(
     """
     cov_estimator = Covariances(estimator="lwf")
 
-    # Pre-compute aligned covariances per subject
     aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        ref = mean_covariance(covs, metric="riemann")
-        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        covs_aligned = _euclidean_align(X_mc, cov_estimator)
         aligned_per_subject[sid] = (covs_aligned, y)
 
     subject_ids = sorted(subjects.keys())
