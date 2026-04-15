@@ -1511,3 +1511,115 @@ def train_within_subject_cv_ensemble(
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
     return scores, mean_acc, std_acc
+
+
+def _augmented_nested_cv_subject(
+    X_features: np.ndarray,
+    X_multichannel: np.ndarray,
+    y: np.ndarray,
+    donor_feat: np.ndarray,
+    donor_mc: np.ndarray,
+    donor_y: np.ndarray,
+    sfreq: float,
+    n_outer_folds: int,
+    n_inner_folds: int,
+    k_best: int,
+    trial_ptps: np.ndarray | None,
+    split_strategy: str,
+    groups: np.ndarray | None,
+    random_state: int,
+) -> float:
+    """Leakage-free augmented nested CV for a single subject.
+
+    Outer/inner CV splits are on TARGET data only. Donor data augments
+    training portions only — never appears in validation or test folds.
+    """
+    classifier_names = list(ALL_CLASSIFIERS)
+    outer_splits = make_cv_splits(
+        y,
+        n_splits=n_outer_folds,
+        strategy=split_strategy,
+        groups=groups,
+        random_state=random_state,
+    )
+    fold_scores: list[float] = []
+
+    for outer_train_idx, outer_test_idx in outer_splits:
+        outer_train_idx, outer_test_idx = _reject_in_fold(
+            trial_ptps, outer_train_idx, outer_test_idx
+        )
+        if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
+            continue
+
+        # Test fold: TARGET data only (no donor)
+        X_feat_otest = X_features[outer_test_idx]
+        X_mc_otest = X_multichannel[outer_test_idx]
+        y_otest = y[outer_test_idx]
+
+        # Training fold: TARGET train + ALL donor data
+        X_feat_otrain = np.vstack([X_features[outer_train_idx], donor_feat])
+        X_mc_otrain = np.vstack([X_multichannel[outer_train_idx], donor_mc])
+        y_otrain = np.concatenate([y[outer_train_idx], donor_y])
+
+        # Inner CV for model selection: splits on TARGET train indices only
+        inner_groups = groups[outer_train_idx] if groups is not None else None
+        inner_splits = make_cv_splits(
+            y[outer_train_idx],
+            n_splits=n_inner_folds,
+            strategy=split_strategy,
+            groups=inner_groups,
+            random_state=random_state,
+        )
+
+        inner_scores_by_clf: dict[str, list[float]] = {n: [] for n in classifier_names}
+        for inner_train_idx, inner_val_idx in inner_splits:
+            # Inner train: target inner train + ALL donor data
+            inner_feat_train = np.vstack(
+                [X_features[outer_train_idx[inner_train_idx]], donor_feat]
+            )
+            inner_mc_train = np.vstack(
+                [X_multichannel[outer_train_idx[inner_train_idx]], donor_mc]
+            )
+            inner_y_train = np.concatenate(
+                [y[outer_train_idx[inner_train_idx]], donor_y]
+            )
+            # Inner val: TARGET only (no donor)
+            inner_feat_val = X_features[outer_train_idx[inner_val_idx]]
+            inner_mc_val = X_multichannel[outer_train_idx[inner_val_idx]]
+            inner_y_val = y[outer_train_idx[inner_val_idx]]
+
+            split_scores = _evaluate_classifiers_batch(
+                classifier_names,
+                inner_feat_train,
+                inner_feat_val,
+                inner_y_train,
+                inner_y_val,
+                inner_mc_train,
+                inner_mc_val,
+                sfreq,
+                k_best,
+            )
+            for clf_name, score in split_scores.items():
+                inner_scores_by_clf[clf_name].append(score)
+
+        inner_means = {
+            name: float(np.mean(scores)) if scores else 0.5
+            for name, scores in inner_scores_by_clf.items()
+        }
+        best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+
+        # Retrain best on augmented outer train, test on TARGET outer test
+        outer_score = _evaluate_classifier(
+            best_clf,
+            X_feat_otrain,
+            X_feat_otest,
+            y_otrain,
+            y_otest,
+            X_mc_otrain,
+            X_mc_otest,
+            sfreq,
+            k_best,
+        )
+        fold_scores.append(outer_score)
+
+    return float(np.mean(fold_scores)) if fold_scores else 0.5
