@@ -24,7 +24,7 @@ from src.epochs import (
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
 from src.runtime_output import configure_console_output
-from src.transfer import run_transfer_evaluation
+from src.transfer import run_transfer_evaluation, select_nearest_donor
 from src.train import (
     _augmented_nested_cv_subject,
     cross_session_evaluate,
@@ -421,10 +421,6 @@ def run_pipeline(
     step_start_aug = time.perf_counter()
     if MI_DATA_NEW_DIR.exists():
         print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
-        from pyriemann.estimation import Covariances as _Cov
-        from pyriemann.utils.distance import distance_riemann as _dist_riemann
-        from pyriemann.utils.mean import mean_covariance as _mean_cov
-
         from src.transfer import load_all_subjects
 
         transfer_data_dirs = [data_dir, MI_DATA_NEW_DIR]
@@ -435,19 +431,6 @@ def run_pipeline(
         )
         print(f"  Donor pool: {len(donor_subjects)} subjects")
 
-        # Compute Riemannian means for donor selection
-        _cov_est = _Cov(estimator="lwf")
-        donor_means = {
-            sid: _mean_cov(_cov_est.fit_transform(d[1]), metric="riemann")
-            for sid, d in donor_subjects.items()
-        }
-        target_means = {
-            subject_ids[i]: _mean_cov(
-                _cov_est.fit_transform(X_by_subject[i][1]), metric="riemann"
-            )
-            for i in range(len(subject_ids))
-        }
-
         weakness_threshold = 0.50
         aug_nested_scores = list(nested_scores)  # start with original scores
 
@@ -456,12 +439,9 @@ def run_pipeline(
                 continue
 
             # Find closest donor by Riemannian distance
-            dists = {
-                dsid: float(_dist_riemann(target_means[sid], donor_means[dsid]))
-                for dsid in donor_subjects
-                if dsid != sid
-            }
-            best_donor = min(dists, key=dists.get)
+            best_donor, donor_dist = select_nearest_donor(
+                sid, X_by_subject[i][1], donor_subjects
+            )
 
             donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
             target_feat, target_mc = X_by_subject[i]
@@ -484,7 +464,7 @@ def run_pipeline(
             )
             aug_nested_scores[i] = aug_score
             print(
-                f"    {sid}: +{best_donor} (d={dists[best_donor]:.1f}) "
+                f"    {sid}: +{best_donor} (d={donor_dist:.1f}) "
                 f"{score:.1%} -> {aug_score:.1%} ({aug_score - score:+.1%})"
             )
 
