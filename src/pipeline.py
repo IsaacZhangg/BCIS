@@ -15,6 +15,7 @@ from src.data_loader import (
     load_recording,
 )
 from src.epochs import (
+    adaptive_threshold,
     compute_rejection_threshold,
     compute_trial_max_ptp,
     extract_left_right_epochs,
@@ -204,17 +205,14 @@ def _augmented_nested_cv_subject(
         if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
             continue
 
-        # Test fold: TARGET data only (no donor)
         X_feat_otest = X_features[outer_test_idx]
         X_mc_otest = X_multichannel[outer_test_idx]
         y_otest = y[outer_test_idx]
 
-        # Training fold: TARGET train + ALL donor data
         X_feat_otrain = np.vstack([X_features[outer_train_idx], donor_feat])
         X_mc_otrain = np.vstack([X_multichannel[outer_train_idx], donor_mc])
         y_otrain = np.concatenate([y[outer_train_idx], donor_y])
 
-        # Inner CV for model selection: splits on TARGET train indices only
         inner_groups = groups[outer_train_idx] if groups is not None else None
         inner_splits = make_cv_splits(
             y[outer_train_idx],
@@ -261,7 +259,6 @@ def _augmented_nested_cv_subject(
         }
         best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
 
-        # Retrain best on augmented outer train, test on TARGET outer test
         outer_score = _evaluate_classifier(
             best_clf,
             X_feat_otrain,
@@ -419,10 +416,7 @@ def run_pipeline(
 
             trial_ptps = compute_trial_max_ptp(X_mc)
 
-            # Show how many would be flagged by global threshold
-            median_ptp = float(np.median(trial_ptps))
-            mad_ptp = float(np.median(np.abs(trial_ptps - median_ptp)))
-            global_thresh = median_ptp + 4.0 * mad_ptp
+            global_thresh = adaptive_threshold(trial_ptps, 4.0)
             n_flagged = int(np.sum((trial_ptps > global_thresh) | (trial_ptps < 1.0)))
             print(
                 f"    Epochs: {n_left_raw}L/{n_right_raw}R "
@@ -567,7 +561,7 @@ def run_pipeline(
             for i in range(len(subject_ids))
         }
 
-        weakness_threshold = 0.50
+        weakness_threshold = cfg.augmentation_weakness_threshold
         aug_nested_scores = list(nested_scores)  # start with original scores
 
         for i, (sid, score) in enumerate(zip(subject_ids, nested_scores)):
@@ -720,9 +714,7 @@ def run_pipeline(
     ):
         if trial_ptps_by_subject:
             ptps = trial_ptps_by_subject[i]
-            median_ptp = float(np.median(ptps))
-            mad_ptp = float(np.median(np.abs(ptps - median_ptp)))
-            thresh = median_ptp + 4.0 * mad_ptp
+            thresh = adaptive_threshold(ptps, 4.0)
             clean_mask = (ptps >= 1.0) & (ptps <= thresh)
             X_features = X_features[clean_mask]
             X_multichannel = X_multichannel[clean_mask]
