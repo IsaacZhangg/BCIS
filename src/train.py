@@ -18,7 +18,11 @@ from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 
 from src.config import SplitStrategy
-from src.validation import build_classwise_trial_groups, make_cv_splits
+from src.validation import (
+    adaptive_fold_count,
+    build_classwise_trial_groups,
+    make_cv_splits,
+)
 
 FBCSP_BANDS = [
     (8, 10),
@@ -257,6 +261,7 @@ def _evaluate_subject_all_models(
 ) -> dict[str, float]:
     """Evaluate all classifiers for a single subject."""
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
+        n_folds = adaptive_fold_count(len(y), n_folds)
         splits = make_cv_splits(
             y,
             n_splits=n_folds,
@@ -1125,6 +1130,7 @@ def _evaluate_subject_nested_model_selection(
     """Nested model-selection CV for a single subject."""
     classifier_names = list(ALL_CLASSIFIERS)
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
+        n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
         subject_band_cache = (
             _precompute_bandpassed(X_multichannel, sfreq)
             if enable_band_cache and cache_scope == "subject"
@@ -1167,10 +1173,13 @@ def _evaluate_subject_nested_model_selection(
                 outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
                 outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
 
+            n_inner_folds_actual = adaptive_fold_count(
+                len(outer_train_idx), n_inner_folds
+            )
             inner_groups = groups[outer_train_idx] if groups is not None else None
             inner_splits = make_cv_splits(
                 y_otrain,
-                n_splits=n_inner_folds,
+                n_splits=n_inner_folds_actual,
                 strategy=split_strategy,
                 groups=inner_groups,
                 random_state=random_state,

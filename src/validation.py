@@ -63,6 +63,14 @@ def _effective_n_splits(
     return n_splits if n_splits >= 2 else 0
 
 
+def adaptive_fold_count(n_trials: int, max_folds: int, min_per_fold: int = 5) -> int:
+    """Compute fold count ensuring at least min_per_fold trials per fold.
+
+    Returns at least 2 (minimum for CV) and at most max_folds.
+    """
+    return max(2, min(max_folds, n_trials // min_per_fold))
+
+
 def make_cv_splits(
     y: np.ndarray,
     n_splits: int,

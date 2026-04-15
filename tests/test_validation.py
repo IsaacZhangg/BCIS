@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from src.validation import build_classwise_trial_groups, make_cv_splits
+from src.validation import (
+    adaptive_fold_count,
+    build_classwise_trial_groups,
+    make_cv_splits,
+)
 
 
 def test_build_classwise_trial_groups_separates_classes():
@@ -85,3 +89,28 @@ def test_make_cv_splits_rejects_group_length_mismatch():
 
     with pytest.raises(ValueError, match="same length as y"):
         make_cv_splits(y, n_splits=2, strategy="stratified_group", groups=groups)
+
+
+def test_adaptive_fold_count_large_dataset():
+    """100 trials, max 10 folds -> 10 folds."""
+    assert adaptive_fold_count(100, max_folds=10) == 10
+
+
+def test_adaptive_fold_count_small_dataset():
+    """32 trials, max 10 folds -> 6 folds (32 // 5 = 6)."""
+    assert adaptive_fold_count(32, max_folds=10) == 6
+
+
+def test_adaptive_fold_count_medium_dataset():
+    """64 trials, max 10 folds -> 10 folds (64 // 5 = 12, capped at 10)."""
+    assert adaptive_fold_count(64, max_folds=10) == 10
+
+
+def test_adaptive_fold_count_inner():
+    """27 training trials, max 7 inner folds -> 5 folds (27 // 5 = 5)."""
+    assert adaptive_fold_count(27, max_folds=7) == 5
+
+
+def test_adaptive_fold_count_minimum():
+    """Very few trials still returns at least 2."""
+    assert adaptive_fold_count(8, max_folds=10) == 2
