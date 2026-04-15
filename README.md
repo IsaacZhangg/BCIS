@@ -35,9 +35,14 @@ CSV files (8ch, 250Hz)
   -> preprocess.py     Bandpass (1-40Hz) + notch (60Hz) filtering (batched over channels)
   -> epochs.py         Baseline (1.0s) / task (3.0s) windows, per-trial PTP
   -> features.py       45 handcrafted features (Laplacian C3/C4, ERD, Hjorth, coherence, entropy)
-  -> train.py          4 classifiers with in-fold artifact rejection + nested CV
-  -> pipeline.py       Orchestration, model saving, optional held-out & cross-session eval
-  -> transfer.py       Cross-subject Riemannian transfer learning (EA + LOSO CV)
+  -> band_cache.py     Precomputed per-band filtered tensors for FBCSP
+  -> rejection.py      In-fold artifact rejection (adaptive PTP threshold)
+  -> classifiers.py    Classifier registry with protocol-based adapters
+  -> train.py          CV orchestration, nested model selection
+  -> pipeline.py       Stage coordination, model saving, cross-session eval
+  -> transfer.py       Cross-subject Riemannian transfer (EA + LOSO + donor selection)
+  -> experiments.py    Structured experiment tracking (JSON)
+  -> cli.py            CLI argument parsing, RunConfig
 ```
 
 ### Classifiers
@@ -72,15 +77,21 @@ Loads data from both `Data/unicorn-data/` and `Data/MI_DATA_NEW/`, accepting rec
 ```
 BCIS/
 ├── src/
-│   ├── config.py          # Experiment configuration
-│   ├── pipeline.py        # Main entry point
-│   ├── train.py           # Classifiers, CV, nested selection, parallel dispatch
+│   ├── config.py          # ML hyperparameters (TrainingConfig)
+│   ├── cli.py             # CLI argument parsing (RunConfig)
+│   ├── pipeline.py        # Main entry point, stage coordination
+│   ├── train.py           # CV orchestration, nested model selection
+│   ├── classifiers.py     # Classifier registry (add new classifiers here)
+│   ├── band_cache.py      # FBCSP band-filtered data caching
+│   ├── rejection.py       # In-fold artifact rejection
+│   ├── experiments.py     # Experiment tracking (JSON)
 │   ├── data_loader.py     # CSV loading, event parsing
 │   ├── preprocess.py      # Temporal filtering
 │   ├── epochs.py          # Epoch extraction, PTP computation
 │   ├── features.py        # Handcrafted + CSP features
+│   ├── transfer.py        # Cross-subject Riemannian transfer
 │   └── validation.py      # Split policies
-├── tests/                 # 60 tests across all pipeline stages
+├── tests/                 # 130 tests across all pipeline stages
 ├── models/                # Per-subject .joblib models + training_results.json
 ├── Data/
 │   ├── unicorn-data/      # EEG recordings
@@ -108,6 +119,10 @@ uv run python -m src.pipeline
 
 # Run cross-subject transfer evaluation standalone
 uv run python -m src.transfer
+
+# Experiment tracking
+uv run python -m src.experiments list
+uv run python -m src.experiments compare baseline new_idea
 
 # Run tests
 uv run pytest tests/ -v
