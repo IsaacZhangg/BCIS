@@ -22,6 +22,7 @@ from src.band_cache import (
     precompute_bandpassed,
     subset_band_cache,
 )
+from src.rejection import reject_in_fold
 from src.config import CacheScope, ParallelBackend, SplitStrategy
 from src.validation import build_classwise_trial_groups, make_cv_splits
 
@@ -139,43 +140,8 @@ def _extract_fbcsp_features_pretrained(
     return np.hstack(parts)
 
 
-def _reject_in_fold(
-    trial_ptps: np.ndarray | None,
-    train_idx: np.ndarray,
-    test_idx: np.ndarray,
-    n_mad: float = 3.5,
-    flat_uv: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Filter train/test indices using an adaptive amplitude threshold.
-
-    The threshold is computed from training indices only, then applied to both
-    splits.  When *trial_ptps* is ``None``, indices are returned unchanged
-    (backward compatibility).
-
-    Args:
-        trial_ptps: Max peak-to-peak amplitude per trial, or ``None``.
-        train_idx: Training fold indices.
-        test_idx: Test fold indices.
-        n_mad: Number of MADs above median for the threshold.
-        flat_uv: Minimum PTP below which a trial is considered flat.
-
-    Returns:
-        (clean_train_idx, clean_test_idx).
-    """
-    if trial_ptps is None:
-        return train_idx, test_idx
-
-    train_ptps = trial_ptps[train_idx]
-    median = float(np.median(train_ptps))
-    mad = float(np.median(np.abs(train_ptps - median)))
-    threshold = median + n_mad * mad
-
-    def _keep(idx: np.ndarray) -> np.ndarray:
-        ptps = trial_ptps[idx]
-        mask = (ptps >= flat_uv) & (ptps <= threshold)
-        return idx[mask]
-
-    return _keep(train_idx), _keep(test_idx)
+# Backward-compatible alias (tests and pipeline.py import this private name)
+_reject_in_fold = reject_in_fold
 
 
 def _resolve_subject_groups(
