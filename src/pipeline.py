@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import joblib
@@ -357,8 +358,6 @@ def run_pipeline(
     y_holdout_by_subject: list[np.ndarray] = []
 
     # Group recordings by subject, applying merge rules (e.g. subject0104 sessions)
-    from collections import defaultdict
-
     recordings_grouped: dict[str, list[Path]] = defaultdict(list)
     for rec_path in recordings:
         raw_id = rec_path.parent.parent.name

@@ -36,7 +36,7 @@ FBCSP_BANDS = [
 ]
 
 N_CSP_COMPONENTS = 3
-DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
+DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25, 30)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 ParallelBackend = Literal["loky", "threading"]
 CacheScope = Literal["subject", "outer_fold"]
