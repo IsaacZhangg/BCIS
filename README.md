@@ -1,12 +1,31 @@
-# BCIS - Left/Right Motor Imagery BCI Classifier
+# BCIS - Brain-Computer Interface Classifier
 
-Classifies left vs right hand motor imagery from 8-channel EEG for controlling a robotic 6th finger (left = down, right = up).
+A machine learning pipeline that reads EEG brain signals and classifies whether someone is imagining moving their **left hand** or **right hand**. This powers a robotic 6th finger: left imagery = finger down, right imagery = finger up.
 
-Uses four classifiers — FBCSP+LDA, Riemannian, FBCSP+SVM, and LDA+SVM Ensemble — with nested model-selection CV to pick the best per subject without selection bias.
+## How It Works
+
+1. **Record** — 8-channel EEG via a [g.tec Unicorn](https://www.unicorn-bi.com/) headset (dry electrodes, 250 Hz)
+2. **Clean** — Bandpass filter (1–40 Hz), notch filter (60 Hz), surface Laplacian to sharpen spatial signals
+3. **Extract** — 45 features per trial (ERD, Hjorth parameters, coherence, entropy, CSP spatial filters)
+4. **Classify** — 4 classifiers compete; nested cross-validation picks the best one per subject
+5. **Deploy** — Saved models output `0` (left) or `1` (right) in real time
 
 ## Results
 
-**61.2% nested selection accuracy** (unbiased) across 10 subjects. 5 of 10 above chance (>=60%).
+**61.2% average accuracy** across 10 subjects (unbiased, nested CV). Five subjects exceed 60% — the threshold for usable BCI control.
+
+Top performers:
+
+| Subject | Accuracy | Best Classifier |
+|---------|----------|-----------------|
+| subject0006 | **88.0%** | FBCSP+LDA |
+| subject0010 | **82.1%** | FBCSP+LDA |
+| subject0008 | **65.6%** | FBCSP+LDA |
+| subject0007 | **66.0%** | FBCSP+LDA |
+| subject0011 | **60.4%** | Riemannian |
+
+<details>
+<summary>Full results table</summary>
 
 | Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Nested (unbiased) | Selected |
 |---------|-----------|---------|-----|----------|--------------------|----------|
@@ -21,76 +40,32 @@ Uses four classifiers — FBCSP+LDA, Riemannian, FBCSP+SVM, and LDA+SVM Ensemble
 | subject0010 | 78.0% | 60.3% | 85.3% | 83.1% | **82.1%** | FBCSP |
 | subject0011 | 53.6% | 60.4% | 48.7% | 49.6% | **60.4%** | Riemann |
 
-Signal quality with the consumer-grade 8-channel Unicorn headset remains the primary bottleneck.
+</details>
 
-## Hardware
+Signal quality with the consumer-grade 8-channel headset remains the primary bottleneck.
 
-**Headset**: [g.tec Unicorn Hybrid Black](https://www.unicorn-bi.com/) — 8 dry electrodes (Fz, C3, Cz, C4, Pz, PO7, Oz, PO8), 250 Hz, 24-bit ADC.
+## The Four Classifiers
 
-## Pipeline
+| Classifier | What It Does |
+|------------|--------------|
+| **FBCSP+LDA** | Applies filter-bank Common Spatial Patterns to isolate motor-related brain activity, then classifies with Linear Discriminant Analysis |
+| **Riemannian** | Works directly with covariance matrices on a curved (Riemannian) manifold — no hand-crafted features needed |
+| **FBCSP+SVM** | Same spatial filtering as FBCSP+LDA, but uses a Support Vector Machine (RBF kernel) for classification |
+| **Ensemble** | Averages the confidence scores of LDA and SVM for a combined vote |
 
-```
-CSV files (8ch, 250Hz)
-  -> data_loader.py    Parse recordings, extract event markers
-  -> preprocess.py     Bandpass (1-40Hz) + notch (60Hz) filtering (batched over channels)
-  -> epochs.py         Baseline (1.0s) / task (3.0s) windows, per-trial PTP
-  -> features.py       45 handcrafted features (Laplacian C3/C4, ERD, Hjorth, coherence, entropy)
-  -> train.py          4 classifiers with in-fold artifact rejection + nested CV
-  -> pipeline.py       Orchestration, model saving, optional held-out & cross-session eval
-  -> transfer.py       Cross-subject Riemannian transfer learning (EA + LOSO CV)
-```
+A **nested cross-validation** scheme (inner 7-fold selects the best classifier, outer 10-fold evaluates) ensures the reported accuracy is unbiased.
 
-### Classifiers
+## Cross-Subject Transfer Learning
 
-1. **FBCSP+LDA**: 8 motor bands x 4 CSP + 45 handcrafted features -> SelectKBest (nested CV k) -> StandardScaler -> shrinkage LDA
-2. **Riemannian**: Covariances (OAS) -> TangentSpace (Riemann) -> LogisticRegression
-3. **FBCSP+SVM**: Same FBCSP features -> SelectKBest -> SVC (RBF, C=20)
-4. **Ensemble**: LDA + SVM soft voting (averaged probabilities)
+Not every subject has enough data to train a good model on their own. `src/transfer.py` implements **Euclidean Alignment** to pool data across subjects:
 
-### Cross-Subject Transfer Learning
+1. Compute covariance matrices per subject (Ledoit-Wolf shrinkage)
+2. Re-center each subject's data to a common reference (removes headset placement differences)
+3. Train on everyone else, test on the held-out subject (leave-one-subject-out CV)
 
-`src/transfer.py` implements Euclidean Alignment (EA) for cross-subject Riemannian transfer:
+## Quick Start
 
-1. Estimate covariance matrices per subject using Ledoit-Wolf shrinkage
-2. Euclidean Alignment: re-center each subject's covariances to identity (removes inter-subject impedance/placement variability)
-3. Leave-one-subject-out CV: train on aligned data from all other subjects, test on held-out
-4. Optional fine-tuning: re-center tangent space on target subject's mean
-
-Loads data from both `Data/unicorn-data/` and `Data/MI_DATA_NEW/`, accepting recordings with any number of trials (not just 100).
-
-### Key design choices
-
-- **In-fold artifact rejection**: Threshold (median + 3.5xMAD) computed from training fold only, preventing leakage
-- **Surface Laplacian**: Sharpens C3/C4 spatial resolution using neighboring electrodes
-- **Nested CV**: Inner 7-fold selects best classifier, outer 10-fold evaluates — unbiased estimate
-- **Subject-level parallelism**: joblib dispatch with BLAS thread capping
-- **Bandpass caching**: Precomputed per subject, sliced by CV indices
-- **Redundant-work elimination**: batched multichannel preprocessing, shared calibrated SVM fits in shared-eval paths, and no duplicate FBCSP filtering when training final models
-
-## Project Structure
-
-```
-BCIS/
-├── src/
-│   ├── config.py          # Experiment configuration
-│   ├── pipeline.py        # Main entry point
-│   ├── train.py           # Classifiers, CV, nested selection, parallel dispatch
-│   ├── data_loader.py     # CSV loading, event parsing
-│   ├── preprocess.py      # Temporal filtering
-│   ├── epochs.py          # Epoch extraction, PTP computation
-│   ├── features.py        # Handcrafted + CSP features
-│   └── validation.py      # Split policies
-├── tests/                 # 60 tests across all pipeline stages
-├── models/                # Per-subject .joblib models + training_results.json
-├── Data/
-│   ├── unicorn-data/      # EEG recordings
-│   └── MI_DATA_NEW/       # New MI data recordings
-└── pyproject.toml
-```
-
-## Setup
-
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+**Requirements:** Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 
 ```bash
 git clone <repo-url>
@@ -98,54 +73,73 @@ cd BCIS
 uv sync
 ```
 
-Place Unicorn CSV exports in `Data/unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`.
-
-## Usage
+Place EEG recordings in `Data/unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`.
 
 ```bash
-# Run full pipeline (includes cross-subject transfer eval if MI_DATA_NEW exists)
+# Run the full pipeline
 uv run python -m src.pipeline
 
-# Run cross-subject transfer evaluation standalone
+# Run cross-subject transfer evaluation only
 uv run python -m src.transfer
 
 # Run tests
 uv run pytest tests/ -v
-
-# Lint and format
-ruff check --fix src/ tests/
-ruff format src/ tests/
 ```
 
-### Inference
+### Loading a Trained Model
 
 ```python
 import joblib
 from src.train import predict, predict_riemann
 
-# FBCSP+LDA model
+# For FBCSP+LDA or SVM models
 model = joblib.load("models/subject0006_fbcsp_lda.joblib")
 predictions = predict(model, X_features, X_multichannel)  # 0=left, 1=right
 
-# SVM model (same predict interface as FBCSP+LDA)
-model = joblib.load("models/subject0004_svm.joblib")
-predictions = predict(model, X_features, X_multichannel)
-
-# Riemannian model
+# For Riemannian models
 model = joblib.load("models/subject0011_riemann.joblib")
 predictions = predict_riemann(model, X_multichannel)
+```
 
-# Ensemble-selected subjects save an FBCSP+LDA model for deployment
-model = joblib.load("models/subject0007_ensemble_lda.joblib")
-predictions = predict(model, X_features, X_multichannel)
+## Project Structure
+
+```
+BCIS/
+├── src/
+│   ├── pipeline.py      # Main entry point — runs everything
+│   ├── config.py        # Experiment settings
+│   ├── data_loader.py   # Reads CSVs, parses event markers
+│   ├── preprocess.py    # Bandpass + notch filtering
+│   ├── epochs.py        # Cuts continuous EEG into trials
+│   ├── features.py      # Feature extraction (handcrafted + CSP)
+│   ├── train.py         # Classifier training, nested CV, model selection
+│   ├── transfer.py      # Cross-subject transfer learning
+│   └── validation.py    # CV split policies
+├── tests/               # 60 tests covering all pipeline stages
+├── models/              # Saved models (.joblib) + results JSON
+├── Data/
+│   ├── unicorn-data/    # EEG recordings
+│   └── MI_DATA_NEW/     # Additional MI recordings
+└── pyproject.toml       # Dependencies and project config
 ```
 
 ## Data Format
 
-Each CSV has columns: `timestamp`, `Fz`, `C3`, `Cz`, `C4`, `Pz`, `PO7`, `Oz`, `PO8`, `stim`.
+Each CSV contains columns: `timestamp`, `Fz`, `C3`, `Cz`, `C4`, `Pz`, `PO7`, `Oz`, `PO8`, `stim`.
 
-Event encoding: `stim = phase * 10 + movement` (phase 3 only; movement 1=left, 2=right). Each recording has 100 phase-3 trials (50 left, 50 right).
+The `stim` column encodes events as `phase * 10 + movement` (phase 3 = motor imagery; movement 1 = left, 2 = right). A typical recording has 100 trials (50 left, 50 right).
+
+## Hardware
+
+**g.tec Unicorn Hybrid Black** — 8 dry electrodes at positions Fz, C3, Cz, C4, Pz, PO7, Oz, PO8. 250 Hz sampling rate, 24-bit ADC.
+
+## Design Decisions
+
+- **In-fold artifact rejection** — Thresholds computed from training data only, preventing data leakage
+- **Nested CV** — Separates model selection from evaluation so accuracy numbers are honest
+- **Subject-level parallelism** — Each subject processed independently via joblib
+- **Bandpass caching** — Filtered signals precomputed once per subject, reused across folds
 
 ## Dependencies
 
-Core: MNE-Python, scikit-learn, pyriemann, NumPy, SciPy, pandas, joblib, threadpoolctl. Dev: pytest, ruff. See `pyproject.toml` for versions.
+MNE-Python, scikit-learn, pyriemann, NumPy, SciPy, pandas, joblib, threadpoolctl. Dev: pytest, ruff. See `pyproject.toml` for full list.
