@@ -323,11 +323,14 @@ def run_pipeline(
     runtime_seconds: dict[str, float] = {}
     total_start = time.perf_counter()
 
-    # Step 1: Find complete recordings
+    # Step 1: Find recordings (scan primary + MI_DATA_NEW directories)
     step_start = time.perf_counter()
-    _print_step(1, 5, "Finding complete recordings")
-    recordings = get_recordings(data_dir, min_trials=30)
-    print(f"Found {len(recordings)} complete recordings")
+    _print_step(1, 5, "Finding recordings")
+    min_trials = cfg.min_evaluation_trials
+    recordings = get_recordings(data_dir, min_trials=min_trials)
+    if MI_DATA_NEW_DIR.exists():
+        recordings.extend(get_recordings(MI_DATA_NEW_DIR, min_trials=min_trials))
+    print(f"Found {len(recordings)} recordings (min_trials={min_trials})")
 
     if holdout_fraction > 0:
         print(f"  Held-out fraction: {holdout_fraction:.0%}")
@@ -353,31 +356,42 @@ def run_pipeline(
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_holdout_by_subject: list[np.ndarray] = []
 
+    # Group recordings by subject, applying merge rules (e.g. subject0104 sessions)
+    from collections import defaultdict
+
+    recordings_grouped: dict[str, list[Path]] = defaultdict(list)
     for rec_path in recordings:
-        subject_id = rec_path.parent.parent.name
-        print(f"  Processing {subject_id}...")
+        raw_id = rec_path.parent.parent.name
+        subject_id = DEFAULT_SUBJECT_MERGE.get(raw_id, raw_id)
+        recordings_grouped[subject_id].append(rec_path)
 
-        data, events, rec_sfreq = load_recording(rec_path)
-        if abs(rec_sfreq - sfreq) > 1e-6:
-            raise ValueError(
-                f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
-            )
-        preprocessed = preprocess_multichannel_eeg(data, sfreq)
+    for subject_id, rec_paths in sorted(recordings_grouped.items()):
+        print(f"  Processing {subject_id} ({len(rec_paths)} recording(s))...")
 
-        left_pairs_by_channel: dict = {}
-        right_pairs_by_channel: dict = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            signal = preprocessed[ch_idx]
-            left, right = extract_left_right_epochs(
-                signal,
-                events,
-                sfreq,
-                task_duration=3.0,
-                baseline_duration=1.0,
-                skip_duration=0.25,
-            )
-            left_pairs_by_channel[ch_name] = left
-            right_pairs_by_channel[ch_name] = right
+        # Accumulate left/right epoch pairs across all recordings for this subject
+        left_pairs_by_channel: dict[str, list] = {ch: [] for ch in CHANNELS}
+        right_pairs_by_channel: dict[str, list] = {ch: [] for ch in CHANNELS}
+
+        for rec_path in rec_paths:
+            data, events, rec_sfreq = load_recording(rec_path)
+            if abs(rec_sfreq - sfreq) > 1e-6:
+                raise ValueError(
+                    f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
+                )
+            preprocessed = preprocess_multichannel_eeg(data, sfreq)
+
+            for ch_idx, ch_name in enumerate(CHANNELS):
+                signal = preprocessed[ch_idx]
+                left, right = extract_left_right_epochs(
+                    signal,
+                    events,
+                    sfreq,
+                    task_duration=3.0,
+                    baseline_duration=1.0,
+                    skip_duration=0.25,
+                )
+                left_pairs_by_channel[ch_name].extend(left)
+                right_pairs_by_channel[ch_name].extend(right)
 
         n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
         n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
