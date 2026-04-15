@@ -25,14 +25,16 @@ from src.validation import (
 )
 
 FBCSP_BANDS = [
-    (8, 10),
-    (10, 12),
-    (12, 14),
-    (14, 16),
-    (16, 18),
-    (18, 20),
-    (20, 24),
-    (24, 30),
+    (6, 8),  # theta-mu border
+    (8, 10),  # low mu
+    (10, 12),  # high mu
+    (12, 14),  # low beta
+    (14, 16),  # mid-low beta
+    (16, 18),  # mid beta
+    (18, 20),  # mid-high beta
+    (20, 24),  # high beta
+    (24, 28),  # upper high beta
+    (28, 34),  # beta-gamma border
 ]
 
 N_CSP_COMPONENTS = 3
