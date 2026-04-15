@@ -1,8 +1,6 @@
 """Training pipeline: FBCSP + LDA, FBCSP + SVM, and Riemannian classifiers for left/right MI."""
 
 from collections import Counter
-from typing import Literal
-
 import mne
 import numpy as np
 from joblib import Parallel, delayed
@@ -17,52 +15,22 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 
-from src.config import SplitStrategy
+from src.band_cache import (
+    FBCSP_BANDS,
+    N_CSP_COMPONENTS,
+    BandCache,
+    precompute_bandpassed,
+    subset_band_cache,
+)
+from src.config import CacheScope, ParallelBackend, SplitStrategy
 from src.validation import build_classwise_trial_groups, make_cv_splits
 
-FBCSP_BANDS = [
-    (8, 10),
-    (10, 12),
-    (12, 14),
-    (14, 16),
-    (16, 18),
-    (18, 20),
-    (20, 24),
-    (24, 30),
-]
+# Backward-compatible aliases (tests import these private names)
+_precompute_bandpassed = precompute_bandpassed
+_subset_band_cache = subset_band_cache
 
-N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
-ParallelBackend = Literal["loky", "threading"]
-CacheScope = Literal["subject", "outer_fold"]
-BandCache = dict[tuple[float, float], np.ndarray]
-
-
-def _precompute_bandpassed(
-    X: np.ndarray,
-    sfreq: float,
-    bands: list[tuple[float, float]] = FBCSP_BANDS,
-) -> BandCache:
-    """Bandpass every trial for each FBCSP band once.
-
-    Filtering is trial-wise along the time axis, so cached per-band tensors can be
-    safely indexed for CV train/test splits without changing leakage boundaries.
-    """
-    filtered_by_band: BandCache = {}
-    for low, high in bands:
-        try:
-            filtered_by_band[(low, high)] = mne.filter.filter_data(
-                X, sfreq, low, high, verbose=False
-            )
-        except (ValueError, np.linalg.LinAlgError):
-            continue
-    return filtered_by_band
-
-
-def _subset_band_cache(cache: BandCache, indices: np.ndarray) -> BandCache:
-    """Slice a precomputed band cache by trial indices."""
-    return {band: X_band[indices] for band, X_band in cache.items()}
 
 
 def _extract_fbcsp_features_prefiltered(
