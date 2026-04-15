@@ -158,13 +158,13 @@ def _pairs_to_features(
     return X_features, X_multichannel, y
 
 
-def _augmented_nested_cv_subject(
+def _augmented_nested_cv_with_donor_selection(
     X_features: np.ndarray,
     X_multichannel: np.ndarray,
     y: np.ndarray,
-    donor_feat: np.ndarray,
-    donor_mc: np.ndarray,
-    donor_y: np.ndarray,
+    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    donor_means: dict[str, np.ndarray],
+    target_sid: str,
     sfreq: float,
     n_outer_folds: int,
     n_inner_folds: int,
@@ -173,21 +173,30 @@ def _augmented_nested_cv_subject(
     split_strategy: str,
     groups: np.ndarray | None,
     random_state: int,
-) -> float:
-    """Leakage-free augmented nested CV for a single subject.
+    cov_estimator,
+) -> tuple[float, str, float]:
+    """Augmented nested CV with per-fold donor selection (leakage-free).
 
-    Outer/inner CV splits are on TARGET data only. Donor data augments
-    training portions only — never appears in validation or test folds.
+    Selects the closest donor using only training-fold covariance mean,
+    so donor selection never sees test-fold data.
+
+    Returns:
+        Tuple of (accuracy, most_frequent_donor_id, mean_distance).
     """
+    from collections import Counter
+
+    from pyriemann.utils.distance import distance_riemann
+    from pyriemann.utils.mean import mean_covariance
+
     from src.train import (
         ALL_CLASSIFIERS,
         _evaluate_classifier,
         _evaluate_classifiers_batch,
         _reject_in_fold,
     )
-    from src.validation import make_cv_splits
+    from src.validation import adaptive_fold_count, make_cv_splits
 
-    classifier_names = list(ALL_CLASSIFIERS)
+    n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
     outer_splits = make_cv_splits(
         y,
         n_splits=n_outer_folds,
@@ -195,7 +204,11 @@ def _augmented_nested_cv_subject(
         groups=groups,
         random_state=random_state,
     )
+
+    classifier_names = list(ALL_CLASSIFIERS)
     fold_scores: list[float] = []
+    fold_donors: list[str] = []
+    fold_dists: list[float] = []
 
     for outer_train_idx, outer_test_idx in outer_splits:
         outer_train_idx, outer_test_idx = _reject_in_fold(
@@ -204,21 +217,37 @@ def _augmented_nested_cv_subject(
         if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
             continue
 
-        # Test fold: TARGET data only (no donor)
+        # Donor selection using TRAINING-FOLD covariance mean only
+        train_covs = cov_estimator.fit_transform(X_multichannel[outer_train_idx])
+        train_mean = mean_covariance(train_covs, metric="riemann")
+
+        dists = {
+            dsid: float(distance_riemann(train_mean, donor_means[dsid]))
+            for dsid in donor_subjects
+            if dsid != target_sid
+        }
+        best_donor = min(dists, key=dists.get)
+        fold_donors.append(best_donor)
+        fold_dists.append(dists[best_donor])
+
+        donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
+
+        # Test fold: TARGET data only
         X_feat_otest = X_features[outer_test_idx]
         X_mc_otest = X_multichannel[outer_test_idx]
         y_otest = y[outer_test_idx]
 
-        # Training fold: TARGET train + ALL donor data
+        # Training fold: TARGET train + donor
         X_feat_otrain = np.vstack([X_features[outer_train_idx], donor_feat])
         X_mc_otrain = np.vstack([X_multichannel[outer_train_idx], donor_mc])
         y_otrain = np.concatenate([y[outer_train_idx], donor_y])
 
-        # Inner CV for model selection: splits on TARGET train indices only
+        # Inner CV for model selection
+        n_inner_actual = adaptive_fold_count(len(outer_train_idx), n_inner_folds)
         inner_groups = groups[outer_train_idx] if groups is not None else None
         inner_splits = make_cv_splits(
             y[outer_train_idx],
-            n_splits=n_inner_folds,
+            n_splits=n_inner_actual,
             strategy=split_strategy,
             groups=inner_groups,
             random_state=random_state,
@@ -226,7 +255,6 @@ def _augmented_nested_cv_subject(
 
         inner_scores_by_clf: dict[str, list[float]] = {n: [] for n in classifier_names}
         for inner_train_idx, inner_val_idx in inner_splits:
-            # Inner train: target inner train + ALL donor data
             inner_feat_train = np.vstack(
                 [X_features[outer_train_idx[inner_train_idx]], donor_feat]
             )
@@ -236,7 +264,6 @@ def _augmented_nested_cv_subject(
             inner_y_train = np.concatenate(
                 [y[outer_train_idx[inner_train_idx]], donor_y]
             )
-            # Inner val: TARGET only (no donor)
             inner_feat_val = X_features[outer_train_idx[inner_val_idx]]
             inner_mc_val = X_multichannel[outer_train_idx[inner_val_idx]]
             inner_y_val = y[outer_train_idx[inner_val_idx]]
@@ -259,9 +286,8 @@ def _augmented_nested_cv_subject(
             name: float(np.mean(scores)) if scores else 0.5
             for name, scores in inner_scores_by_clf.items()
         }
-        best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+        best_clf = max(inner_means, key=inner_means.get)
 
-        # Retrain best on augmented outer train, test on TARGET outer test
         outer_score = _evaluate_classifier(
             best_clf,
             X_feat_otrain,
@@ -275,7 +301,11 @@ def _augmented_nested_cv_subject(
         )
         fold_scores.append(outer_score)
 
-    return float(np.mean(fold_scores)) if fold_scores else 0.5
+    accuracy = float(np.mean(fold_scores)) if fold_scores else 0.5
+    donor_counts = Counter(fold_donors)
+    most_common_donor = donor_counts.most_common(1)[0][0] if donor_counts else "none"
+    mean_dist = float(np.mean(fold_dists)) if fold_dists else 0.0
+    return accuracy, most_common_donor, mean_dist
 
 
 def run_pipeline(
@@ -541,7 +571,6 @@ def run_pipeline(
     if MI_DATA_NEW_DIR.exists():
         print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
         from pyriemann.estimation import Covariances as _Cov
-        from pyriemann.utils.distance import distance_riemann as _dist_riemann
         from pyriemann.utils.mean import mean_covariance as _mean_cov
 
         from src.transfer import load_all_subjects
@@ -554,56 +583,44 @@ def run_pipeline(
         )
         print(f"  Donor pool: {len(donor_subjects)} subjects")
 
-        # Compute Riemannian means for donor selection
+        # Compute raw Riemannian means for donor selection (pre-EA)
         _cov_est = _Cov(estimator="lwf")
         donor_means = {
             sid: _mean_cov(_cov_est.fit_transform(d[1]), metric="riemann")
             for sid, d in donor_subjects.items()
         }
-        target_means = {
-            subject_ids[i]: _mean_cov(
-                _cov_est.fit_transform(X_by_subject[i][1]), metric="riemann"
-            )
-            for i in range(len(subject_ids))
-        }
 
-        weakness_threshold = 0.50
-        aug_nested_scores = list(nested_scores)  # start with original scores
+        weakness_threshold = cfg.augmentation_weakness_threshold
+        aug_nested_scores = list(nested_scores)
 
         for i, (sid, score) in enumerate(zip(subject_ids, nested_scores)):
             if score >= weakness_threshold:
                 continue
 
-            # Find closest donor by Riemannian distance
-            dists = {
-                dsid: float(_dist_riemann(target_means[sid], donor_means[dsid]))
-                for dsid in donor_subjects
-                if dsid != sid
-            }
-            best_donor = min(dists, key=dists.get)
-
-            donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
             target_feat, target_mc = X_by_subject[i]
 
-            aug_score = _augmented_nested_cv_subject(
-                target_feat,
-                target_mc,
-                y_by_subject[i],
-                donor_feat,
-                donor_mc,
-                donor_y,
-                sfreq=sfreq,
-                n_outer_folds=cfg.n_outer_folds,
-                n_inner_folds=cfg.n_inner_folds,
-                k_best=cfg.k_best,
-                trial_ptps=trial_ptps_by_subject[i],
-                split_strategy=cfg.split_strategy,
-                groups=trial_groups_by_subject[i],
-                random_state=cfg.random_state,
+            aug_score, best_donor, best_dist = (
+                _augmented_nested_cv_with_donor_selection(
+                    target_feat,
+                    target_mc,
+                    y_by_subject[i],
+                    donor_subjects=donor_subjects,
+                    donor_means=donor_means,
+                    target_sid=sid,
+                    sfreq=sfreq,
+                    n_outer_folds=cfg.n_outer_folds,
+                    n_inner_folds=cfg.n_inner_folds,
+                    k_best=cfg.k_best,
+                    trial_ptps=trial_ptps_by_subject[i],
+                    split_strategy=cfg.split_strategy,
+                    groups=trial_groups_by_subject[i],
+                    random_state=cfg.random_state,
+                    cov_estimator=_cov_est,
+                )
             )
             aug_nested_scores[i] = aug_score
             print(
-                f"    {sid}: +{best_donor} (d={dists[best_donor]:.1f}) "
+                f"    {sid}: +{best_donor} (d={best_dist:.1f}) "
                 f"{score:.1%} -> {aug_score:.1%} ({aug_score - score:+.1%})"
             )
 
