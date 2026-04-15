@@ -843,6 +843,38 @@ def run_pipeline(
         }
         results["augmented_nested_mean"] = float(aug_nested_mean)
 
+    # Dual reporting: separate original subjects from new
+    original_subject_ids = [
+        sid
+        for sid in subject_ids
+        if not sid.startswith("subject010")  # 0100-0106 are MI_DATA_NEW
+    ]
+    if len(original_subject_ids) < len(subject_ids):
+        original_indices = [
+            i for i, sid in enumerate(subject_ids) if sid in original_subject_ids
+        ]
+        original_nested = [nested_scores[i] for i in original_indices]
+        results["original_subjects"] = original_subject_ids
+        results["original_nested_mean"] = float(np.mean(original_nested))
+        results["original_nested_std"] = float(np.std(original_nested))
+        if aug_nested_scores is not None:
+            original_aug = [aug_nested_scores[i] for i in original_indices]
+            results["original_augmented_nested_mean"] = float(np.mean(original_aug))
+
+        # Per-subject trial counts for new subjects
+        trial_counts = {}
+        for i, sid in enumerate(subject_ids):
+            trial_counts[sid] = len(y_by_subject[i])
+        results["trial_counts"] = trial_counts
+
+        n_original = len(original_subject_ids)
+        n_new = len(subject_ids) - n_original
+        print(f"\nDual reporting: {n_original} original + {n_new} new subjects")
+        print(
+            f"  Original {n_original} nested mean: {results['original_nested_mean']:.1%}"
+        )
+        print(f"  All {len(subject_ids)} nested mean:      {nested_mean:.1%}")
+
     results_path = output_dir / "training_results.json"
     runtime_seconds["total"] = time.perf_counter() - total_start
     results["runtime_seconds"] = runtime_seconds
