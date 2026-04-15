@@ -9,9 +9,9 @@ from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
 from pyriemann.utils.geodesic import geodesic_riemann
 from pyriemann.utils.mean import mean_covariance
-from scipy.linalg import fractional_matrix_power
 from sklearn.linear_model import LogisticRegression
 
+from src.alignment import euclidean_align
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR
 from src.data_loader import CHANNELS, get_recordings_by_subject, load_recording
 from src.epochs import (
@@ -138,9 +138,7 @@ def align_subjects(
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
-        ref = mean_covariance(covs, metric="riemann")
-        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        covs_aligned, _ = euclidean_align(covs)
 
         all_covs.append(covs_aligned)
         all_labels.append(y)
@@ -210,9 +208,7 @@ def regularized_within_subject_cv(
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
-        ref = mean_covariance(covs, metric="riemann")
-        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        covs_aligned, _ = euclidean_align(covs)
         aligned_per_subject[sid] = (covs_aligned, y)
         all_aligned_covs.append(covs_aligned)
 
@@ -385,9 +381,7 @@ def loso_cv(
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
         covs = cov_estimator.fit_transform(X_mc)
-        ref = mean_covariance(covs, metric="riemann")
-        ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-        covs_aligned = ref_inv_sqrt @ covs @ ref_inv_sqrt.T
+        covs_aligned, _ = euclidean_align(covs)
         aligned_per_subject[sid] = (covs_aligned, y)
 
     subject_ids = sorted(subjects.keys())
