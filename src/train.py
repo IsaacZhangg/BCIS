@@ -389,6 +389,7 @@ def _evaluate_subject_all_models(
     max_blas_threads_per_worker: int,
     riemannian_band: tuple[float, float] | None = None,
     riemannian_classifier: RiemannianClassifier = "tangent_lr",
+    augmentation: AugmentationContext | None = None,
 ) -> dict[str, float]:
     """Evaluate all classifiers for a single subject."""
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
@@ -400,8 +401,13 @@ def _evaluate_subject_all_models(
             random_state=random_state,
         )
         fold_scores: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
+        # Band cache is keyed by original trial index — skip it when augmentation
+        # changes the per-trial sample layout, since per-band slicing by train/test
+        # indices would no longer match the augmented tensors.
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
+            _precompute_bandpassed(X_multichannel, sfreq)
+            if enable_band_cache and augmentation is None
+            else None
         )
 
         for train_idx, test_idx in splits:
@@ -409,11 +415,20 @@ def _evaluate_subject_all_models(
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
 
-            X_feat_train = X_features[train_idx]
-            X_feat_test = X_features[test_idx]
-            X_mc_train = X_multichannel[train_idx]
-            X_mc_test = X_multichannel[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
+            if augmentation is not None:
+                X_feat_train, X_mc_train, train_origins = augmentation.expand_train(
+                    train_idx
+                )
+                y_train = y[train_origins]
+                X_feat_test = augmentation.X_features_canonical[test_idx]
+                X_mc_test = augmentation.X_multichannel_canonical[test_idx]
+                y_test = y[test_idx]
+            else:
+                X_feat_train = X_features[train_idx]
+                X_feat_test = X_features[test_idx]
+                X_mc_train = X_multichannel[train_idx]
+                X_mc_test = X_multichannel[test_idx]
+                y_train, y_test = y[train_idx], y[test_idx]
 
             riemann_pipe = _make_riemann_pipeline(
                 sfreq=sfreq,
@@ -455,11 +470,18 @@ def _evaluate_subject_all_models(
 
             best_k = k_values[0]
             best_inner_score = -1.0
-            inner_groups = groups[train_idx] if groups is not None else None
+            if augmentation is not None:
+                # Keep all windows from the same original trial in the same
+                # inner-CV fold by grouping on source-trial index.
+                inner_groups = train_origins
+                inner_strategy: SplitStrategy = "stratified_group"
+            else:
+                inner_groups = groups[train_idx] if groups is not None else None
+                inner_strategy = split_strategy
             inner_splits = make_cv_splits(
                 y_train,
                 n_splits=3,
-                strategy=split_strategy,
+                strategy=inner_strategy,
                 groups=inner_groups,
                 random_state=random_state,
             )
@@ -555,6 +577,7 @@ def train_within_subject_cv_all_models(
     enable_band_cache: bool = True,
     riemannian_band: tuple[float, float] | None = None,
     riemannian_classifier: RiemannianClassifier = "tangent_lr",
+    augmentation_by_subject: list[AugmentationContext | None] | None = None,
 ) -> dict[str, tuple[list[float], float, float]]:
     """Within-subject CV for all four classifiers in a single shared pass.
 
@@ -573,7 +596,14 @@ def train_within_subject_cv_all_models(
         enable_band_cache: Reuse precomputed per-band filtered trials.
     """
     payloads: list[
-        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
+        tuple[
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray | None,
+            np.ndarray | None,
+            AugmentationContext | None,
+        ]
     ] = []
     for subj_idx, ((X_features, X_multichannel), y) in enumerate(
         zip(X_by_subject, y_by_subject)
@@ -586,7 +616,12 @@ def train_within_subject_cv_all_models(
             trial_group_size=trial_group_size,
         )
         trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        payloads.append((X_features, X_multichannel, y, groups, trial_ptps))
+        aug = (
+            augmentation_by_subject[subj_idx]
+            if augmentation_by_subject is not None
+            else None
+        )
+        payloads.append((X_features, X_multichannel, y, groups, trial_ptps, aug))
 
     if n_jobs == 1:
         per_subject_results = [
@@ -606,8 +641,9 @@ def train_within_subject_cv_all_models(
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
                 riemannian_band=riemannian_band,
                 riemannian_classifier=riemannian_classifier,
+                augmentation=aug,
             )
-            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
         ]
     else:
         per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
@@ -627,8 +663,9 @@ def train_within_subject_cv_all_models(
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
                 riemannian_band=riemannian_band,
                 riemannian_classifier=riemannian_classifier,
+                augmentation=aug,
             )
-            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
         )
 
     scores_by_model: dict[str, list[float]] = {
@@ -980,13 +1017,17 @@ def _evaluate_subject_nested_model_selection(
     enable_band_cache: bool,
     cache_scope: CacheScope,
     max_blas_threads_per_worker: int,
+    augmentation: AugmentationContext | None = None,
 ) -> tuple[float, str]:
     """Nested model-selection CV for a single subject."""
     classifier_names = list(ALL_CLASSIFIERS)
+    aug_enabled = augmentation is not None
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
+        # Band cache requires stable per-trial sample shapes; disable when
+        # augmentation changes the time axis length for training windows.
         subject_band_cache = (
             _precompute_bandpassed(X_multichannel, sfreq)
-            if enable_band_cache and cache_scope == "subject"
+            if enable_band_cache and cache_scope == "subject" and not aug_enabled
             else None
         )
         outer_splits = make_cv_splits(
@@ -1006,58 +1047,108 @@ def _evaluate_subject_nested_model_selection(
             if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
                 continue
 
-            X_feat_otrain = X_features[outer_train_idx]
-            X_feat_otest = X_features[outer_test_idx]
-            X_mc_otrain = X_multichannel[outer_train_idx]
-            X_mc_otest = X_multichannel[outer_test_idx]
-            y_otrain = y[outer_train_idx]
-            y_otest = y[outer_test_idx]
+            if aug_enabled:
+                assert augmentation is not None
+                # Outer train → augmented pool rows whose origin lies in
+                # outer_train_idx. Outer test → canonical (centered crop).
+                X_feat_otrain, X_mc_otrain, otrain_origins = augmentation.expand_train(
+                    outer_train_idx
+                )
+                y_otrain = y[otrain_origins]
+                X_feat_otest = augmentation.X_features_canonical[outer_test_idx]
+                X_mc_otest = augmentation.X_multichannel_canonical[outer_test_idx]
+                y_otest = y[outer_test_idx]
+            else:
+                X_feat_otrain = X_features[outer_train_idx]
+                X_feat_otest = X_features[outer_test_idx]
+                X_mc_otrain = X_multichannel[outer_train_idx]
+                X_mc_otest = X_multichannel[outer_test_idx]
+                y_otrain = y[outer_train_idx]
+                y_otest = y[outer_test_idx]
 
             outer_train_cache: BandCache | None = None
             outer_test_cache: BandCache | None = None
-            if enable_band_cache and subject_band_cache is not None:
+            if not aug_enabled and enable_band_cache and subject_band_cache is not None:
                 outer_train_cache = _subset_band_cache(
                     subject_band_cache, outer_train_idx
                 )
                 outer_test_cache = _subset_band_cache(
                     subject_band_cache, outer_test_idx
                 )
-            elif enable_band_cache:
+            elif not aug_enabled and enable_band_cache:
                 outer_train_cache = _precompute_bandpassed(X_mc_otrain, sfreq)
                 outer_test_cache = _precompute_bandpassed(X_mc_otest, sfreq)
 
-            inner_groups = groups[outer_train_idx] if groups is not None else None
-            inner_splits = make_cv_splits(
-                y_otrain,
-                n_splits=n_inner_folds,
-                strategy=split_strategy,
-                groups=inner_groups,
-                random_state=random_state,
-            )
+            if aug_enabled:
+                # Split the ORIGINAL outer-train trial indices so each inner
+                # fold has a clean split of source trials.  Then each inner
+                # fold rebuilds its own augmented train and canonical val.
+                inner_splits_orig = make_cv_splits(
+                    y[outer_train_idx],
+                    n_splits=n_inner_folds,
+                    strategy=split_strategy,
+                    groups=(groups[outer_train_idx] if groups is not None else None),
+                    random_state=random_state,
+                )
+                inner_splits = []
+                for it_orig, iv_orig in inner_splits_orig:
+                    it_global = outer_train_idx[it_orig]
+                    iv_global = outer_train_idx[iv_orig]
+                    inner_splits.append((it_global, iv_global))
+            else:
+                inner_groups = groups[outer_train_idx] if groups is not None else None
+                inner_splits = make_cv_splits(
+                    y_otrain,
+                    n_splits=n_inner_folds,
+                    strategy=split_strategy,
+                    groups=inner_groups,
+                    random_state=random_state,
+                )
             inner_scores_by_clf = {name: [] for name in classifier_names}
             for inner_train_idx, inner_val_idx in inner_splits:
-                inner_train_cache: BandCache | None = None
-                inner_val_cache: BandCache | None = None
-                if outer_train_cache is not None:
-                    inner_train_cache = _subset_band_cache(
-                        outer_train_cache, inner_train_idx
+                if aug_enabled:
+                    assert augmentation is not None
+                    inner_feat_train, inner_mc_train, inner_train_origins = (
+                        augmentation.expand_train(inner_train_idx)
                     )
-                    inner_val_cache = _subset_band_cache(
-                        outer_train_cache, inner_val_idx
+                    inner_y_train = y[inner_train_origins]
+                    inner_feat_val = augmentation.X_features_canonical[inner_val_idx]
+                    inner_mc_val = augmentation.X_multichannel_canonical[inner_val_idx]
+                    inner_y_val = y[inner_val_idx]
+                    split_scores = _evaluate_classifiers_batch(
+                        classifier_names,
+                        inner_feat_train,
+                        inner_feat_val,
+                        inner_y_train,
+                        inner_y_val,
+                        inner_mc_train,
+                        inner_mc_val,
+                        sfreq,
+                        k_best,
                     )
-                split_scores = _evaluate_classifiers_batch(
-                    classifier_names,
-                    X_feat_otrain[inner_train_idx],
-                    X_feat_otrain[inner_val_idx],
-                    y_otrain[inner_train_idx],
-                    y_otrain[inner_val_idx],
-                    X_mc_otrain[inner_train_idx],
-                    X_mc_otrain[inner_val_idx],
-                    sfreq,
-                    k_best,
-                    prefiltered_train=inner_train_cache,
-                    prefiltered_test=inner_val_cache,
-                )
+                else:
+                    inner_train_cache: BandCache | None = None
+                    inner_val_cache: BandCache | None = None
+                    if outer_train_cache is not None:
+                        inner_train_cache = _subset_band_cache(
+                            outer_train_cache, inner_train_idx
+                        )
+                        inner_val_cache = _subset_band_cache(
+                            outer_train_cache, inner_val_idx
+                        )
+                    split_scores = _evaluate_classifiers_batch(
+                        classifier_names,
+                        X_feat_otrain[inner_train_idx],
+                        X_feat_otrain[inner_val_idx],
+                        y_otrain[inner_train_idx],
+                        y_otrain[inner_val_idx],
+                        X_mc_otrain[inner_train_idx],
+                        X_mc_otrain[inner_val_idx],
+                        sfreq,
+                        k_best,
+                        prefiltered_train=inner_train_cache,
+                        prefiltered_test=inner_val_cache,
+                    )
                 for clf_name, score in split_scores.items():
                     inner_scores_by_clf[clf_name].append(score)
             inner_means = {
@@ -1106,6 +1197,7 @@ def train_nested_model_selection_cv(
     max_blas_threads_per_worker: int = 1,
     enable_band_cache: bool = True,
     cache_scope: CacheScope = "subject",
+    augmentation_by_subject: list[AugmentationContext | None] | None = None,
 ) -> tuple[list[float], float, float, list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
@@ -1144,7 +1236,14 @@ def train_nested_model_selection_cv(
         cache_scope: Cache precompute scope ('subject' or 'outer_fold').
     """
     payloads: list[
-        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
+        tuple[
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray | None,
+            np.ndarray | None,
+            AugmentationContext | None,
+        ]
     ] = []
     for subj_idx, ((X_features, X_multichannel), y) in enumerate(
         zip(X_by_subject, y_by_subject)
@@ -1157,7 +1256,12 @@ def train_nested_model_selection_cv(
             trial_group_size=trial_group_size,
         )
         trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        payloads.append((X_features, X_multichannel, y, groups, trial_ptps))
+        aug = (
+            augmentation_by_subject[subj_idx]
+            if augmentation_by_subject is not None
+            else None
+        )
+        payloads.append((X_features, X_multichannel, y, groups, trial_ptps, aug))
 
     if n_jobs == 1:
         per_subject_results = [
@@ -1176,8 +1280,9 @@ def train_nested_model_selection_cv(
                 enable_band_cache=enable_band_cache,
                 cache_scope=cache_scope,
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
+                augmentation=aug,
             )
-            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
         ]
     else:
         per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
@@ -1196,8 +1301,9 @@ def train_nested_model_selection_cv(
                 enable_band_cache=enable_band_cache,
                 cache_scope=cache_scope,
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
+                augmentation=aug,
             )
-            for X_features, X_multichannel, y, groups, trial_ptps in payloads
+            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
         )
 
     scores = [score for score, _ in per_subject_results]
