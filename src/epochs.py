@@ -212,6 +212,101 @@ def task_epochs(
     ).transpose(1, 0, 2)
 
 
+def sliding_window_offsets(
+    n_samples: int,
+    window_samples: int,
+    stride_samples: int,
+) -> list[int]:
+    """Return start-sample offsets for a sliding window over a signal.
+
+    The first offset is 0 and the last is the largest value with
+    ``offset + window_samples <= n_samples``.  The returned list always contains
+    at least one offset (falling back to ``[0]`` if the window does not fit).
+
+    Args:
+        n_samples: Length of the source signal in samples.
+        window_samples: Size of each window in samples.
+        stride_samples: Step between consecutive windows in samples.
+    """
+    if window_samples <= 0:
+        raise ValueError("window_samples must be positive")
+    if stride_samples <= 0:
+        raise ValueError("stride_samples must be positive")
+    if window_samples > n_samples:
+        return [0]
+
+    last_start = n_samples - window_samples
+    offsets = list(range(0, last_start + 1, stride_samples))
+    if not offsets:
+        return [0]
+    if offsets[-1] != last_start:
+        offsets.append(last_start)
+    return offsets
+
+
+def center_crop_offset(n_samples: int, window_samples: int) -> int:
+    """Return the start offset for a centered crop of *window_samples*."""
+    if window_samples >= n_samples:
+        return 0
+    return (n_samples - window_samples) // 2
+
+
+def slice_epoch_windows(
+    epoch: np.ndarray,
+    window_samples: int,
+    stride_samples: int,
+    axis: int = -1,
+) -> np.ndarray:
+    """Return overlapping windows of length *window_samples* sliced from *epoch*.
+
+    Args:
+        epoch: Array whose *axis* spans the time dimension.
+        window_samples: Length of each window in samples.
+        stride_samples: Step between consecutive windows in samples.
+        axis: Time axis.  Defaults to the last axis.
+
+    Returns:
+        Array with a new leading axis of length ``n_windows``.  The remaining
+        axes match *epoch* with *axis* replaced by *window_samples*.
+    """
+    epoch = np.asarray(epoch)
+    axis = axis % epoch.ndim
+    offsets = sliding_window_offsets(epoch.shape[axis], window_samples, stride_samples)
+    slicers = []
+    for start in offsets:
+        idx = [slice(None)] * epoch.ndim
+        idx[axis] = slice(start, start + window_samples)
+        slicers.append(epoch[tuple(idx)])
+    return np.stack(slicers, axis=0)
+
+
+def expand_trial_windows(
+    X: np.ndarray,
+    window_samples: int,
+    stride_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Expand ``(n_trials, n_channels, n_samples)`` into overlapping windows.
+
+    Returns:
+        Tuple ``(X_expanded, origin_indices)`` where ``X_expanded`` has shape
+        ``(n_trials * n_windows, n_channels, window_samples)`` and
+        ``origin_indices[i]`` is the source trial index for expanded row ``i``.
+    """
+    if X.ndim != 3:
+        raise ValueError("expand_trial_windows expects a 3D array")
+    n_trials, n_channels, n_samples = X.shape
+    offsets = sliding_window_offsets(n_samples, window_samples, stride_samples)
+    n_windows = len(offsets)
+
+    out = np.empty((n_trials * n_windows, n_channels, window_samples), dtype=X.dtype)
+    origins = np.empty(n_trials * n_windows, dtype=int)
+    for w_idx, start in enumerate(offsets):
+        sl = slice(start, start + window_samples)
+        out[w_idx::n_windows] = X[:, :, sl]
+        origins[w_idx::n_windows] = np.arange(n_trials)
+    return out, origins
+
+
 def reject_bad_epochs(
     left_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
     right_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
