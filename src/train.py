@@ -90,7 +90,7 @@ FBCSP_BANDS = [
 
 N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
-ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
+ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble", "stacking")
 OPTIONAL_CLASSIFIERS = ("eegnet",)
 
 
