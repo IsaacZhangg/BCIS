@@ -1,5 +1,7 @@
 """Tests for CLI argument parsing and RunConfig."""
 
+from pathlib import Path
+
 from src.cli import RunConfig, parse_args
 from src.config import TrainingConfig
 
@@ -12,6 +14,10 @@ class TestRunConfig:
         assert rc.classifiers is None
         assert rc.experiment_name is None
         assert rc.export_models is True
+        assert rc.data_dir == Path("Data/unicorn-data")
+        assert rc.output_dir == Path("models")
+        assert rc.holdout_fraction == 0.0
+        assert rc.quiet is True
 
     def test_custom_stages(self):
         rc = RunConfig(stages=["cv"])
@@ -26,6 +32,10 @@ class TestParseArgs:
     def test_no_args_gives_defaults(self):
         rc = parse_args([])
         assert rc.stages == ["all"]
+        assert rc.data_dir == Path("Data/unicorn-data")
+        assert rc.output_dir == Path("models")
+        assert rc.holdout_fraction == 0.0
+        assert rc.quiet is True
 
     def test_stages_flag(self):
         rc = parse_args(["--stages", "cv,features"])
@@ -46,6 +56,22 @@ class TestParseArgs:
     def test_no_export_flag(self):
         rc = parse_args(["--no-export"])
         assert rc.export_models is False
+
+    def test_data_dir_flag(self):
+        rc = parse_args(["--data-dir", "/tmp/somewhere"])
+        assert rc.data_dir == Path("/tmp/somewhere")
+
+    def test_output_dir_flag(self):
+        rc = parse_args(["--output-dir", "/tmp/models"])
+        assert rc.output_dir == Path("/tmp/models")
+
+    def test_holdout_fraction_flag(self):
+        rc = parse_args(["--holdout-fraction", "0.2"])
+        assert rc.holdout_fraction == 0.2
+
+    def test_verbose_flag(self):
+        rc = parse_args(["--verbose"])
+        assert rc.quiet is False
 
 
 class TestConfigHash:

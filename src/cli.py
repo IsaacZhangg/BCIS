@@ -22,6 +22,10 @@ class RunConfig:
     experiment_name: str | None = None
     cache_dir: Path = Path("cache")
     export_models: bool = True
+    data_dir: Path = Path("Data/unicorn-data")
+    output_dir: Path = Path("models")
+    holdout_fraction: float = 0.0
+    quiet: bool = True
 
 
 def parse_args(argv: list[str] | None = None) -> RunConfig:
@@ -62,6 +66,29 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         action="store_true",
         help="Skip model export step",
     )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("Data/unicorn-data"),
+        help="Directory with subject/session recordings",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("models"),
+        help="Directory to save models and training_results.json",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of trials held out per subject (0.0 disables)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose third-party logs (MNE, warnings)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -72,4 +99,8 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         experiment_name=args.experiment_name,
         cache_dir=args.cache_dir,
         export_models=not args.no_export,
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        holdout_fraction=args.holdout_fraction,
+        quiet=not args.verbose,
     )
