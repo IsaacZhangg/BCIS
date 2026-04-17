@@ -2,6 +2,7 @@
 
 import logging
 from collections import Counter
+from dataclasses import dataclass
 
 import mne
 import numpy as np
@@ -28,6 +29,51 @@ from src.config import (
 from src.eegnet import TORCH_AVAILABLE as EEGNET_TORCH_AVAILABLE
 from src.epochs import adaptive_threshold
 from src.validation import build_classwise_trial_groups, make_cv_splits
+
+
+@dataclass(frozen=True)
+class AugmentationContext:
+    """Training-time temporal augmentation data for a single subject.
+
+    Each field indexed by ``origins`` refers back to the original (unaugmented)
+    trial index.  ``X_features_canonical`` / ``X_multichannel_canonical`` are
+    the centered-crop, one-row-per-trial tensors used at validation/test time
+    so inference stays deterministic and matches the trained window length.
+
+    Attributes:
+        X_features_pool: Features computed from every augmented window across
+            all original trials, shape ``(n_trials * n_windows, n_features)``.
+        X_multichannel_pool: Augmented multichannel windows, shape
+            ``(n_trials * n_windows, n_channels, window_samples)``.
+        origins: Source trial index for each pool row, shape
+            ``(n_trials * n_windows,)``.
+        X_features_canonical: One row per original trial (centered crop).
+        X_multichannel_canonical: One windowed trial per original trial
+            (centered crop), shape ``(n_trials, n_channels, window_samples)``.
+    """
+
+    X_features_pool: np.ndarray
+    X_multichannel_pool: np.ndarray
+    origins: np.ndarray
+    X_features_canonical: np.ndarray
+    X_multichannel_canonical: np.ndarray
+
+    def expand_train(
+        self, train_idx: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return augmented ``(X_feat, X_mc, origin_idx)`` for training trials."""
+        train_set = set(int(i) for i in train_idx)
+        mask = np.fromiter(
+            (int(o) in train_set for o in self.origins),
+            dtype=bool,
+            count=len(self.origins),
+        )
+        return (
+            self.X_features_pool[mask],
+            self.X_multichannel_pool[mask],
+            self.origins[mask],
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +387,8 @@ def _evaluate_subject_all_models(
     k_candidates: tuple[int, ...],
     enable_band_cache: bool,
     max_blas_threads_per_worker: int,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> dict[str, float]:
     """Evaluate all classifiers for a single subject."""
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
@@ -367,7 +415,11 @@ def _evaluate_subject_all_models(
             X_mc_test = X_multichannel[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            riemann_pipe = _make_riemann_pipeline()
+            riemann_pipe = _make_riemann_pipeline(
+                sfreq=sfreq,
+                riemannian_band=riemannian_band,
+                riemannian_classifier=riemannian_classifier,
+            )
             riemann_pipe.fit(X_mc_train, y_train)
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
@@ -501,6 +553,8 @@ def train_within_subject_cv_all_models(
     parallel_backend: ParallelBackend = "loky",
     max_blas_threads_per_worker: int = 1,
     enable_band_cache: bool = True,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> dict[str, tuple[list[float], float, float]]:
     """Within-subject CV for all four classifiers in a single shared pass.
 
@@ -550,6 +604,8 @@ def train_within_subject_cv_all_models(
                 k_candidates=k_candidates,
                 enable_band_cache=enable_band_cache,
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
+                riemannian_band=riemannian_band,
+                riemannian_classifier=riemannian_classifier,
             )
             for X_features, X_multichannel, y, groups, trial_ptps in payloads
         ]
@@ -569,6 +625,8 @@ def train_within_subject_cv_all_models(
                 k_candidates=k_candidates,
                 enable_band_cache=enable_band_cache,
                 max_blas_threads_per_worker=max_blas_threads_per_worker,
+                riemannian_band=riemannian_band,
+                riemannian_classifier=riemannian_classifier,
             )
             for X_features, X_multichannel, y, groups, trial_ptps in payloads
         )
@@ -664,6 +722,8 @@ def train_within_subject_cv_riemann(
     trial_groups_by_subject: list[np.ndarray] | None = None,
     trial_group_size: int = 5,
     random_state: int = 42,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> tuple[list[float], float, float]:
     """Within-subject CV using Riemannian tangent-space classifier.
 
@@ -714,7 +774,11 @@ def train_within_subject_cv_riemann(
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
-            pipe = _make_riemann_pipeline()
+            pipe = _make_riemann_pipeline(
+                sfreq=sfreq,
+                riemannian_band=riemannian_band,
+                riemannian_classifier=riemannian_classifier,
+            )
             pipe.fit(X_multichannel[train_idx], y[train_idx])
             fold_scores.append(pipe.score(X_multichannel[test_idx], y[test_idx]))
 
@@ -729,13 +793,19 @@ def train_final_model_riemann(
     X_multichannel: np.ndarray,
     y: np.ndarray,
     sfreq: float = 250.0,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> dict:
     """Train a deployable Riemannian model on all data for a single subject.
 
     Returns:
         Dict with keys 'pipeline', 'sfreq'.
     """
-    pipe = _make_riemann_pipeline()
+    pipe = _make_riemann_pipeline(
+        sfreq=sfreq,
+        riemannian_band=riemannian_band,
+        riemannian_classifier=riemannian_classifier,
+    )
     pipe.fit(X_multichannel, y)
     return {"pipeline": pipe, "sfreq": sfreq}
 
@@ -757,6 +827,8 @@ def _evaluate_classifiers_batch(
     k_best: int,
     prefiltered_train: BandCache | None = None,
     prefiltered_test: BandCache | None = None,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> dict[str, float]:
     """Train and score one or more classifiers on a fixed split.
 
@@ -773,7 +845,11 @@ def _evaluate_classifiers_batch(
     scores: dict[str, float] = {}
 
     if "riemann" in requested:
-        pipe = _make_riemann_pipeline()
+        pipe = _make_riemann_pipeline(
+            sfreq=sfreq,
+            riemannian_band=riemannian_band,
+            riemannian_classifier=riemannian_classifier,
+        )
         pipe.fit(X_mc_train, y_train)
         scores["riemann"] = float(pipe.score(X_mc_test, y_test))
 
