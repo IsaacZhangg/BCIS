@@ -300,8 +300,10 @@ def test_nested_model_selection_cv_returns_scores():
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc, methods = train_nested_model_selection_cv(
-        X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
+    scores, mean_acc, std_acc, methods, stacking_scores = (
+        train_nested_model_selection_cv(
+            X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
+        )
     )
 
     assert len(scores) == n_subjects
@@ -312,6 +314,9 @@ def test_nested_model_selection_cv_returns_scores():
     assert len(methods) == n_subjects
     for m in methods:
         assert m in {"lda", "riemann", "svm", "ensemble"}
+    assert len(stacking_scores) == n_subjects
+    for s in stacking_scores:
+        assert 0 <= s <= 1
 
 
 def test_nested_model_selection_no_leakage():
@@ -321,7 +326,7 @@ def test_nested_model_selection_no_leakage():
     X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    _, mean_acc, _, _ = train_nested_model_selection_cv(
+    _, mean_acc, _, _, _ = train_nested_model_selection_cv(
         X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
     )
 
@@ -348,10 +353,10 @@ def test_nested_cached_parallel_path_keeps_statistical_parity():
         random_state=17,
     )
 
-    b_scores, b_mean, b_std, _ = train_nested_model_selection_cv(
+    b_scores, b_mean, b_std, _, _ = train_nested_model_selection_cv(
         X_by_subject, y_by_subject, n_jobs=1, enable_band_cache=False, **shared_kwargs
     )
-    o_scores, o_mean, o_std, _ = train_nested_model_selection_cv(
+    o_scores, o_mean, o_std, _, _ = train_nested_model_selection_cv(
         X_by_subject,
         y_by_subject,
         n_jobs=2,

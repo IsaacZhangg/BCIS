@@ -582,7 +582,7 @@ def run_pipeline(
     best_std = float(np.std(best_scores))
 
     print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
-    nested_scores, nested_mean, nested_std, nested_methods = (
+    nested_scores, nested_mean, nested_std, nested_methods, stacking_scores = (
         train_nested_model_selection_cv(
             X_by_subject,
             y_by_subject,
@@ -634,6 +634,9 @@ def run_pipeline(
     print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
+    print(
+        f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
+    )
 
     # Step 3b: Augmented nested CV for weak subjects (leakage-free)
     aug_nested_scores = None
@@ -865,6 +868,9 @@ def run_pipeline(
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
+    print(
+        f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
+    )
     if holdout_results:
         ho_mean = float(np.mean(list(holdout_results.values())))
         print(f"Held-out mean:                 {ho_mean:.1%}")
@@ -903,6 +909,11 @@ def run_pipeline(
         "best_std_accuracy": float(best_std),
         "nested_mean_accuracy": float(nested_mean),
         "nested_std_accuracy": float(nested_std),
+        "stacking_scores": {
+            sid: float(s) for sid, s in zip(subject_ids, stacking_scores)
+        },
+        "stacking_mean_accuracy": float(stacking_mean),
+        "stacking_std_accuracy": float(stacking_std),
         "subjects_with_signal": above_chance,
         "subjects_at_chance": at_chance,
         "model_paths": model_paths,

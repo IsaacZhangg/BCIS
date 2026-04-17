@@ -438,6 +438,8 @@ def _evaluate_subject_all_models(
             riemann_pipe.fit(X_mc_train, y_train)
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
+            train_band_cache: BandCache | None = None
+            test_band_cache: BandCache | None = None
             if subject_band_cache is not None:
                 train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
                 test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
@@ -552,6 +554,29 @@ def _evaluate_subject_all_models(
             avg_proba = (proba_lda + proba_svm) / 2
             preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
             fold_scores["ensemble"].append(float(np.mean(preds == y_test)))
+
+            # Stacking: reuse the inner_splits already generated above for k
+            # tuning to also build OOF meta features from LDA/Riemann/SVM, then
+            # refit bases on full outer-train for outer-test probabilities.
+            # Skipped under augmentation (inner_splits index augmented rows,
+            # not the canonical-crop tensors used at outer test).
+            if augmentation is None and inner_splits:
+                stacking_acc = _stacking_score(
+                    X_feat_train,
+                    X_feat_test,
+                    y_train,
+                    y_test,
+                    X_mc_train,
+                    X_mc_test,
+                    sfreq,
+                    k_best,
+                    inner_splits=inner_splits,
+                    prefiltered_train=train_band_cache,
+                    prefiltered_test=test_band_cache,
+                    riemannian_band=riemannian_band,
+                    riemannian_classifier=riemannian_classifier,
+                )
+                fold_scores["stacking"].append(stacking_acc)
 
         return {
             name: float(np.mean(fold_scores[name])) if fold_scores[name] else 0.5
@@ -873,7 +898,10 @@ def _evaluate_classifiers_batch(
     'ensemble') so nested inner loops can evaluate all candidates without
     recomputing identical transforms.
     """
-    requested = set(names)
+    # Stacking is handled outside this per-fold batch because it needs the full
+    # inner CV to generate OOF meta features. Silently drop it here so callers
+    # can pass ALL_CLASSIFIERS without extra bookkeeping.
+    requested = set(names) - {"stacking"}
     unknown = requested.difference(ALL_CLASSIFIERS)
     if unknown:
         unknown_txt = ", ".join(sorted(unknown))
@@ -1184,9 +1212,19 @@ def _evaluate_subject_nested_model_selection(
     cache_scope: CacheScope,
     max_blas_threads_per_worker: int,
     augmentation: AugmentationContext | None = None,
-) -> tuple[float, str]:
-    """Nested model-selection CV for a single subject."""
-    classifier_names = list(ALL_CLASSIFIERS)
+) -> tuple[float, str, float]:
+    """Nested model-selection CV for a single subject.
+
+    Returns (selected_best_score, best_method, stacking_score). The stacking
+    score is computed on each outer fold by training a LogisticRegression
+    meta-learner on OOF predictions from LDA/Riemann/SVM collected across the
+    inner CV folds, then predicting on outer-test with bases refit on full
+    outer-train. Stacking does not participate in the inner-CV model selection;
+    it is an independent per-fold evaluation reported alongside the selector.
+    """
+    # Inner-CV selection candidates exclude stacking because stacking needs the
+    # full inner loop to generate OOF meta features, not a per-fold score.
+    classifier_names = [c for c in ALL_CLASSIFIERS if c != "stacking"]
     aug_enabled = augmentation is not None
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
         # Band cache requires stable per-trial sample shapes; disable when
@@ -1205,6 +1243,7 @@ def _evaluate_subject_nested_model_selection(
         )
         fold_scores: list[float] = []
         fold_winners: list[str] = []
+        stacking_fold_scores: list[float] = []
 
         for outer_train_idx, outer_test_idx in outer_splits:
             outer_train_idx, outer_test_idx = _reject_in_fold(
@@ -1340,10 +1379,37 @@ def _evaluate_subject_nested_model_selection(
             fold_scores.append(outer_score)
             fold_winners.append(best_clf)
 
+            # Stacking per outer fold: reuse the same inner_splits that drove
+            # model selection. OOF predictions from LDA/Riemann/SVM on inner-val
+            # become the meta training matrix; bases are then refit on full
+            # outer-train to transform outer-test. Meta-learner never sees
+            # outer-test at training time — standard stacking discipline.
+            # Skipped under augmentation because inner-fold indices are global
+            # and expanding augmented windows inside the stacking helper would
+            # need its own plumbing; planned as a follow-up.
+            if not aug_enabled:
+                stacking_outer = _stacking_score(
+                    X_feat_otrain,
+                    X_feat_otest,
+                    y_otrain,
+                    y_otest,
+                    X_mc_otrain,
+                    X_mc_otest,
+                    sfreq,
+                    k_best,
+                    inner_splits=inner_splits,
+                    prefiltered_train=outer_train_cache,
+                    prefiltered_test=outer_test_cache,
+                )
+                stacking_fold_scores.append(stacking_outer)
+
         score = float(np.mean(fold_scores)) if fold_scores else 0.5
         winner_counts = Counter(fold_winners)
         best_method = winner_counts.most_common(1)[0][0] if winner_counts else "lda"
-        return score, best_method
+        stacking_score = (
+            float(np.mean(stacking_fold_scores)) if stacking_fold_scores else 0.5
+        )
+        return score, best_method, stacking_score
 
 
 def train_nested_model_selection_cv(
@@ -1364,7 +1430,7 @@ def train_nested_model_selection_cv(
     enable_band_cache: bool = True,
     cache_scope: CacheScope = "subject",
     augmentation_by_subject: list[AugmentationContext | None] | None = None,
-) -> tuple[list[float], float, float, list[str]]:
+) -> tuple[list[float], float, float, list[str], list[float]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
     Outer loop: StratifiedKFold(n_outer_folds) per subject.
@@ -1374,6 +1440,13 @@ def train_nested_model_selection_cv(
 
     This gives an unbiased estimate of the "pick the best classifier" strategy
     because the classifier selection is done inside the CV loop.
+
+    Stacking is reported as an additional, independent per-subject metric: for
+    each outer fold we train a LogisticRegression meta-learner on OOF base
+    classifier (LDA/Riemann/SVM) probabilities gathered across the inner CV
+    folds, refit the bases on full outer-train, and evaluate on outer-test.
+    Stacking does not participate in the inner-CV selection (no per-inner-fold
+    score exists for it by construction); it's a parallel evaluation path.
 
     Args:
         X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
@@ -1391,8 +1464,10 @@ def train_nested_model_selection_cv(
         random_state: Random seed for deterministic splits.
 
     Returns:
-        Tuple of (per_subject_scores, mean, std, per_subject_best_methods).
+        Tuple of (per_subject_scores, mean, std, per_subject_best_methods,
+        per_subject_stacking_scores).
         per_subject_best_methods is the most frequent inner-CV winner per subject.
+        per_subject_stacking_scores is the averaged outer-fold stacking accuracy.
 
     Extra controls:
         n_jobs: Subject-level parallel jobs (1 disables parallelism).
@@ -1472,12 +1547,13 @@ def train_nested_model_selection_cv(
             for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
         )
 
-    scores = [score for score, _ in per_subject_results]
-    best_methods = [method for _, method in per_subject_results]
+    scores = [result[0] for result in per_subject_results]
+    best_methods = [result[1] for result in per_subject_results]
+    stacking_scores = [result[2] for result in per_subject_results]
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc, best_methods
+    return scores, mean_acc, std_acc, best_methods, stacking_scores
 
 
 # ---------------------------------------------------------------------------
