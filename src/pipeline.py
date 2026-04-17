@@ -634,6 +634,8 @@ def run_pipeline(
     print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
+    stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
+    stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
     print(
         f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
     )
