@@ -1,5 +1,6 @@
 """Training pipeline: FBCSP + LDA, FBCSP + SVM, and Riemannian classifiers for left/right MI."""
 
+import logging
 from collections import Counter
 
 import mne
@@ -16,9 +17,19 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 
-from src.config import CacheScope, ParallelBackend, SplitStrategy
+from sklearn.base import BaseEstimator, TransformerMixin
+
+from src.config import (
+    CacheScope,
+    ParallelBackend,
+    RiemannianClassifier,
+    SplitStrategy,
+)
+from src.eegnet import TORCH_AVAILABLE as EEGNET_TORCH_AVAILABLE
 from src.epochs import adaptive_threshold
 from src.validation import build_classwise_trial_groups, make_cv_splits
+
+logger = logging.getLogger(__name__)
 
 FBCSP_BANDS = [
     (8, 10),
@@ -34,16 +45,87 @@ FBCSP_BANDS = [
 N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
+OPTIONAL_CLASSIFIERS = ("eegnet",)
+
+
+def available_classifiers() -> tuple[str, ...]:
+    """Return the classifiers that are usable in the current environment.
+
+    Optional classifiers (e.g. ``eegnet``) are included only when their
+    backing libraries are importable; otherwise they are skipped with a log
+    warning so pipeline runs degrade gracefully instead of crashing.
+    """
+    classifiers = list(ALL_CLASSIFIERS)
+    if EEGNET_TORCH_AVAILABLE:
+        classifiers.append("eegnet")
+    else:
+        logger.warning(
+            "eegnet classifier unavailable: torch is not installed — skipping."
+        )
+    return tuple(classifiers)
+
+
 BandCache = dict[tuple[float, float], np.ndarray]
 
 
-def _make_riemann_pipeline():
-    """Create a fresh Riemannian tangent-space classification pipeline."""
-    return make_pipeline(
-        Covariances(estimator="lwf"),
-        TangentSpace(metric="riemann"),
-        LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
-    )
+class _BandpassTrials(BaseEstimator, TransformerMixin):
+    """Sklearn transformer that bandpasses each trial along time.
+
+    Used only when ``riemannian_band`` is set so the Riemannian covariance input
+    can be narrowband (e.g. 8-30 Hz) while other classifiers keep broadband.
+    """
+
+    def __init__(self, low: float, high: float, sfreq: float):
+        self.low = low
+        self.high = high
+        self.sfreq = sfreq
+
+    def fit(self, X, y=None):  # noqa: D401 - sklearn signature
+        return self
+
+    def transform(self, X):
+        return mne.filter.filter_data(
+            X.astype(np.float64, copy=False),
+            self.sfreq,
+            self.low,
+            self.high,
+            verbose=False,
+        )
+
+
+def _make_riemann_pipeline(
+    sfreq: float = 250.0,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
+):
+    """Create a fresh Riemannian classification pipeline.
+
+    Defaults reproduce the baseline (lwf → TangentSpace → LR, broadband input).
+    Optional knobs:
+
+    - ``riemannian_band``: if set, prepend a per-trial bandpass so the
+      covariance input is narrowband; leaves the broadband input used elsewhere
+      (FBCSP/LDA/SVM) untouched.
+    - ``riemannian_classifier``: ``"mdm"`` swaps TangentSpace+LR for
+      ``pyriemann.classification.MDM(metric="riemann")``.
+    """
+    if riemannian_classifier == "mdm":
+        from pyriemann.classification import MDM
+
+        classifier_steps: tuple = (Covariances(estimator="lwf"), MDM(metric="riemann"))
+    else:
+        classifier_steps = (
+            Covariances(estimator="lwf"),
+            TangentSpace(metric="riemann"),
+            LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
+        )
+
+    if riemannian_band is not None:
+        low, high = riemannian_band
+        return make_pipeline(
+            _BandpassTrials(low=low, high=high, sfreq=sfreq), *classifier_steps
+        )
+    return make_pipeline(*classifier_steps)
 
 
 def _precompute_bandpassed(
