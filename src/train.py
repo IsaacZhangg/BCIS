@@ -972,6 +972,172 @@ def _evaluate_classifiers_batch(
     return scores
 
 
+def _fit_base_classifiers_and_proba(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    X_mc_train: np.ndarray,
+    X_mc_test: np.ndarray,
+    sfreq: float,
+    k_best: int,
+    prefiltered_train: BandCache | None = None,
+    prefiltered_test: BandCache | None = None,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit LDA/Riemann/SVM on a train split and return positive-class probs on the test split.
+
+    Stacking uses probability of class 1 from each base classifier so the meta
+    feature matrix is (n_trials, 3). Storing only the positive-class column keeps
+    the downstream logistic-regression minimal and avoids redundant columns that
+    sum to 1.
+    """
+    riemann_pipe = _make_riemann_pipeline(
+        sfreq=sfreq,
+        riemannian_band=riemannian_band,
+        riemannian_classifier=riemannian_classifier,
+    )
+    riemann_pipe.fit(X_mc_train, y_train)
+
+    if prefiltered_train is not None and prefiltered_test is not None:
+        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+            prefiltered_train,
+            prefiltered_test,
+            y_train,
+            n_train_trials=X_mc_train.shape[0],
+            n_test_trials=X_mc_test.shape[0],
+        )
+    else:
+        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
+            X_mc_train, X_mc_test, y_train, sfreq
+        )
+    X_train_combined = np.hstack([fbcsp_train, X_train])
+    X_test_combined = np.hstack([fbcsp_test, X_test])
+
+    k_values = _safe_k_values(
+        n_features=X_train_combined.shape[1],
+        n_train_trials=len(y_train),
+        k_best=k_best,
+        k_candidates=DEFAULT_K_CANDIDATES,
+    )
+    k = k_values[-1] if k_values else min(k_best, X_train_combined.shape[1])
+    selector = SelectKBest(f_classif, k=k)
+    X_train_sel = selector.fit_transform(X_train_combined, y_train)
+    X_test_sel = selector.transform(X_test_combined)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_sel)
+    X_test_scaled = scaler.transform(X_test_sel)
+
+    _, counts = np.unique(y_train, return_counts=True)
+    priors = counts / counts.sum()
+
+    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
+    lda.fit(X_train_scaled, y_train)
+    svm = SVC(kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42)
+    svm.fit(X_train_scaled, y_train)
+
+    def _pos_proba(model, X, classes) -> np.ndarray:
+        proba = model.predict_proba(X)
+        # Column for class label 1. Falls back to last column when classes differ.
+        if 1 in classes:
+            col = int(np.where(classes == 1)[0][0])
+        else:
+            col = proba.shape[1] - 1
+        return proba[:, col]
+
+    # Columns: [lda, riemann, svm] — fixed ordering so the meta-learner sees a
+    # consistent feature layout across folds.
+    lda_test = _pos_proba(lda, X_test_scaled, lda.classes_)
+    svm_test = _pos_proba(svm, X_test_scaled, svm.classes_)
+    riemann_test = _pos_proba(riemann_pipe, X_mc_test, riemann_pipe.classes_)
+    return np.vstack([lda_test, riemann_test, svm_test]).T, np.array([])
+
+
+def _stacking_score(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    X_mc_train: np.ndarray,
+    X_mc_test: np.ndarray,
+    sfreq: float,
+    k_best: int,
+    inner_splits: list[tuple[np.ndarray, np.ndarray]],
+    prefiltered_train: BandCache | None = None,
+    prefiltered_test: BandCache | None = None,
+    riemannian_band: tuple[float, float] | None = None,
+    riemannian_classifier: RiemannianClassifier = "tangent_lr",
+) -> float:
+    """Compute stacking accuracy on (outer) test using leak-free OOF meta-training.
+
+    Pipeline (no leakage):
+      1. For each inner fold split of the outer-train set:
+         - Fit LDA/Riemann/SVM on inner-train.
+         - Record their positive-class probabilities on inner-val as OOF features.
+      2. Train LogisticRegression meta-learner on the OOF matrix + y_train[covered].
+      3. Refit LDA/Riemann/SVM on the FULL outer-train, predict probabilities on
+         outer-test → X_meta_test. Meta-learner predicts on X_meta_test.
+
+    The meta-learner NEVER sees outer-test predictions during its fitting. The
+    base classifiers used at test time are trained on full outer-train, matching
+    standard stacking.
+    """
+    n_train = len(y_train)
+    # Columns are [lda, riemann, svm] positive-class probability.
+    X_meta_oof = np.full((n_train, 3), np.nan, dtype=float)
+
+    for inner_train_idx, inner_val_idx in inner_splits:
+        if len(inner_train_idx) < 2 or len(inner_val_idx) < 1:
+            continue
+        # Inner-fold train/test share the outer-train tensors only; no outer-test
+        # data is visible inside the inner loop.
+        inner_prefilt_train: BandCache | None = None
+        inner_prefilt_val: BandCache | None = None
+        if prefiltered_train is not None:
+            inner_prefilt_train = _subset_band_cache(prefiltered_train, inner_train_idx)
+            inner_prefilt_val = _subset_band_cache(prefiltered_train, inner_val_idx)
+        proba_block, _ = _fit_base_classifiers_and_proba(
+            X_train[inner_train_idx],
+            X_train[inner_val_idx],
+            y_train[inner_train_idx],
+            X_mc_train[inner_train_idx],
+            X_mc_train[inner_val_idx],
+            sfreq,
+            k_best,
+            prefiltered_train=inner_prefilt_train,
+            prefiltered_test=inner_prefilt_val,
+            riemannian_band=riemannian_band,
+            riemannian_classifier=riemannian_classifier,
+        )
+        X_meta_oof[inner_val_idx] = proba_block
+
+    # Some trials may miss from every inner-val split (rare but possible with
+    # grouped folds). Drop rows the meta-learner has no coverage for.
+    covered = ~np.isnan(X_meta_oof).any(axis=1)
+    if covered.sum() < 2 or len(np.unique(y_train[covered])) < 2:
+        return 0.5
+
+    meta = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+    meta.fit(X_meta_oof[covered], y_train[covered])
+
+    # Refit bases on full outer-train and transform outer-test.
+    X_meta_test, _ = _fit_base_classifiers_and_proba(
+        X_train,
+        X_test,
+        y_train,
+        X_mc_train,
+        X_mc_test,
+        sfreq,
+        k_best,
+        prefiltered_train=prefiltered_train,
+        prefiltered_test=prefiltered_test,
+        riemannian_band=riemannian_band,
+        riemannian_classifier=riemannian_classifier,
+    )
+    preds = meta.predict(X_meta_test)
+    return float(np.mean(preds == y_test))
+
+
 def _evaluate_classifier(
     name: str,
     X_train: np.ndarray,
