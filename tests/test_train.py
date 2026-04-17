@@ -15,10 +15,6 @@ from src.train import (
     train_final_model_svm,
     train_nested_model_selection_cv,
     train_within_subject_cv_all_models,
-    train_within_subject_cv,
-    train_within_subject_cv_ensemble,
-    train_within_subject_cv_riemann,
-    train_within_subject_cv_svm,
 )
 
 N_EPOCHS = 40
@@ -34,17 +30,16 @@ def _make_subject_data(rng):
     return X_features, X_multichannel
 
 
-def test_train_within_subject_cv_returns_scores():
-    """Within-subject CV returns per-subject scores with correct shape and range."""
+def test_all_models_lda_returns_scores():
+    """Within-subject CV (LDA branch) returns per-subject scores with correct shape and range."""
     n_subjects = 3
     X_by_subject = [
         _make_subject_data(np.random.default_rng(42 + i)) for i in range(n_subjects)
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc = train_within_subject_cv(
-        X_by_subject, y_by_subject, n_folds=5
-    )
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    scores, mean_acc, std_acc = results["lda"]
 
     assert len(scores) == n_subjects
     assert 0 <= mean_acc <= 1
@@ -53,14 +48,15 @@ def test_train_within_subject_cv_returns_scores():
         assert 0 <= s <= 1
 
 
-def test_fbcsp_no_leakage_on_random_data():
+def test_lda_no_leakage_via_all_models():
     """On pure random data, FBCSP + LDA accuracy should be near chance (~50%)."""
     n_subjects = 2
     rng = np.random.default_rng(123)
     X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    _, mean_acc, _ = train_within_subject_cv(X_by_subject, y_by_subject, n_folds=5)
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    _, mean_acc, _ = results["lda"]
 
     assert mean_acc < 0.70, (
         f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
@@ -102,19 +98,16 @@ def test_predict_with_saved_model():
 # ---------- Riemannian classifier tests ----------
 
 
-def test_riemann_cv_returns_scores():
+def test_all_models_riemann_returns_scores():
     """Riemannian CV returns per-subject scores with correct shape and range."""
     n_subjects = 3
-    rng = np.random.default_rng(42)
     X_by_subject = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
+        _make_subject_data(np.random.default_rng(42 + i)) for i in range(n_subjects)
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc = train_within_subject_cv_riemann(
-        X_by_subject, y_by_subject, n_folds=5
-    )
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    scores, mean_acc, std_acc = results["riemann"]
 
     assert len(scores) == n_subjects
     assert 0 <= mean_acc <= 1
@@ -123,19 +116,15 @@ def test_riemann_cv_returns_scores():
         assert 0 <= s <= 1
 
 
-def test_riemann_no_leakage_on_random_data():
+def test_riemann_no_leakage_via_all_models():
     """On pure random data, Riemannian accuracy should be near chance (~50%)."""
     n_subjects = 2
     rng = np.random.default_rng(123)
-    X_by_subject = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
-    ]
+    X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    _, mean_acc, _ = train_within_subject_cv_riemann(
-        X_by_subject, y_by_subject, n_folds=5
-    )
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    _, mean_acc, _ = results["riemann"]
 
     assert mean_acc < 0.70, (
         f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
@@ -160,7 +149,7 @@ def test_riemann_final_model_and_predict():
 # ---------- FBCSP + SVM classifier tests ----------
 
 
-def test_svm_cv_returns_scores():
+def test_all_models_svm_returns_scores():
     """SVM CV returns per-subject scores with correct shape and range."""
     n_subjects = 3
     X_by_subject = [
@@ -168,9 +157,8 @@ def test_svm_cv_returns_scores():
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc = train_within_subject_cv_svm(
-        X_by_subject, y_by_subject, n_folds=5
-    )
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    scores, mean_acc, std_acc = results["svm"]
 
     assert len(scores) == n_subjects
     assert 0 <= mean_acc <= 1
@@ -179,14 +167,15 @@ def test_svm_cv_returns_scores():
         assert 0 <= s <= 1
 
 
-def test_svm_no_leakage_on_random_data():
+def test_svm_no_leakage_via_all_models():
     """On pure random data, FBCSP + SVM accuracy should be near chance (~50%)."""
     n_subjects = 2
     rng = np.random.default_rng(123)
     X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    _, mean_acc, _ = train_within_subject_cv_svm(X_by_subject, y_by_subject, n_folds=5)
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    _, mean_acc, _ = results["svm"]
 
     assert mean_acc < 0.70, (
         f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
@@ -221,7 +210,7 @@ def test_svm_final_model_and_predict():
 # ---------- Ensemble classifier tests ----------
 
 
-def test_ensemble_cv_returns_scores():
+def test_all_models_ensemble_returns_scores():
     """Ensemble CV returns per-subject scores with correct shape and range."""
     n_subjects = 3
     X_by_subject = [
@@ -229,9 +218,8 @@ def test_ensemble_cv_returns_scores():
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc = train_within_subject_cv_ensemble(
-        X_by_subject, y_by_subject, n_folds=5
-    )
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    scores, mean_acc, std_acc = results["ensemble"]
 
     assert len(scores) == n_subjects
     assert 0 <= mean_acc <= 1
@@ -240,62 +228,19 @@ def test_ensemble_cv_returns_scores():
         assert 0 <= s <= 1
 
 
-def test_ensemble_no_leakage_on_random_data():
+def test_ensemble_no_leakage_via_all_models():
     """On pure random data, ensemble accuracy should be near chance (~50%)."""
     n_subjects = 2
     rng = np.random.default_rng(123)
     X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    _, mean_acc, _ = train_within_subject_cv_ensemble(
-        X_by_subject, y_by_subject, n_folds=5
-    )
+    results = train_within_subject_cv_all_models(X_by_subject, y_by_subject, n_folds=5)
+    _, mean_acc, _ = results["ensemble"]
 
     assert mean_acc < 0.70, (
         f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
     )
-
-
-def test_all_models_cv_matches_individual_entrypoints():
-    """Shared all-model CV path matches the legacy per-model entrypoints."""
-    X_by_subject = [_make_subject_data(np.random.default_rng(42))]
-    y_by_subject = [LABELS]
-    trial_ptps = [compute_trial_max_ptp(X_by_subject[0][1])]
-    cv_kwargs = dict(
-        n_folds=5,
-        split_strategy="stratified_group",
-        trial_group_size=5,
-        random_state=7,
-        trial_ptps_by_subject=trial_ptps,
-    )
-
-    all_results = train_within_subject_cv_all_models(
-        X_by_subject, y_by_subject, **cv_kwargs
-    )
-
-    lda_scores, lda_mean, lda_std = train_within_subject_cv(
-        X_by_subject, y_by_subject, **cv_kwargs
-    )
-    np.testing.assert_allclose(all_results["lda"][0], lda_scores)
-    np.testing.assert_allclose(all_results["lda"][1:], (lda_mean, lda_std))
-
-    riemann_scores, riemann_mean, riemann_std = train_within_subject_cv_riemann(
-        [X_mc for _, X_mc in X_by_subject], y_by_subject, **cv_kwargs
-    )
-    np.testing.assert_allclose(all_results["riemann"][0], riemann_scores)
-    np.testing.assert_allclose(all_results["riemann"][1:], (riemann_mean, riemann_std))
-
-    svm_scores, svm_mean, svm_std = train_within_subject_cv_svm(
-        X_by_subject, y_by_subject, **cv_kwargs
-    )
-    np.testing.assert_allclose(all_results["svm"][0], svm_scores)
-    np.testing.assert_allclose(all_results["svm"][1:], (svm_mean, svm_std))
-
-    ens_scores, ens_mean, ens_std = train_within_subject_cv_ensemble(
-        X_by_subject, y_by_subject, **cv_kwargs
-    )
-    np.testing.assert_allclose(all_results["ensemble"][0], ens_scores)
-    np.testing.assert_allclose(all_results["ensemble"][1:], (ens_mean, ens_std))
 
 
 def test_batched_classifier_eval_matches_single_requests():
@@ -560,12 +505,13 @@ def test_per_fold_rejection_excludes_artifacts():
 
     trial_ptps = compute_trial_max_ptp(X_multichannel)
 
-    scores, mean_acc, std_acc = train_within_subject_cv(
+    results = train_within_subject_cv_all_models(
         [(X_features, X_multichannel)],
         [LABELS],
         n_folds=5,
         trial_ptps_by_subject=[trial_ptps],
     )
+    scores, mean_acc, std_acc = results["lda"]
 
     assert len(scores) == 1
     assert 0 <= mean_acc <= 1
