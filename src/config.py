@@ -12,6 +12,7 @@ DEFAULT_SUBJECT_MERGE: dict[str, str] = {"subject0100_2": "subject0100"}
 SplitStrategy = Literal["stratified", "stratified_group"]
 ParallelBackend = Literal["loky", "threading"]
 CacheScope = Literal["subject", "outer_fold"]
+RiemannianClassifier = Literal["tangent_lr", "mdm"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,10 @@ class TrainingConfig:
     enable_band_cache: bool = True
     cache_scope: CacheScope = "subject"
     augmentation_weakness_threshold: float = 0.50
+    # Optimized Riemannian flags (defaults preserve the 60.1% baseline).
+    riemannian_band: tuple[float, float] | None = None
+    riemannian_classifier: RiemannianClassifier = "tangent_lr"
+    use_pyriemann_transfer: bool = False
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""
