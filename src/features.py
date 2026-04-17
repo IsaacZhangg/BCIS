@@ -292,3 +292,26 @@ def extract_csp_features(
     features = csp.fit_transform(X_filtered, y)
 
     return features, csp
+
+
+def pairs_to_features(
+    left_pairs: dict,
+    right_pairs: dict,
+    sfreq: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert cleaned epoch pairs to feature arrays and labels."""
+    from src.data_loader import CHANNELS
+    from src.epochs import task_epochs
+
+    n_left = len(left_pairs[CHANNELS[0]])
+    n_right = len(right_pairs[CHANNELS[0]])
+
+    left_features = extract_lateralization_features(left_pairs, sfreq)
+    right_features = extract_lateralization_features(right_pairs, sfreq)
+
+    X_multichannel = np.vstack(
+        [task_epochs(left_pairs, CHANNELS), task_epochs(right_pairs, CHANNELS)]
+    )
+    X_features = np.vstack([left_features, right_features])
+    y = np.array([0] * n_left + [1] * n_right)
+    return X_features, X_multichannel, y

@@ -13,17 +13,22 @@ from src.data_loader import (
     get_complete_recordings,
     get_recordings_by_subject,
     load_recording,
+    process_recording,
 )
 from src.epochs import (
     compute_rejection_threshold,
     compute_trial_max_ptp,
     extract_left_right_epochs,
     reject_bad_epochs,
-    task_epochs,
 )
-from src.features import extract_lateralization_features
+from src.features import pairs_to_features
 from src.preprocess import preprocess_multichannel_eeg
-from src.runtime_output import configure_console_output
+from src.runtime_output import (
+    _LINE_WIDTH,
+    _print_header,
+    _print_step,
+    configure_console_output,
+)
 from src.transfer import run_transfer_evaluation, select_nearest_donor
 from src.train import (
     _augmented_nested_cv_subject,
@@ -34,7 +39,7 @@ from src.train import (
     train_nested_model_selection_cv,
     train_within_subject_cv_all_models,
 )
-from src.validation import build_classwise_trial_groups
+from src.validation import build_classwise_trial_groups, split_epoch_pairs
 
 _NESTED_TO_DISPLAY = {
     "lda": "FBCSP",
@@ -42,121 +47,6 @@ _NESTED_TO_DISPLAY = {
     "svm": "SVM",
     "ensemble": "Ensemble",
 }
-
-_LINE_WIDTH = 68
-
-
-def _print_header(title: str) -> None:
-    """Print a consistent run header."""
-    print("=" * _LINE_WIDTH)
-    print(title)
-    print("=" * _LINE_WIDTH)
-
-
-def _print_step(step_idx: int, total_steps: int, title: str) -> None:
-    """Print a clean step marker."""
-    print(f"\n[{step_idx}/{total_steps}] {title}")
-
-
-def _process_recording(
-    rec_path: Path,
-    sfreq: float,
-    threshold_uv: float | None = None,
-) -> tuple | None:
-    """Load, preprocess, epoch, and artifact-reject a single recording."""
-    data, events, _ = load_recording(rec_path)
-    preprocessed = preprocess_multichannel_eeg(data, sfreq)
-
-    left_pairs_by_channel: dict = {}
-    right_pairs_by_channel: dict = {}
-    for ch_idx, ch_name in enumerate(CHANNELS):
-        signal = preprocessed[ch_idx]
-        left, right = extract_left_right_epochs(
-            signal,
-            events,
-            sfreq,
-            task_duration=3.0,
-            baseline_duration=1.0,
-            skip_duration=0.25,
-        )
-        left_pairs_by_channel[ch_name] = left
-        right_pairs_by_channel[ch_name] = right
-
-    n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
-    n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
-
-    left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = reject_bad_epochs(
-        left_pairs_by_channel,
-        right_pairs_by_channel,
-        threshold_uv=threshold_uv,
-    )
-
-    n_left = len(left_pairs_by_channel[CHANNELS[0]])
-    n_right = len(right_pairs_by_channel[CHANNELS[0]])
-
-    if n_left == 0 or n_right == 0:
-        return None
-
-    return (
-        left_pairs_by_channel,
-        right_pairs_by_channel,
-        n_left_raw,
-        n_right_raw,
-        rej_l,
-        rej_r,
-    )
-
-
-def _split_epoch_pairs(
-    left_pairs_by_channel: dict,
-    right_pairs_by_channel: dict,
-    test_fraction: float,
-    random_state: int = 42,
-) -> tuple[dict, dict, dict, dict]:
-    """Stratified split of epoch pairs into train/test before artifact rejection."""
-    rng = np.random.default_rng(random_state)
-    channels = list(left_pairs_by_channel.keys())
-
-    def _split_indices(n: int) -> tuple[np.ndarray, np.ndarray]:
-        n_test = max(1, int(n * test_fraction))
-        indices = rng.permutation(n)
-        return indices[n_test:], indices[:n_test]
-
-    n_left = len(left_pairs_by_channel[channels[0]])
-    n_right = len(right_pairs_by_channel[channels[0]])
-
-    left_train_idx, left_test_idx = _split_indices(n_left)
-    right_train_idx, right_test_idx = _split_indices(n_right)
-
-    def _select(pairs_by_ch: dict, indices: np.ndarray) -> dict:
-        return {ch: [pairs_by_ch[ch][i] for i in indices] for ch in channels}
-
-    return (
-        _select(left_pairs_by_channel, left_train_idx),
-        _select(right_pairs_by_channel, right_train_idx),
-        _select(left_pairs_by_channel, left_test_idx),
-        _select(right_pairs_by_channel, right_test_idx),
-    )
-
-
-def _pairs_to_features(
-    left_pairs: dict,
-    right_pairs: dict,
-    sfreq: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert cleaned epoch pairs to feature arrays and labels."""
-    n_left = len(left_pairs[CHANNELS[0]])
-    n_right = len(right_pairs[CHANNELS[0]])
-
-    left_features = extract_lateralization_features(left_pairs, sfreq)
-    right_features = extract_lateralization_features(right_pairs, sfreq)
-
-    X_multichannel = np.vstack(
-        [task_epochs(left_pairs, CHANNELS), task_epochs(right_pairs, CHANNELS)]
-    )
-    X_features = np.vstack([left_features, right_features])
-    y = np.array([0] * n_left + [1] * n_right)
-    return X_features, X_multichannel, y
 
 
 def run_pipeline(
@@ -235,7 +125,7 @@ def run_pipeline(
 
         if holdout_fraction > 0:
             # Split before artifact rejection
-            train_left, train_right, test_left, test_right = _split_epoch_pairs(
+            train_left, train_right, test_left, test_right = split_epoch_pairs(
                 left_pairs_by_channel,
                 right_pairs_by_channel,
                 test_fraction=holdout_fraction,
@@ -267,7 +157,7 @@ def run_pipeline(
                 print(f"    Skipping {subject_id} - no training epochs after rejection")
                 continue
 
-            X_feat, X_mc, y = _pairs_to_features(train_left, train_right, sfreq)
+            X_feat, X_mc, y = pairs_to_features(train_left, train_right, sfreq)
             X_by_subject.append((X_feat, X_mc))
             y_by_subject.append(y)
             subject_ids.append(subject_id)
@@ -277,7 +167,7 @@ def run_pipeline(
             )
 
             if n_test_l > 0 and n_test_r > 0:
-                X_feat_ho, X_mc_ho, y_ho = _pairs_to_features(
+                X_feat_ho, X_mc_ho, y_ho = pairs_to_features(
                     test_left, test_right, sfreq
                 )
                 X_holdout_by_subject.append((X_feat_ho, X_mc_ho))
@@ -294,7 +184,7 @@ def run_pipeline(
                 print(f"    Skipping {subject_id} - no epochs")
                 continue
 
-            X_feat, X_mc, y = _pairs_to_features(
+            X_feat, X_mc, y = pairs_to_features(
                 left_pairs_by_channel, right_pairs_by_channel, sfreq
             )
 
@@ -530,15 +420,15 @@ def run_pipeline(
     if multi_session_subjects:
         for sid, paths in multi_session_subjects.items():
             print(f"  {sid}: {len(paths)} sessions, evaluating cross-session...")
-            result_a = _process_recording(paths[0], sfreq)
-            result_b = _process_recording(paths[1], sfreq)
+            result_a = process_recording(paths[0], sfreq)
+            result_b = process_recording(paths[1], sfreq)
             if result_a is None or result_b is None:
                 print(f"    Skipping {sid} — insufficient epochs in one session")
                 continue
             left_a, right_a, *_ = result_a
             left_b, right_b, *_ = result_b
-            X_feat_a, X_mc_a, y_a = _pairs_to_features(left_a, right_a, sfreq)
-            X_feat_b, X_mc_b, y_b = _pairs_to_features(left_b, right_b, sfreq)
+            X_feat_a, X_mc_a, y_a = pairs_to_features(left_a, right_a, sfreq)
+            X_feat_b, X_mc_b, y_b = pairs_to_features(left_b, right_b, sfreq)
             cs_results = cross_session_evaluate(
                 (X_feat_a, X_mc_a), y_a, (X_feat_b, X_mc_b), y_b, sfreq=sfreq
             )

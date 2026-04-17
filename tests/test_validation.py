@@ -85,3 +85,28 @@ def test_make_cv_splits_rejects_group_length_mismatch():
 
     with pytest.raises(ValueError, match="same length as y"):
         make_cv_splits(y, n_splits=2, strategy="stratified_group", groups=groups)
+
+
+def test_split_epoch_pairs_respects_fraction():
+    """split_epoch_pairs splits into train/test with approximately correct proportions."""
+    import numpy as np
+
+    from src.validation import split_epoch_pairs
+
+    n_epochs = 10
+    channels = ["C3", "C4"]
+    left = {
+        ch: [(np.zeros(100), np.zeros(300)) for _ in range(n_epochs)] for ch in channels
+    }
+    right = {
+        ch: [(np.zeros(100), np.zeros(300)) for _ in range(n_epochs)] for ch in channels
+    }
+
+    train_l, train_r, test_l, test_r = split_epoch_pairs(
+        left, right, test_fraction=0.2, random_state=42
+    )
+
+    assert len(train_l["C3"]) == 8
+    assert len(test_l["C3"]) == 2
+    assert len(train_r["C3"]) == 8
+    assert len(test_r["C3"]) == 2
