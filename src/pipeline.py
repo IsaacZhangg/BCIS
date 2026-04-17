@@ -55,6 +55,7 @@ def run_pipeline(
     holdout_fraction: float = 0.0,
     training_config: TrainingConfig | None = None,
     quiet_output: bool = True,
+    experiment_name: str | None = None,
 ) -> dict:
     """Run the full training pipeline for left/right motor imagery classification."""
     configure_console_output(quiet_output)
@@ -584,6 +585,26 @@ def run_pipeline(
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
 
+    if experiment_name:
+        from src.experiments import save_experiment
+
+        summary_results = {
+            "nested_mean": float(nested_mean),
+            "nested_std": float(nested_std),
+            "best_mean": float(best_mean),
+            "best_std": float(best_std),
+        }
+        if aug_nested_mean is not None:
+            summary_results["augmented_nested_mean"] = float(aug_nested_mean)
+        exp_path = save_experiment(
+            name=experiment_name,
+            results=summary_results,
+            config_diff=cfg.to_dict(),
+            verdict="auto",
+            seed=cfg.random_state,
+        )
+        print(f"Experiment recorded: {exp_path}")
+
     print(f"\nResults saved to: {results_path}")
     print("Runtime summary (s):")
     for stage, seconds in runtime_seconds.items():
@@ -604,4 +625,5 @@ if __name__ == "__main__":
         run_config.output_dir,
         holdout_fraction=run_config.holdout_fraction,
         quiet_output=run_config.quiet,
+        experiment_name=run_config.experiment_name,
     )
