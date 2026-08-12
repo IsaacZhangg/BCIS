@@ -40,17 +40,22 @@ BCIS/
 │   └── profile_pipeline.py       # Pipeline bottleneck analysis
 ├── tests/                        # Test suite (9 test modules)
 ├── benchmarks/                   # Feature extraction benchmarks
-├── models/                       # Trained model artifacts
-└── unicorn-data/                 # EEG recordings (subject*/session*/*.csv)
+├── models/                       # Trained models + scalers + training_results.json (tracked)
+└── unicorn-data/                 # EEG recordings (tracked)
 ```
 
 ## Installation
 
+**Requirements:** Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+
 ```bash
 git clone <repository-url>
 cd BCIS
+git checkout P3P5
 uv sync
 ```
+
+Recordings live in `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv` and are committed. Trained models and `models/training_results.json` are also committed so a clone can load them without re-running the pipeline.
 
 ## Usage
 
@@ -66,6 +71,20 @@ This will:
 3. Extract epochs and features (ERD, Riemannian, realtime)
 4. Train ensemble classifiers with within-subject cross-validation
 5. Save models to `models/`
+
+### Loading a Trained Model
+
+```python
+import joblib
+
+# Offline ERD model (needs a baseline window)
+model = joblib.load("models/engagement_classifier_model.joblib")
+scaler = joblib.load("models/engagement_classifier_scaler.joblib")
+
+# Streaming model (absolute powers only)
+rt_model = joblib.load("models/engagement_realtime_model.joblib")
+rt_scaler = joblib.load("models/engagement_realtime_scaler.joblib")
+```
 
 ### Real-Time Simulation
 
