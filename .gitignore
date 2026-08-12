@@ -39,5 +39,9 @@ htmlcov/
 .env
 .env.local
 
-# Models (optional - uncomment if models should be ignored)
+# Trained models (.joblib) and training_results.json are tracked in git.
+# Uncomment the next line to stop tracking newly created model files:
 # models/*.joblib
+
+# Pipeline cache (regenerated locally)
+cache/

@@ -1,6 +1,6 @@
 # EEG Motor Imagery Classifier
 
-A BCI (Brain-Computer Interface) classifier for distinguishing motor imagery tasks from EEG signals, achieving **90.4% accuracy** using within-subject cross-validation.
+A BCI (Brain-Computer Interface) classifier for distinguishing **phase 3 (imagery)** from **phase 4 (execution)** using EEG, achieving **90.4% accuracy** with within-subject cross-validation.
 
 ## Results
 
@@ -67,10 +67,7 @@ The pipeline uses a "best-of-many" approach, evaluating multiple methods per fol
 │   ├── features.py       # Feature extraction (ERD, Hjorth, envelope)
 │   ├── train.py          # Training with cross-validation
 │   └── pipeline.py       # Main pipeline orchestration
-├── models/
-│   ├── theta_classifier_model.joblib
-│   ├── theta_classifier_scaler.joblib
-│   └── training_results.json
+├── models/               # Trained model + scaler + training_results.json (tracked)
 ├── tests/
 │   ├── test_data_loader.py
 │   ├── test_epochs.py
@@ -79,18 +76,38 @@ The pipeline uses a "best-of-many" approach, evaluating multiple methods per fol
 │   └── test_train.py
 ├── docs/
 │   └── plans/            # Design and implementation docs
-├── unicorn-data/         # EEG recordings (not in repo)
+├── unicorn-data/         # EEG recordings (tracked)
 └── pyproject.toml
 ```
 
-## Usage
+## Quick Start
+
+**Requirements:** Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 
 ```bash
-# Install dependencies
+git clone <repo-url>
+cd BCIS
+git checkout P3P4
 uv sync
+```
 
+Recordings live in `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv` and are committed. Trained models and `models/training_results.json` are also committed so a clone can load them without re-running the pipeline.
+
+```bash
 # Run the training pipeline
 uv run python -m src.pipeline
+
+# Run tests
+uv run pytest tests/ -v
+```
+
+### Loading a Trained Model
+
+```python
+import joblib
+
+model = joblib.load("models/theta_classifier_model.joblib")
+scaler = joblib.load("models/theta_classifier_scaler.joblib")
 ```
 
 ## Dependencies
