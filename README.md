@@ -99,7 +99,7 @@ uv run python -m src.transfer
 uv run pytest tests/ -v
 ```
 
-Trained models and `models/training_results.json` are committed so a clone can load them without re-running the pipeline.
+Trained models and `models/training_results.json` are committed so a clone can load them without re-running the pipeline. Legacy LightGBM artifacts (`models/*_lgbm.joblib`) are gitignored.
 
 ### Loading a Trained Model
 
