@@ -265,6 +265,53 @@ def extract_lateralization_features(
     return np.array(all_features)
 
 
+def _window_pairs_by_channel(
+    epoch_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    offsets: list[int],
+    window_samples: int,
+) -> tuple[dict[str, list[tuple[np.ndarray, np.ndarray]]], np.ndarray]:
+    """Build a new pairs dict where each task epoch is sliced at *offsets*.
+
+    Baselines are left untouched (they are already 1.0s and lie outside the
+    task window).  Each original trial contributes ``len(offsets)`` entries.
+    Returns the expanded dict plus a 1D array of source trial indices.
+    """
+    channels = list(epoch_pairs_by_channel.keys())
+    n_trials = len(epoch_pairs_by_channel[channels[0]])
+
+    new_pairs: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
+        ch: [] for ch in channels
+    }
+    origins: list[int] = []
+    for trial_idx in range(n_trials):
+        for start in offsets:
+            for ch in channels:
+                baseline, task = epoch_pairs_by_channel[ch][trial_idx]
+                windowed = task[start : start + window_samples]
+                new_pairs[ch].append((baseline, windowed))
+            origins.append(trial_idx)
+    return new_pairs, np.asarray(origins, dtype=int)
+
+
+def extract_lateralization_features_windowed(
+    epoch_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    sfreq: float,
+    offsets: list[int],
+    window_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute lateralization features over one or more task-window offsets.
+
+    Each original epoch contributes ``len(offsets)`` output rows.  Returns a
+    ``(n_trials * n_windows, n_features)`` feature array and a companion
+    ``(n_trials * n_windows,)`` array mapping each row to its source trial.
+    """
+    windowed_pairs, origins = _window_pairs_by_channel(
+        epoch_pairs_by_channel, offsets, window_samples
+    )
+    feats = extract_lateralization_features(windowed_pairs, sfreq)
+    return feats, origins
+
+
 def extract_csp_features(
     X: np.ndarray,
     y: np.ndarray,

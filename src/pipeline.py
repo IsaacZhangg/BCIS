@@ -18,17 +18,24 @@ from src.data_loader import (
 )
 from src.epochs import (
     adaptive_threshold,
+    center_crop_offset,
     compute_rejection_threshold,
     compute_trial_max_ptp,
     extract_left_right_epochs,
+    expand_trial_windows,
     reject_bad_epochs,
+    sliding_window_offsets,
     task_epochs,
 )
-from src.features import extract_lateralization_features
+from src.features import (
+    extract_lateralization_features,
+    extract_lateralization_features_windowed,
+)
 from src.preprocess import preprocess_multichannel_eeg
 from src.runtime_output import configure_console_output
 from src.transfer import run_transfer_evaluation
 from src.train import (
+    AugmentationContext,
     FBCSP_BAND_CANDIDATES,
     FBCSP_BANDS,
     cross_session_evaluate,
@@ -45,6 +52,7 @@ _NESTED_TO_DISPLAY = {
     "riemann": "Riemann",
     "svm": "SVM",
     "ensemble": "Ensemble",
+    "stacking": "Stacking",
 }
 
 _LINE_WIDTH = 68
@@ -161,6 +169,80 @@ def _pairs_to_features(
     X_features = np.vstack([left_features, right_features])
     y = np.array([0] * n_left + [1] * n_right)
     return X_features, X_multichannel, y
+
+
+def _build_augmentation_context(
+    left_pairs: dict,
+    right_pairs: dict,
+    sfreq: float,
+    aug_window_sec: float,
+    aug_stride_sec: float,
+) -> AugmentationContext:
+    """Pre-compute per-subject sliding-window augmentation pool and canonical tensors.
+
+    The pool stacks windows for every original trial in the class order
+    ``left then right`` that :func:`_pairs_to_features` uses, so outer trial
+    indices map cleanly between the original (one row per trial) tensors and
+    the augmented pool via the ``origins`` array.
+    """
+    window_samples = int(aug_window_sec * sfreq)
+    stride_samples = max(1, int(aug_stride_sec * sfreq))
+
+    # Infer task length from the first baseline/task pair of the first channel.
+    _, task_signal = left_pairs[CHANNELS[0]][0]
+    task_samples = len(task_signal)
+    offsets = sliding_window_offsets(task_samples, window_samples, stride_samples)
+
+    # Build augmented features per class, concatenate left then right.
+    left_feats_pool, left_origins_local = extract_lateralization_features_windowed(
+        left_pairs, sfreq, offsets, window_samples
+    )
+    right_feats_pool, right_origins_local = extract_lateralization_features_windowed(
+        right_pairs, sfreq, offsets, window_samples
+    )
+    n_left = len(left_pairs[CHANNELS[0]])
+    # Right-class origins are offset by n_left so they match the global index
+    # space used by `_pairs_to_features` (which stacks left first, then right).
+    right_origins_global = right_origins_local + n_left
+    feats_pool = np.vstack([left_feats_pool, right_feats_pool])
+    origins_pool = np.concatenate([left_origins_local, right_origins_global])
+
+    # Build augmented multichannel pool from the same window offsets.
+    left_task = task_epochs(left_pairs, CHANNELS)  # (n_left, n_ch, n_samples)
+    right_task = task_epochs(right_pairs, CHANNELS)
+    left_mc_pool, _ = expand_trial_windows(left_task, window_samples, stride_samples)
+    right_mc_pool, _ = expand_trial_windows(right_task, window_samples, stride_samples)
+    mc_pool = np.vstack([left_mc_pool, right_mc_pool])
+
+    # Canonical center-crop tensors (one row per original trial) used at test.
+    center_off = center_crop_offset(task_samples, window_samples)
+    center_slice = slice(center_off, center_off + window_samples)
+
+    def _center_pairs(pairs: dict) -> dict:
+        return {
+            ch: [(baseline, task[center_slice]) for baseline, task in pairs[ch]]
+            for ch in pairs
+        }
+
+    left_center_pairs = _center_pairs(left_pairs)
+    right_center_pairs = _center_pairs(right_pairs)
+    left_feat_canon = extract_lateralization_features(left_center_pairs, sfreq)
+    right_feat_canon = extract_lateralization_features(right_center_pairs, sfreq)
+    feat_canon = np.vstack([left_feat_canon, right_feat_canon])
+    mc_canon = np.vstack(
+        [
+            left_task[:, :, center_slice],
+            right_task[:, :, center_slice],
+        ]
+    )
+
+    return AugmentationContext(
+        X_features_pool=feats_pool,
+        X_multichannel_pool=mc_pool,
+        origins=origins_pool,
+        X_features_canonical=feat_canon,
+        X_multichannel_canonical=mc_canon,
+    )
 
 
 def _augmented_nested_cv_with_donor_selection(
@@ -357,6 +439,7 @@ def run_pipeline(
     subject_ids: list[str] = []
     trial_ptps_by_subject: list[np.ndarray] = []
     trial_groups_by_subject: list[np.ndarray] = []
+    augmentation_by_subject: list[AugmentationContext | None] = []
 
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_holdout_by_subject: list[np.ndarray] = []
@@ -441,6 +524,17 @@ def run_pipeline(
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
             )
+            augmentation_by_subject.append(
+                _build_augmentation_context(
+                    train_left,
+                    train_right,
+                    sfreq,
+                    cfg.aug_window_sec,
+                    cfg.aug_stride_sec,
+                )
+                if cfg.temporal_augmentation
+                else None
+            )
 
             if n_test_l > 0 and n_test_r > 0:
                 X_feat_ho, X_mc_ho, y_ho = _pairs_to_features(
@@ -479,6 +573,17 @@ def run_pipeline(
             trial_ptps_by_subject.append(trial_ptps)
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
+            )
+            augmentation_by_subject.append(
+                _build_augmentation_context(
+                    left_pairs_by_channel,
+                    right_pairs_by_channel,
+                    sfreq,
+                    cfg.aug_window_sec,
+                    cfg.aug_stride_sec,
+                )
+                if cfg.temporal_augmentation
+                else None
             )
 
     if not X_by_subject:
@@ -559,12 +664,14 @@ def run_pipeline(
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
             )
+            augmentation_by_subject.append(None)
 
     # Step 3: Cross-validation (four classifiers + nested model selection)
     step_start = time.perf_counter()
     _print_step(3, 5, "Running cross-validation")
     print(f"({cfg.n_folds}-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
 
+    aug_payload = augmentation_by_subject if cfg.temporal_augmentation else None
     cv_results = train_within_subject_cv_all_models(
         X_by_subject,
         y_by_subject,
@@ -581,6 +688,7 @@ def run_pipeline(
         parallel_backend=cfg.parallel_backend,
         max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
         enable_band_cache=cfg.enable_band_cache,
+        augmentation_by_subject=aug_payload,
     )
     fbcsp_scores, fbcsp_mean, fbcsp_std = cv_results["lda"]
     riemann_scores, riemann_mean, riemann_std = cv_results["riemann"]
@@ -601,26 +709,32 @@ def run_pipeline(
     best_std = float(np.std(best_scores))
 
     print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
-    nested_scores, nested_mean, nested_std, nested_methods, nested_band_configs = (
-        train_nested_model_selection_cv(
-            X_by_subject,
-            y_by_subject,
-            sfreq=sfreq,
-            n_outer_folds=cfg.n_outer_folds,
-            n_inner_folds=cfg.n_inner_folds,
-            k_best=cfg.k_best,
-            trial_ptps_by_subject=trial_ptps_by_subject,
-            split_strategy=cfg.split_strategy,
-            trial_groups_by_subject=trial_groups_by_subject,
-            trial_group_size=cfg.trial_group_size,
-            random_state=cfg.random_state,
-            n_jobs=cfg.n_jobs,
-            parallel_backend=cfg.parallel_backend,
-            max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
-            enable_band_cache=cfg.enable_band_cache,
-            cache_scope=cfg.cache_scope,
-            band_candidates=FBCSP_BAND_CANDIDATES,
-        )
+    (
+        nested_scores,
+        nested_mean,
+        nested_std,
+        nested_methods,
+        nested_band_configs,
+        stacking_scores,
+    ) = train_nested_model_selection_cv(
+        X_by_subject,
+        y_by_subject,
+        sfreq=sfreq,
+        n_outer_folds=cfg.n_outer_folds,
+        n_inner_folds=cfg.n_inner_folds,
+        k_best=cfg.k_best,
+        trial_ptps_by_subject=trial_ptps_by_subject,
+        split_strategy=cfg.split_strategy,
+        trial_groups_by_subject=trial_groups_by_subject,
+        trial_group_size=cfg.trial_group_size,
+        random_state=cfg.random_state,
+        n_jobs=cfg.n_jobs,
+        parallel_backend=cfg.parallel_backend,
+        max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
+        enable_band_cache=cfg.enable_band_cache,
+        cache_scope=cfg.cache_scope,
+        band_candidates=FBCSP_BAND_CANDIDATES,
+        augmentation_by_subject=aug_payload,
     )
     runtime_seconds["cross_validation"] = time.perf_counter() - step_start
     nested_methods_display = [_NESTED_TO_DISPLAY[m] for m in nested_methods]
@@ -654,6 +768,11 @@ def run_pipeline(
     print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
+    stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
+    stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
+    print(
+        f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
+    )
 
     # Step 3b: Augmented nested CV for weak subjects (leakage-free)
     aug_nested_scores = None
@@ -891,6 +1010,9 @@ def run_pipeline(
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
     print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
+    print(
+        f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
+    )
     if holdout_results:
         ho_mean = float(np.mean(list(holdout_results.values())))
         print(f"Held-out mean:                 {ho_mean:.1%}")
@@ -932,6 +1054,11 @@ def run_pipeline(
         "best_std_accuracy": float(best_std),
         "nested_mean_accuracy": float(nested_mean),
         "nested_std_accuracy": float(nested_std),
+        "stacking_scores": {
+            sid: float(s) for sid, s in zip(subject_ids, stacking_scores)
+        },
+        "stacking_mean_accuracy": float(stacking_mean),
+        "stacking_std_accuracy": float(stacking_std),
         "subjects_with_signal": above_chance,
         "subjects_at_chance": at_chance,
         "model_paths": model_paths,

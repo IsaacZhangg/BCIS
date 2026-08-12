@@ -15,6 +15,7 @@ DEFAULT_SUBJECT_MERGE: dict[str, str] = {
 SplitStrategy = Literal["stratified", "stratified_group"]
 ParallelBackend = Literal["loky", "threading"]
 CacheScope = Literal["subject", "outer_fold"]
+RiemannianClassifier = Literal["tangent_lr", "mdm"]
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,14 @@ class TrainingConfig:
     augmentation_weakness_threshold: float = 0.50
     fbcsp_band_candidates: tuple[str, ...] = ("standard", "high_mu", "wide_mu")
     min_evaluation_trials: int = 30
+    # Optimized Riemannian flags (defaults preserve the 60.1% baseline).
+    riemannian_band: tuple[float, float] | None = None
+    riemannian_classifier: RiemannianClassifier = "tangent_lr"
+    use_pyriemann_transfer: bool = False
+    # Temporal augmentation (sliding window applied to training data only).
+    temporal_augmentation: bool = False
+    aug_window_sec: float = 2.5
+    aug_stride_sec: float = 0.25
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""

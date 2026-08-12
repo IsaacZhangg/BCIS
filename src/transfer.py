@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,26 @@ from pyriemann.utils.mean import mean_covariance
 from sklearn.linear_model import LogisticRegression
 
 from src.alignment import euclidean_align
+
+# pyriemann.transfer availability probe (pyriemann 0.10 on 2026-04-17):
+# TLCenter and TLScale are available; TLStretch was renamed to TLScale in
+# recent releases. We import defensively so a future removal/rename logs a
+# warning and falls back to the manual EA path below.
+try:
+    from pyriemann.transfer import (  # type: ignore[attr-defined]
+        TLCenter,
+        TLScale,
+        encode_domains,
+    )
+
+    _PYRIEMANN_TRANSFER_AVAILABLE = True
+    _PYRIEMANN_TRANSFER_ERROR: str | None = None
+except ImportError as _exc:  # pragma: no cover
+    TLCenter = None  # type: ignore[assignment]
+    TLScale = None  # type: ignore[assignment]
+    encode_domains = None  # type: ignore[assignment]
+    _PYRIEMANN_TRANSFER_AVAILABLE = False
+    _PYRIEMANN_TRANSFER_ERROR = str(_exc)
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR
 from src.data_loader import CHANNELS, get_recordings_by_subject, load_recording
 from src.epochs import (
@@ -22,6 +43,8 @@ from src.epochs import (
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
+
+logger = logging.getLogger(__name__)
 
 
 def load_all_subjects(
@@ -110,9 +133,42 @@ def load_all_subjects(
     return subjects
 
 
+def _pyriemann_transfer_align_per_subject(
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    cov_estimator: Covariances,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Align per-subject covariances with pyriemann.transfer.{TLCenter, TLScale}.
+
+    TLCenter re-centers each subject's covariances to the identity (analogous to
+    manual EA) while TLScale additionally normalizes dispersion. Domains are
+    keyed by subject ID via ``encode_domains``-style (sample_idx, domain) pairs
+    supplied to fit/transform.
+
+    Callers must verify availability via ``_PYRIEMANN_TRANSFER_AVAILABLE``
+    before invoking.
+    """
+    assert TLCenter is not None and TLScale is not None and encode_domains is not None
+    aligned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for sid in sorted(subjects.keys()):
+        _, X_mc, y = subjects[sid]
+        covs = cov_estimator.fit_transform(X_mc)
+        domains = np.array([sid] * len(covs))
+        # TLCenter/TLScale consume composite 'domain/label' strings produced by
+        # encode_domains; fitting per-subject with that subject as the target
+        # domain re-centers its covariances to identity.
+        _, y_enc = encode_domains(covs, y, domains)
+        center = TLCenter(target_domain=sid, metric="riemann")
+        scale = TLScale(target_domain=sid, metric="riemann")
+        covs_c = center.fit_transform(covs, y_enc)
+        covs_cs = scale.fit_transform(covs_c, y_enc)
+        aligned[sid] = (covs_cs, y)
+    return aligned
+
+
 def align_subjects(
     subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
+    use_pyriemann_transfer: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Compute covariance matrices and apply Euclidean Alignment across subjects.
 
@@ -122,6 +178,9 @@ def align_subjects(
     Args:
         subjects: Dict mapping subject_id to (X_multichannel, y).
         sfreq: Sampling frequency (unused, kept for API consistency).
+        use_pyriemann_transfer: If True and ``pyriemann.transfer`` is importable,
+            use ``TLCenter`` + ``TLScale`` per subject instead of manual EA.
+            Falls back to manual EA with a warning if the import probe failed.
 
     Returns:
         Tuple of:
@@ -131,9 +190,29 @@ def align_subjects(
     """
     cov_estimator = Covariances(estimator="lwf")
 
+    if use_pyriemann_transfer and not _PYRIEMANN_TRANSFER_AVAILABLE:
+        logger.warning(
+            "use_pyriemann_transfer=True but pyriemann.transfer import failed "
+            "(%s); falling back to manual Euclidean Alignment.",
+            _PYRIEMANN_TRANSFER_ERROR,
+        )
+        use_pyriemann_transfer = False
+
+    if use_pyriemann_transfer:
+        aligned_map = _pyriemann_transfer_align_per_subject(subjects, cov_estimator)
+        all_covs = []
+        all_labels = []
+        all_subject_ids: list[str] = []
+        for sid in sorted(subjects.keys()):
+            covs_aligned, y = aligned_map[sid]
+            all_covs.append(covs_aligned)
+            all_labels.append(y)
+            all_subject_ids.extend([sid] * len(y))
+        return np.vstack(all_covs), np.concatenate(all_labels), all_subject_ids
+
     all_covs = []
     all_labels = []
-    all_subject_ids: list[str] = []
+    all_subject_ids = []
 
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
