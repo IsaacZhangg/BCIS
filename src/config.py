@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-MI_DATA_NEW_DIR = Path("Data/MI_DATA_NEW")
+MI_DATA_NEW_DIR = Path("data/MI_DATA_NEW")
 DEFAULT_SUBJECT_MERGE: dict[str, str] = {
     "subject0100_2": "subject0100",
     "subject0104_session002": "subject0104",

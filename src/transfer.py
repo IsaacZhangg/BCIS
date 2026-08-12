@@ -509,7 +509,7 @@ def run_transfer_evaluation(
     """Run cross-subject transfer learning evaluation and print comparison.
 
     Args:
-        data_dirs: Directories to scan. Defaults to Data/unicorn-data + Data/MI_DATA_NEW.
+        data_dirs: Directories to scan. Defaults to data/unicorn-data + data/MI_DATA_NEW.
         sfreq: Sampling frequency.
         subject_merge: Subject ID merging map.
         within_subject_scores: Optional dict of subject_id -> nested CV accuracy
@@ -519,7 +519,7 @@ def run_transfer_evaluation(
         Results dict with LOSO and LOSO+FT scores.
     """
     if data_dirs is None:
-        data_dirs = [Path("Data/unicorn-data"), MI_DATA_NEW_DIR]
+        data_dirs = [Path("data/unicorn-data"), MI_DATA_NEW_DIR]
     if subject_merge is None:
         subject_merge = DEFAULT_SUBJECT_MERGE
 

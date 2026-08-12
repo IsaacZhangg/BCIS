@@ -20,10 +20,9 @@ from sklearn.svm import SVC
 
 from src.config import TrainingConfig
 
-MI_DATA_DIR = Path("Data/unicorn-data")
+MI_DATA_DIR = Path("data/unicorn-data")
 from src.data_loader import CHANNELS, get_complete_recordings, load_recording
 from src.epochs import (
-    adaptive_threshold,
     compute_trial_max_ptp,
     extract_left_right_epochs,
     task_epochs,

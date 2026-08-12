@@ -48,11 +48,12 @@ AGENTS.md
 .*/
 !.git/
 
-# Models (optional - uncomment if models should be ignored)
-models/*.joblib
+# Trained models (.joblib) and training_results.json are tracked in git.
+# Uncomment the next line to stop tracking newly created model files:
+# models/*.joblib
 
-# Pipeline cache (regenerated from data)
+# Pipeline stage cache (regenerated from recordings + TrainingConfig hash)
 cache/
 
-# Experiment results (tracked separately)
+# Local experiment JSON dumps from src/experiments.py
 experiments/

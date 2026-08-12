@@ -12,7 +12,7 @@ from src.data_loader import (
 
 def test_load_recording_returns_data_and_events():
     """Test that load_recording returns EEG data and event markers."""
-    data_dir = Path("Data/unicorn-data")
+    data_dir = Path("data/unicorn-data")
     csv_path = data_dir / "subject0001/session000/recording_2025-11-12-21.33.31.csv"
 
     data, events, sfreq = load_recording(csv_path)
@@ -32,7 +32,7 @@ def test_load_recording_returns_data_and_events():
 
 def test_get_recordings_default_finds_complete():
     """Test that get_recordings with default min_trials=100 finds complete recordings."""
-    data_dir = Path("Data/unicorn-data")
+    data_dir = Path("data/unicorn-data")
 
     recordings = get_recordings(data_dir)
 
@@ -43,7 +43,7 @@ def test_get_recordings_default_finds_complete():
 
 def test_get_recordings_low_threshold_finds_more():
     """Test that lowering min_trials finds recordings that have fewer trials."""
-    data_dir = Path("Data/unicorn-data")
+    data_dir = Path("data/unicorn-data")
 
     recordings_strict = get_recordings(data_dir, min_trials=100)
     recordings_loose = get_recordings(data_dir, min_trials=30)
@@ -56,7 +56,7 @@ def test_get_recordings_low_threshold_finds_more():
 
 def test_get_recordings_by_subject_groups():
     """Test that get_recordings_by_subject groups recordings correctly."""
-    data_dir = Path("Data/unicorn-data")
+    data_dir = Path("data/unicorn-data")
 
     grouped = get_recordings_by_subject(data_dir)
 
@@ -72,7 +72,7 @@ def test_get_recordings_by_subject_groups():
 
 def test_backward_compat_alias():
     """Test that get_complete_recordings still works as backward compat alias."""
-    data_dir = Path("Data/unicorn-data")
+    data_dir = Path("data/unicorn-data")
 
     recordings = get_complete_recordings(data_dir)
 
@@ -84,7 +84,7 @@ def test_get_recordings_flexible_finds_mi_data_new():
     """Flexible loader finds MI_DATA_NEW recordings with >= 20 phase-3 trials."""
     from src.data_loader import get_recordings_flexible
 
-    data_dir = Path("Data/MI_DATA_NEW")
+    data_dir = Path("data/MI_DATA_NEW")
     grouped = get_recordings_flexible(data_dir, min_trials=20)
 
     # subject0104 has 2 sessions with 32 trials each
@@ -103,7 +103,7 @@ def test_get_recordings_flexible_respects_min_trials():
     """Recordings below min_trials are excluded."""
     from src.data_loader import get_recordings_flexible
 
-    data_dir = Path("Data/MI_DATA_NEW")
+    data_dir = Path("data/MI_DATA_NEW")
     grouped = get_recordings_flexible(data_dir, min_trials=50)
     assert "subject0106" not in grouped
     assert "subject0104" not in grouped

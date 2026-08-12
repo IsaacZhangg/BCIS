@@ -14,7 +14,7 @@ class TestRunConfig:
         assert rc.classifiers is None
         assert rc.experiment_name is None
         assert rc.export_models is True
-        assert rc.data_dir == Path("Data/unicorn-data")
+        assert rc.data_dir == Path("data/unicorn-data")
         assert rc.output_dir == Path("models")
         assert rc.holdout_fraction == 0.0
         assert rc.quiet is True
@@ -32,7 +32,7 @@ class TestParseArgs:
     def test_no_args_gives_defaults(self):
         rc = parse_args([])
         assert rc.stages == ["all"]
-        assert rc.data_dir == Path("Data/unicorn-data")
+        assert rc.data_dir == Path("data/unicorn-data")
         assert rc.output_dir == Path("models")
         assert rc.holdout_fraction == 0.0
         assert rc.quiet is True

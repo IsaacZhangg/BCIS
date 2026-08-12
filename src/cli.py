@@ -22,7 +22,7 @@ class RunConfig:
     experiment_name: str | None = None
     cache_dir: Path | None = Path("cache")
     export_models: bool = True
-    data_dir: Path = Path("Data/unicorn-data")
+    data_dir: Path = Path("data/unicorn-data")
     output_dir: Path = Path("models")
     holdout_fraction: float = 0.0
     quiet: bool = True
@@ -69,8 +69,8 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("Data/unicorn-data"),
-        help="Directory with subject/session recordings",
+        default=Path("data/unicorn-data"),
+        help="Directory with subject/session recordings (default: data/unicorn-data)",
     )
     parser.add_argument(
         "--output-dir",
