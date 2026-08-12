@@ -1132,7 +1132,12 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    data_dir = Path("Data/unicorn-data")
-    output_dir = Path("models")
+    from src.cli import parse_args
 
-    results = run_pipeline(data_dir, output_dir)
+    run_config = parse_args()
+    results = run_pipeline(
+        run_config.data_dir,
+        run_config.output_dir,
+        holdout_fraction=run_config.holdout_fraction,
+        quiet_output=run_config.quiet,
+    )

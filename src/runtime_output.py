@@ -30,3 +30,18 @@ def configure_console_output(quiet: bool | None = None) -> None:
         )
     else:
         mne.set_log_level("INFO")
+
+
+_LINE_WIDTH = 68
+
+
+def _print_header(title: str) -> None:
+    """Print a consistent run header."""
+    print("=" * _LINE_WIDTH)
+    print(title)
+    print("=" * _LINE_WIDTH)
+
+
+def _print_step(step_idx: int, total_steps: int, title: str) -> None:
+    """Print a clean step marker."""
+    print(f"\n[{step_idx}/{total_steps}] {title}")

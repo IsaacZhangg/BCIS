@@ -233,3 +233,39 @@ def test_statistical_features_gaussian():
     assert abs(sk) < 0.1
     assert abs(ku) < 0.2
     assert 0 < zcr < 1
+
+
+def test_pairs_to_features_shapes():
+    """pairs_to_features returns features, multichannel array, and labels with correct shapes."""
+    import numpy as np
+
+    from src.data_loader import CHANNELS
+    from src.features import pairs_to_features
+
+    baseline_samples = 250
+    task_samples = 750
+    n_left = 5
+    n_right = 7
+    rng = np.random.default_rng(0)
+    left = {
+        ch: [
+            (rng.standard_normal(baseline_samples), rng.standard_normal(task_samples))
+            for _ in range(n_left)
+        ]
+        for ch in CHANNELS
+    }
+    right = {
+        ch: [
+            (rng.standard_normal(baseline_samples), rng.standard_normal(task_samples))
+            for _ in range(n_right)
+        ]
+        for ch in CHANNELS
+    }
+
+    X_features, X_multichannel, y = pairs_to_features(left, right, sfreq=250.0)
+
+    assert X_features.shape[0] == n_left + n_right
+    assert X_multichannel.shape[0] == n_left + n_right
+    assert X_multichannel.shape[1] == len(CHANNELS)
+    assert y.shape == (n_left + n_right,)
+    assert list(y) == [0] * n_left + [1] * n_right

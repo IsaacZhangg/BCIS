@@ -589,5 +589,45 @@ def run_transfer_evaluation(
     }
 
 
+def select_nearest_donor(
+    target_id: str,
+    target_mc: np.ndarray,
+    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> tuple[str, float]:
+    """Select the nearest donor by Riemannian distance between covariance means.
+
+    Args:
+        target_id: Subject ID to exclude from donors.
+        target_mc: Target multichannel EEG (n_trials, n_channels, n_samples).
+        donor_subjects: Dict mapping subject_id -> (features, multichannel, labels).
+
+    Returns:
+        (best_donor_id, distance).
+    """
+    from pyriemann.estimation import Covariances
+    from pyriemann.utils.distance import distance_riemann
+    from pyriemann.utils.mean import mean_covariance
+
+    cov_est = Covariances(estimator="lwf")
+    target_mean = mean_covariance(cov_est.fit_transform(target_mc), metric="riemann")
+
+    best_donor = None
+    best_dist = float("inf")
+
+    for sid, (_, mc, _) in donor_subjects.items():
+        if sid == target_id:
+            continue
+        donor_mean = mean_covariance(cov_est.fit_transform(mc), metric="riemann")
+        dist = float(distance_riemann(target_mean, donor_mean))
+        if dist < best_dist:
+            best_dist = dist
+            best_donor = sid
+
+    if best_donor is None:
+        raise ValueError("No donors available (all excluded)")
+
+    return best_donor, best_dist
+
+
 if __name__ == "__main__":
     results = run_transfer_evaluation()

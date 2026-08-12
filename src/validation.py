@@ -129,3 +129,35 @@ def make_cv_splits(
         random_state=random_state,
     )
     return list(cv.split(X_dummy, y))
+
+
+def split_epoch_pairs(
+    left_pairs_by_channel: dict,
+    right_pairs_by_channel: dict,
+    test_fraction: float,
+    random_state: int = 42,
+) -> tuple[dict, dict, dict, dict]:
+    """Stratified split of epoch pairs into train/test before artifact rejection."""
+    rng = np.random.default_rng(random_state)
+    channels = list(left_pairs_by_channel.keys())
+
+    def _split_indices(n: int) -> tuple[np.ndarray, np.ndarray]:
+        n_test = max(1, int(n * test_fraction))
+        indices = rng.permutation(n)
+        return indices[n_test:], indices[:n_test]
+
+    n_left = len(left_pairs_by_channel[channels[0]])
+    n_right = len(right_pairs_by_channel[channels[0]])
+
+    left_train_idx, left_test_idx = _split_indices(n_left)
+    right_train_idx, right_test_idx = _split_indices(n_right)
+
+    def _select(pairs_by_ch: dict, indices: np.ndarray) -> dict:
+        return {ch: [pairs_by_ch[ch][i] for i in indices] for ch in channels}
+
+    return (
+        _select(left_pairs_by_channel, left_train_idx),
+        _select(right_pairs_by_channel, right_train_idx),
+        _select(left_pairs_by_channel, left_test_idx),
+        _select(right_pairs_by_channel, right_test_idx),
+    )

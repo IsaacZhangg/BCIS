@@ -50,3 +50,9 @@ AGENTS.md
 
 # Models (optional - uncomment if models should be ignored)
 models/*.joblib
+
+# Pipeline cache (regenerated from data)
+cache/
+
+# Experiment results (tracked separately)
+experiments/

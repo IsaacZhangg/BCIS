@@ -55,3 +55,11 @@ class TrainingConfig:
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""
         return asdict(self)
+
+    def config_hash(self) -> str:
+        """Return a 16-char hex hash for cache invalidation."""
+        import hashlib
+        import json
+
+        payload = json.dumps(self.to_dict(), sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
