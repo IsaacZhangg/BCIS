@@ -1,7 +1,8 @@
 """Extract epochs from continuous EEG data."""
 
 import numpy as np
-from scipy.signal import welch
+
+from src.features import compute_band_power
 
 
 def extract_epochs(
@@ -141,15 +142,6 @@ def _compute_max_gradient(task: np.ndarray) -> float:
     return float(np.max(np.abs(np.diff(task))))
 
 
-def _compute_hf_power(task: np.ndarray, sfreq: float, low: float, high: float) -> float:
-    """Return mean spectral power in [low, high] Hz using Welch's method."""
-    nperseg = min(int(sfreq / 2), len(task) // 2)
-    nperseg = max(nperseg, 64)
-    freqs, psd = welch(task, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
-    mask = (freqs >= low) & (freqs <= high)
-    return float(np.mean(psd[mask]))
-
-
 def _trial_max_ptps(
     pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
 ) -> list[float]:
@@ -162,7 +154,7 @@ def _trial_max_ptps(
     ]
 
 
-def _adaptive_threshold(values: np.ndarray, n_mad: float) -> float:
+def adaptive_threshold(values: np.ndarray, n_mad: float) -> float:
     """Return median + n_mad * MAD for an array of values."""
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median)))
@@ -192,7 +184,7 @@ def compute_rejection_threshold(
     all_ptps = np.array(
         _trial_max_ptps(left_pairs_by_channel) + _trial_max_ptps(right_pairs_by_channel)
     )
-    return _adaptive_threshold(all_ptps, n_mad)
+    return adaptive_threshold(all_ptps, n_mad)
 
 
 def compute_trial_max_ptp(X_multichannel: np.ndarray) -> np.ndarray:
@@ -266,73 +258,73 @@ def reject_bad_epochs(
         Tuple of (cleaned_left, cleaned_right, n_rejected_left, n_rejected_right).
     """
     channels = list(left_pairs_by_channel.keys())
+    use_gradient = gradient_n_mad is not None and sfreq is not None
+    use_hf = hf_power_n_mad is not None and sfreq is not None
 
-    def _trial_max_metric(pairs_by_channel, metric_fn):
-        """Return max cross-channel metric value for each trial."""
+    def _precompute_trial_metrics(pairs_by_channel):
+        """Compute per-trial rejection metrics once (max and min PTP, gradient, HF)."""
         n_trials = len(pairs_by_channel[channels[0]])
-        return [
-            max(metric_fn(pairs_by_channel[ch][i][1]) for ch in channels)
-            for i in range(n_trials)
-        ]
+        max_ptps = []
+        min_ptps = []
+        max_grads = [] if use_gradient else None
+        max_hfs = [] if use_hf else None
+        for i in range(n_trials):
+            ch_ptps = [float(np.ptp(pairs_by_channel[ch][i][1])) for ch in channels]
+            max_ptps.append(max(ch_ptps))
+            min_ptps.append(min(ch_ptps))
+            if use_gradient:
+                max_grads.append(
+                    max(
+                        _compute_max_gradient(pairs_by_channel[ch][i][1])
+                        for ch in channels
+                    )
+                )
+            if use_hf:
+                max_hfs.append(
+                    max(
+                        compute_band_power(
+                            pairs_by_channel[ch][i][1], sfreq, hf_band[0], hf_band[1]
+                        )
+                        for ch in channels
+                    )
+                )
+        return max_ptps, min_ptps, max_grads, max_hfs
 
-    # Peak-to-peak amplitude threshold (adaptive or fixed)
+    left_metrics = _precompute_trial_metrics(left_pairs_by_channel)
+    right_metrics = _precompute_trial_metrics(right_pairs_by_channel)
+
     if threshold_uv is None:
-        all_ptps = np.array(
-            _trial_max_metric(left_pairs_by_channel, np.ptp)
-            + _trial_max_metric(right_pairs_by_channel, np.ptp)
-        )
-        threshold_uv = _adaptive_threshold(all_ptps, n_mad)
+        all_ptps = np.array(left_metrics[0] + right_metrics[0])
+        threshold_uv = adaptive_threshold(all_ptps, n_mad)
 
-    # Gradient adaptive threshold
     gradient_threshold: float | None = None
-    if gradient_n_mad is not None and sfreq is not None:
-        all_grads = np.array(
-            _trial_max_metric(left_pairs_by_channel, _compute_max_gradient)
-            + _trial_max_metric(right_pairs_by_channel, _compute_max_gradient)
-        )
-        gradient_threshold = _adaptive_threshold(all_grads, gradient_n_mad)
+    if use_gradient:
+        all_grads = np.array(left_metrics[2] + right_metrics[2])
+        gradient_threshold = adaptive_threshold(all_grads, gradient_n_mad)
 
-    # HF power adaptive threshold
     hf_threshold: float | None = None
-    if hf_power_n_mad is not None and sfreq is not None:
+    if use_hf:
+        all_hf = np.array(left_metrics[3] + right_metrics[3])
+        hf_threshold = adaptive_threshold(all_hf, hf_power_n_mad)
 
-        def hf_fn(task):
-            return _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
-
-        all_hf = np.array(
-            _trial_max_metric(left_pairs_by_channel, hf_fn)
-            + _trial_max_metric(right_pairs_by_channel, hf_fn)
-        )
-        hf_threshold = _adaptive_threshold(all_hf, hf_power_n_mad)
-
-    # Apply all criteria
-    def _is_good_trial(pairs_by_channel, trial_idx):
-        """Return True if trial passes all rejection criteria across all channels."""
-        for ch in channels:
-            task = pairs_by_channel[ch][trial_idx][1]
-            ptp = float(np.ptp(task))
-            if ptp > threshold_uv or ptp < flat_uv:
-                return False
-            if (
-                gradient_threshold is not None
-                and _compute_max_gradient(task) > gradient_threshold
-            ):
-                return False
-            if (
-                hf_threshold is not None
-                and _compute_hf_power(task, sfreq, hf_band[0], hf_band[1])
-                > hf_threshold
-            ):
-                return False
-        return True
-
-    def _filter_pairs(pairs_by_channel):
+    def _filter_pairs(pairs_by_channel, metrics):
+        max_ptps, min_ptps, max_grads, max_hfs = metrics
         n_trials = len(pairs_by_channel[channels[0]])
-        good = [i for i in range(n_trials) if _is_good_trial(pairs_by_channel, i)]
+        good = []
+        for i in range(n_trials):
+            if max_ptps[i] > threshold_uv or min_ptps[i] < flat_uv:
+                continue
+            if gradient_threshold is not None and max_grads[i] > gradient_threshold:
+                continue
+            if hf_threshold is not None and max_hfs[i] > hf_threshold:
+                continue
+            good.append(i)
         cleaned = {ch: [pairs_by_channel[ch][i] for i in good] for ch in channels}
         return cleaned, n_trials - len(good)
 
-    cleaned_left, n_rejected_left = _filter_pairs(left_pairs_by_channel)
-    cleaned_right, n_rejected_right = _filter_pairs(right_pairs_by_channel)
+    cleaned_left, n_rejected_left = _filter_pairs(left_pairs_by_channel, left_metrics)
+    cleaned_right, n_rejected_right = _filter_pairs(
+        right_pairs_by_channel, right_metrics
+    )
 
     return cleaned_left, cleaned_right, n_rejected_left, n_rejected_right

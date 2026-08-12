@@ -1,7 +1,6 @@
 """Training pipeline: FBCSP + LDA, FBCSP + SVM, and Riemannian classifiers for left/right MI."""
 
 from collections import Counter
-from typing import Literal
 
 import mne
 import numpy as np
@@ -17,7 +16,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 
-from src.config import SplitStrategy
+from src.config import CacheScope, ParallelBackend, SplitStrategy
+from src.epochs import adaptive_threshold
 from src.validation import build_classwise_trial_groups, make_cv_splits
 
 FBCSP_BANDS = [
@@ -64,9 +64,16 @@ FBCSP_BAND_CANDIDATES: dict[str, list[tuple[float, float]]] = {
 N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
 ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
-ParallelBackend = Literal["loky", "threading"]
-CacheScope = Literal["subject", "outer_fold"]
 BandCache = dict[tuple[float, float], np.ndarray]
+
+
+def _make_riemann_pipeline():
+    """Create a fresh Riemannian tangent-space classification pipeline."""
+    return make_pipeline(
+        Covariances(estimator="lwf"),
+        TangentSpace(metric="riemann"),
+        LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
+    )
 
 
 def _precompute_bandpassed(
@@ -228,9 +235,7 @@ def _reject_in_fold(
         return train_idx, test_idx
 
     train_ptps = trial_ptps[train_idx]
-    median = float(np.median(train_ptps))
-    mad = float(np.median(np.abs(train_ptps - median)))
-    threshold = median + n_mad * mad
+    threshold = adaptive_threshold(train_ptps, n_mad)
 
     def _keep(idx: np.ndarray) -> np.ndarray:
         ptps = trial_ptps[idx]
@@ -310,11 +315,7 @@ def _evaluate_subject_all_models(
             X_mc_test = X_multichannel[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            riemann_pipe = make_pipeline(
-                Covariances(estimator="lwf"),
-                TangentSpace(metric="riemann"),
-                LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
-            )
+            riemann_pipe = _make_riemann_pipeline()
             riemann_pipe.fit(X_mc_train, y_train)
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
@@ -534,165 +535,6 @@ def train_within_subject_cv_all_models(
     }
 
 
-def train_within_subject_cv(
-    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
-    y_by_subject: list[np.ndarray],
-    sfreq: float = 250.0,
-    n_folds: int = 10,
-    k_best: int = 10,
-    trial_ptps_by_subject: list[np.ndarray] | None = None,
-    split_strategy: SplitStrategy = "stratified_group",
-    trial_groups_by_subject: list[np.ndarray] | None = None,
-    trial_group_size: int = 5,
-    random_state: int = 42,
-    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
-    enable_band_cache: bool = True,
-) -> tuple[list[float], float, float]:
-    """Within-subject CV using FBCSP + LDA.
-
-    Per fold:
-    1. FBCSP: 10 frequency bands -> CSP (4 components each) -> log-variance
-    2. Concatenate FBCSP features (up to 40) with handcrafted features (39) = ~79
-    3. SelectKBest(f_classif, k=k_best)
-    4. StandardScaler
-    5. LDA(solver='lsqr', shrinkage='auto')
-
-    Args:
-        X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
-        y_by_subject: List of label arrays per subject.
-        sfreq: Sampling frequency in Hz.
-        n_folds: Requested number of CV folds.
-        k_best: Number of features to select via SelectKBest.
-        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
-            in-fold artifact rejection.  ``None`` disables per-fold rejection.
-        split_strategy: ``'stratified'`` or ``'stratified_group'``.
-        trial_groups_by_subject: Optional explicit CV groups per subject.
-        trial_group_size: Group size when groups are auto-generated.
-        random_state: Random seed for deterministic splits.
-        k_candidates: Candidate feature counts for inner-k selection.
-        enable_band_cache: Reuse precomputed per-band filtered trials.
-
-    Returns:
-        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
-    """
-    scores = []
-
-    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
-        zip(X_by_subject, y_by_subject)
-    ):
-        groups = _resolve_subject_groups(
-            y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
-            split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
-        outer_splits = make_cv_splits(
-            y,
-            n_splits=n_folds,
-            strategy=split_strategy,
-            groups=groups,
-            random_state=random_state,
-        )
-        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
-        )
-        fold_scores = []
-
-        for train_idx, test_idx in outer_splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
-            if len(train_idx) < 2 or len(test_idx) < 1:
-                continue
-            y_train, y_test = y[train_idx], y[test_idx]
-
-            if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
-                    train_band_cache,
-                    test_band_cache,
-                    y_train,
-                    n_train_trials=len(train_idx),
-                    n_test_trials=len(test_idx),
-                )
-            else:
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                    X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
-                )
-
-            X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
-            X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
-
-            _, outer_counts = np.unique(y_train, return_counts=True)
-            outer_priors = outer_counts / outer_counts.sum()
-
-            k_values = _safe_k_values(
-                n_features=X_train_combined.shape[1],
-                n_train_trials=len(y_train),
-                k_best=k_best,
-                k_candidates=k_candidates,
-            )
-            if not k_values:
-                continue
-
-            best_k = k_values[0]
-            best_inner_score = -1.0
-            inner_groups = groups[train_idx] if groups is not None else None
-            inner_splits = make_cv_splits(
-                y_train,
-                n_splits=3,
-                strategy=split_strategy,
-                groups=inner_groups,
-                random_state=random_state,
-            )
-            if inner_splits:
-                for k_actual in k_values:
-                    inner_scores = []
-                    for inner_train, inner_val in inner_splits:
-                        sel = SelectKBest(f_classif, k=k_actual)
-                        X_it = sel.fit_transform(
-                            X_train_combined[inner_train], y_train[inner_train]
-                        )
-                        X_iv = sel.transform(X_train_combined[inner_val])
-                        sc = StandardScaler()
-                        X_it = sc.fit_transform(X_it)
-                        X_iv = sc.transform(X_iv)
-                        _, inner_counts = np.unique(
-                            y_train[inner_train], return_counts=True
-                        )
-                        inner_priors = inner_counts / inner_counts.sum()
-                        clf = LinearDiscriminantAnalysis(
-                            solver="lsqr", shrinkage="auto", priors=inner_priors
-                        )
-                        clf.fit(X_it, y_train[inner_train])
-                        inner_scores.append(clf.score(X_iv, y_train[inner_val]))
-                    mean_inner = float(np.mean(inner_scores))
-                    if mean_inner > best_inner_score:
-                        best_inner_score = mean_inner
-                        best_k = k_actual
-
-            selector = SelectKBest(f_classif, k=best_k)
-            X_train_sel = selector.fit_transform(X_train_combined, y_train)
-            X_test_sel = selector.transform(X_test_combined)
-
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_sel)
-            X_test_scaled = scaler.transform(X_test_sel)
-
-            lda = LinearDiscriminantAnalysis(
-                solver="lsqr", shrinkage="auto", priors=outer_priors
-            )
-            lda.fit(X_train_scaled, y_train)
-            fold_scores.append(lda.score(X_test_scaled, y_test))
-
-        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
-
-    mean_acc = float(np.mean(scores))
-    std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc
-
-
 def train_final_model(
     X_features: np.ndarray,
     X_multichannel: np.ndarray,
@@ -823,11 +665,7 @@ def train_within_subject_cv_riemann(
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
-            pipe = make_pipeline(
-                Covariances(estimator="lwf"),
-                TangentSpace(metric="riemann"),
-                LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
-            )
+            pipe = _make_riemann_pipeline()
             pipe.fit(X_multichannel[train_idx], y[train_idx])
             fold_scores.append(pipe.score(X_multichannel[test_idx], y[test_idx]))
 
@@ -848,142 +686,9 @@ def train_final_model_riemann(
     Returns:
         Dict with keys 'pipeline', 'sfreq'.
     """
-    pipe = make_pipeline(
-        Covariances(estimator="lwf"),
-        TangentSpace(metric="riemann"),
-        LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
-    )
+    pipe = _make_riemann_pipeline()
     pipe.fit(X_multichannel, y)
     return {"pipeline": pipe, "sfreq": sfreq}
-
-
-# ---------------------------------------------------------------------------
-# FBCSP + SVM classifier
-# ---------------------------------------------------------------------------
-
-
-def train_within_subject_cv_svm(
-    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
-    y_by_subject: list[np.ndarray],
-    sfreq: float = 250.0,
-    n_folds: int = 10,
-    k_best: int = 10,
-    trial_ptps_by_subject: list[np.ndarray] | None = None,
-    split_strategy: SplitStrategy = "stratified_group",
-    trial_groups_by_subject: list[np.ndarray] | None = None,
-    trial_group_size: int = 5,
-    random_state: int = 42,
-    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
-    enable_band_cache: bool = True,
-) -> tuple[list[float], float, float]:
-    """Within-subject CV using FBCSP + SVM.
-
-    Per fold:
-    1. FBCSP: 10 frequency bands -> CSP (4 components each) -> log-variance
-    2. Concatenate FBCSP features (up to 40) with handcrafted features
-    3. SelectKBest(f_classif, k=k_best)
-    4. StandardScaler
-    5. SVC(kernel='rbf', C=10.0, gamma='scale')
-
-    Args:
-        X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
-        y_by_subject: List of label arrays per subject.
-        sfreq: Sampling frequency in Hz.
-        n_folds: Requested number of CV folds.
-        k_best: Number of features to select via SelectKBest.
-        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
-            in-fold artifact rejection.  ``None`` disables per-fold rejection.
-        split_strategy: ``'stratified'`` or ``'stratified_group'``.
-        trial_groups_by_subject: Optional explicit CV groups per subject.
-        trial_group_size: Group size when groups are auto-generated.
-        random_state: Random seed for deterministic splits.
-        k_candidates: Candidate feature counts for safe K clipping.
-        enable_band_cache: Reuse precomputed per-band filtered trials.
-
-    Returns:
-        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
-    """
-    scores = []
-
-    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
-        zip(X_by_subject, y_by_subject)
-    ):
-        groups = _resolve_subject_groups(
-            y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
-            split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
-        splits = make_cv_splits(
-            y,
-            n_splits=n_folds,
-            strategy=split_strategy,
-            groups=groups,
-            random_state=random_state,
-        )
-        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
-        )
-        fold_scores = []
-
-        for train_idx, test_idx in splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
-            if len(train_idx) < 2 or len(test_idx) < 1:
-                continue
-            y_train, y_test = y[train_idx], y[test_idx]
-
-            if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
-                    train_band_cache,
-                    test_band_cache,
-                    y_train,
-                    n_train_trials=len(train_idx),
-                    n_test_trials=len(test_idx),
-                )
-            else:
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                    X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
-                )
-
-            X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
-            X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
-
-            k_values = _safe_k_values(
-                n_features=X_train_combined.shape[1],
-                n_train_trials=len(y_train),
-                k_best=k_best,
-                k_candidates=k_candidates,
-            )
-            if not k_values:
-                continue
-            k = k_values[-1]
-            selector = SelectKBest(f_classif, k=k)
-            X_train_sel = selector.fit_transform(X_train_combined, y_train)
-            X_test_sel = selector.transform(X_test_combined)
-
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_sel)
-            X_test_scaled = scaler.transform(X_test_sel)
-
-            svm = SVC(
-                kernel="rbf",
-                C=20.0,
-                gamma="scale",
-                probability=True,
-                random_state=42,
-            )
-            svm.fit(X_train_scaled, y_train)
-            fold_scores.append(svm.score(X_test_scaled, y_test))
-
-        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
-
-    mean_acc = float(np.mean(scores))
-    std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc
 
 
 # ---------------------------------------------------------------------------
@@ -1020,11 +725,7 @@ def _evaluate_classifiers_batch(
     scores: dict[str, float] = {}
 
     if "riemann" in requested:
-        pipe = make_pipeline(
-            Covariances(estimator="lwf"),
-            TangentSpace(metric="riemann"),
-            LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
-        )
+        pipe = _make_riemann_pipeline()
         pipe.fit(X_mc_train, y_train)
         scores["riemann"] = float(pipe.score(X_mc_test, y_test))
 
@@ -1577,137 +1278,3 @@ def predict_riemann(
         Predicted class labels.
     """
     return model["pipeline"].predict(X_multichannel)
-
-
-# ---------------------------------------------------------------------------
-# Soft-voting ensemble (FBCSP+LDA + Riemannian + FBCSP+SVM)
-# ---------------------------------------------------------------------------
-
-
-def train_within_subject_cv_ensemble(
-    X_by_subject: list[tuple[np.ndarray, np.ndarray]],
-    y_by_subject: list[np.ndarray],
-    sfreq: float = 250.0,
-    n_folds: int = 10,
-    trial_ptps_by_subject: list[np.ndarray] | None = None,
-    split_strategy: SplitStrategy = "stratified_group",
-    trial_groups_by_subject: list[np.ndarray] | None = None,
-    trial_group_size: int = 5,
-    random_state: int = 42,
-    k_best: int = 10,
-    k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
-    enable_band_cache: bool = True,
-) -> tuple[list[float], float, float]:
-    """Within-subject CV using soft-voting ensemble of FBCSP+LDA and FBCSP+SVM.
-
-    Per fold, trains both FBCSP classifiers on the same features, averages
-    their predicted probabilities, and picks the argmax class.  Uses only
-    LDA + SVM since they provide genuine diversity (linear vs nonlinear)
-    on the same FBCSP feature space.
-
-    Args:
-        X_by_subject: List of (handcrafted_features, multichannel_eeg) per subject.
-        y_by_subject: List of label arrays per subject.
-        sfreq: Sampling frequency in Hz.
-        n_folds: Requested number of CV folds.
-        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
-            in-fold artifact rejection.  ``None`` disables per-fold rejection.
-        split_strategy: ``'stratified'`` or ``'stratified_group'``.
-        trial_groups_by_subject: Optional explicit CV groups per subject.
-        trial_group_size: Group size when groups are auto-generated.
-        random_state: Random seed for deterministic splits.
-        k_best: Maximum selected features for the shared FBCSP space.
-        k_candidates: Candidate feature counts for safe K clipping.
-        enable_band_cache: Reuse precomputed per-band filtered trials.
-
-    Returns:
-        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
-    """
-    scores = []
-
-    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
-        zip(X_by_subject, y_by_subject)
-    ):
-        groups = _resolve_subject_groups(
-            y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
-            split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
-        splits = make_cv_splits(
-            y,
-            n_splits=n_folds,
-            strategy=split_strategy,
-            groups=groups,
-            random_state=random_state,
-        )
-        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq) if enable_band_cache else None
-        )
-        fold_scores = []
-
-        for train_idx, test_idx in splits:
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
-            if len(train_idx) < 2 or len(test_idx) < 1:
-                continue
-            y_train, y_test = y[train_idx], y[test_idx]
-
-            if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
-                    train_band_cache,
-                    test_band_cache,
-                    y_train,
-                    n_train_trials=len(train_idx),
-                    n_test_trials=len(test_idx),
-                )
-            else:
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                    X_multichannel[train_idx], X_multichannel[test_idx], y_train, sfreq
-                )
-
-            X_train_combined = np.hstack([fbcsp_train, X_features[train_idx]])
-            X_test_combined = np.hstack([fbcsp_test, X_features[test_idx]])
-
-            k_values = _safe_k_values(
-                n_features=X_train_combined.shape[1],
-                n_train_trials=len(y_train),
-                k_best=k_best,
-                k_candidates=k_candidates,
-            )
-            if not k_values:
-                continue
-            k = k_values[-1]
-            selector = SelectKBest(f_classif, k=k)
-            X_train_sel = selector.fit_transform(X_train_combined, y_train)
-            X_test_sel = selector.transform(X_test_combined)
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_sel)
-            X_test_scaled = scaler.transform(X_test_sel)
-
-            _, counts = np.unique(y_train, return_counts=True)
-            priors = counts / counts.sum()
-            lda = LinearDiscriminantAnalysis(
-                solver="lsqr", shrinkage="auto", priors=priors
-            )
-            lda.fit(X_train_scaled, y_train)
-            proba_lda = lda.predict_proba(X_test_scaled)
-
-            svm = SVC(
-                kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42
-            )
-            svm.fit(X_train_scaled, y_train)
-            proba_svm = svm.predict_proba(X_test_scaled)
-
-            avg_proba = (proba_lda + proba_svm) / 2
-            preds = lda.classes_[np.argmax(avg_proba, axis=1)]
-            fold_scores.append(float(np.mean(preds == y_test)))
-
-        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
-
-    mean_acc = float(np.mean(scores))
-    std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc
