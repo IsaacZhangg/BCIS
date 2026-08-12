@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import joblib
@@ -10,7 +11,7 @@ import numpy as np
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR, TrainingConfig
 from src.data_loader import (
     CHANNELS,
-    get_complete_recordings,
+    get_recordings,
     get_recordings_by_subject,
     get_recordings_flexible,
     load_recording,
@@ -162,13 +163,13 @@ def _pairs_to_features(
     return X_features, X_multichannel, y
 
 
-def _augmented_nested_cv_subject(
+def _augmented_nested_cv_with_donor_selection(
     X_features: np.ndarray,
     X_multichannel: np.ndarray,
     y: np.ndarray,
-    donor_feat: np.ndarray,
-    donor_mc: np.ndarray,
-    donor_y: np.ndarray,
+    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    donor_means: dict[str, np.ndarray],
+    target_sid: str,
     sfreq: float,
     n_outer_folds: int,
     n_inner_folds: int,
@@ -177,21 +178,30 @@ def _augmented_nested_cv_subject(
     split_strategy: str,
     groups: np.ndarray | None,
     random_state: int,
-) -> float:
-    """Leakage-free augmented nested CV for a single subject.
+    cov_estimator,
+) -> tuple[float, str, float]:
+    """Augmented nested CV with per-fold donor selection (leakage-free).
 
-    Outer/inner CV splits are on TARGET data only. Donor data augments
-    training portions only — never appears in validation or test folds.
+    Selects the closest donor using only training-fold covariance mean,
+    so donor selection never sees test-fold data.
+
+    Returns:
+        Tuple of (accuracy, most_frequent_donor_id, mean_distance).
     """
+    from collections import Counter
+
+    from pyriemann.utils.distance import distance_riemann
+    from pyriemann.utils.mean import mean_covariance
+
     from src.train import (
         ALL_CLASSIFIERS,
         _evaluate_classifier,
         _evaluate_classifiers_batch,
         _reject_in_fold,
     )
-    from src.validation import make_cv_splits
+    from src.validation import adaptive_fold_count, make_cv_splits
 
-    classifier_names = list(ALL_CLASSIFIERS)
+    n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
     outer_splits = make_cv_splits(
         y,
         n_splits=n_outer_folds,
@@ -199,7 +209,11 @@ def _augmented_nested_cv_subject(
         groups=groups,
         random_state=random_state,
     )
+
+    classifier_names = list(ALL_CLASSIFIERS)
     fold_scores: list[float] = []
+    fold_donors: list[str] = []
+    fold_dists: list[float] = []
 
     for outer_train_idx, outer_test_idx in outer_splits:
         outer_train_idx, outer_test_idx = _reject_in_fold(
@@ -208,18 +222,37 @@ def _augmented_nested_cv_subject(
         if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
             continue
 
+        # Donor selection using TRAINING-FOLD covariance mean only
+        train_covs = cov_estimator.fit_transform(X_multichannel[outer_train_idx])
+        train_mean = mean_covariance(train_covs, metric="riemann")
+
+        dists = {
+            dsid: float(distance_riemann(train_mean, donor_means[dsid]))
+            for dsid in donor_subjects
+            if dsid != target_sid
+        }
+        best_donor = min(dists, key=dists.get)
+        fold_donors.append(best_donor)
+        fold_dists.append(dists[best_donor])
+
+        donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
+
+        # Test fold: TARGET data only
         X_feat_otest = X_features[outer_test_idx]
         X_mc_otest = X_multichannel[outer_test_idx]
         y_otest = y[outer_test_idx]
 
+        # Training fold: TARGET train + donor
         X_feat_otrain = np.vstack([X_features[outer_train_idx], donor_feat])
         X_mc_otrain = np.vstack([X_multichannel[outer_train_idx], donor_mc])
         y_otrain = np.concatenate([y[outer_train_idx], donor_y])
 
+        # Inner CV for model selection
+        n_inner_actual = adaptive_fold_count(len(outer_train_idx), n_inner_folds)
         inner_groups = groups[outer_train_idx] if groups is not None else None
         inner_splits = make_cv_splits(
             y[outer_train_idx],
-            n_splits=n_inner_folds,
+            n_splits=n_inner_actual,
             strategy=split_strategy,
             groups=inner_groups,
             random_state=random_state,
@@ -227,7 +260,6 @@ def _augmented_nested_cv_subject(
 
         inner_scores_by_clf: dict[str, list[float]] = {n: [] for n in classifier_names}
         for inner_train_idx, inner_val_idx in inner_splits:
-            # Inner train: target inner train + ALL donor data
             inner_feat_train = np.vstack(
                 [X_features[outer_train_idx[inner_train_idx]], donor_feat]
             )
@@ -237,7 +269,6 @@ def _augmented_nested_cv_subject(
             inner_y_train = np.concatenate(
                 [y[outer_train_idx[inner_train_idx]], donor_y]
             )
-            # Inner val: TARGET only (no donor)
             inner_feat_val = X_features[outer_train_idx[inner_val_idx]]
             inner_mc_val = X_multichannel[outer_train_idx[inner_val_idx]]
             inner_y_val = y[outer_train_idx[inner_val_idx]]
@@ -260,7 +291,7 @@ def _augmented_nested_cv_subject(
             name: float(np.mean(scores)) if scores else 0.5
             for name, scores in inner_scores_by_clf.items()
         }
-        best_clf = max(inner_means, key=inner_means.get)  # type: ignore[arg-type]
+        best_clf = max(inner_means, key=inner_means.get)
 
         outer_score = _evaluate_classifier(
             best_clf,
@@ -275,7 +306,11 @@ def _augmented_nested_cv_subject(
         )
         fold_scores.append(outer_score)
 
-    return float(np.mean(fold_scores)) if fold_scores else 0.5
+    accuracy = float(np.mean(fold_scores)) if fold_scores else 0.5
+    donor_counts = Counter(fold_donors)
+    most_common_donor = donor_counts.most_common(1)[0][0] if donor_counts else "none"
+    mean_dist = float(np.mean(fold_dists)) if fold_dists else 0.0
+    return accuracy, most_common_donor, mean_dist
 
 
 def run_pipeline(
@@ -293,11 +328,14 @@ def run_pipeline(
     runtime_seconds: dict[str, float] = {}
     total_start = time.perf_counter()
 
-    # Step 1: Find complete recordings
+    # Step 1: Find recordings (scan primary + MI_DATA_NEW directories)
     step_start = time.perf_counter()
-    _print_step(1, 5, "Finding complete recordings")
-    recordings = get_complete_recordings(data_dir)
-    print(f"Found {len(recordings)} complete recordings")
+    _print_step(1, 5, "Finding recordings")
+    min_trials = cfg.min_evaluation_trials
+    recordings = get_recordings(data_dir, min_trials=min_trials)
+    if MI_DATA_NEW_DIR.exists():
+        recordings.extend(get_recordings(MI_DATA_NEW_DIR, min_trials=min_trials))
+    print(f"Found {len(recordings)} recordings (min_trials={min_trials})")
 
     if holdout_fraction > 0:
         print(f"  Held-out fraction: {holdout_fraction:.0%}")
@@ -323,31 +361,40 @@ def run_pipeline(
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_holdout_by_subject: list[np.ndarray] = []
 
+    # Group recordings by subject, applying merge rules (e.g. subject0104 sessions)
+    recordings_grouped: dict[str, list[Path]] = defaultdict(list)
     for rec_path in recordings:
-        subject_id = rec_path.parent.parent.name
-        print(f"  Processing {subject_id}...")
+        raw_id = rec_path.parent.parent.name
+        subject_id = DEFAULT_SUBJECT_MERGE.get(raw_id, raw_id)
+        recordings_grouped[subject_id].append(rec_path)
 
-        data, events, rec_sfreq = load_recording(rec_path)
-        if abs(rec_sfreq - sfreq) > 1e-6:
-            raise ValueError(
-                f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
-            )
-        preprocessed = preprocess_multichannel_eeg(data, sfreq)
+    for subject_id, rec_paths in sorted(recordings_grouped.items()):
+        print(f"  Processing {subject_id} ({len(rec_paths)} recording(s))...")
 
-        left_pairs_by_channel: dict = {}
-        right_pairs_by_channel: dict = {}
-        for ch_idx, ch_name in enumerate(CHANNELS):
-            signal = preprocessed[ch_idx]
-            left, right = extract_left_right_epochs(
-                signal,
-                events,
-                sfreq,
-                task_duration=3.0,
-                baseline_duration=1.0,
-                skip_duration=0.25,
-            )
-            left_pairs_by_channel[ch_name] = left
-            right_pairs_by_channel[ch_name] = right
+        # Accumulate left/right epoch pairs across all recordings for this subject
+        left_pairs_by_channel: dict[str, list] = {ch: [] for ch in CHANNELS}
+        right_pairs_by_channel: dict[str, list] = {ch: [] for ch in CHANNELS}
+
+        for rec_path in rec_paths:
+            data, events, rec_sfreq = load_recording(rec_path)
+            if abs(rec_sfreq - sfreq) > 1e-6:
+                raise ValueError(
+                    f"Sampling-rate mismatch for {rec_path}: expected {sfreq}, got {rec_sfreq}"
+                )
+            preprocessed = preprocess_multichannel_eeg(data, sfreq)
+
+            for ch_idx, ch_name in enumerate(CHANNELS):
+                signal = preprocessed[ch_idx]
+                left, right = extract_left_right_epochs(
+                    signal,
+                    events,
+                    sfreq,
+                    task_duration=3.0,
+                    baseline_duration=1.0,
+                    skip_duration=0.25,
+                )
+                left_pairs_by_channel[ch_name].extend(left)
+                right_pairs_by_channel[ch_name].extend(right)
 
         n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
         n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
@@ -615,7 +662,6 @@ def run_pipeline(
     if MI_DATA_NEW_DIR.exists():
         print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
         from pyriemann.estimation import Covariances as _Cov
-        from pyriemann.utils.distance import distance_riemann as _dist_riemann
         from pyriemann.utils.mean import mean_covariance as _mean_cov
 
         from src.transfer import load_all_subjects
@@ -628,17 +674,11 @@ def run_pipeline(
         )
         print(f"  Donor pool: {len(donor_subjects)} subjects")
 
-        # Compute Riemannian means for donor selection
+        # Compute raw Riemannian means for donor selection (pre-EA)
         _cov_est = _Cov(estimator="lwf")
         donor_means = {
             sid: _mean_cov(_cov_est.fit_transform(d[1]), metric="riemann")
             for sid, d in donor_subjects.items()
-        }
-        target_means = {
-            subject_ids[i]: _mean_cov(
-                _cov_est.fit_transform(X_by_subject[i][1]), metric="riemann"
-            )
-            for i in range(len(subject_ids))
         }
 
         weakness_threshold = cfg.augmentation_weakness_threshold
@@ -648,36 +688,30 @@ def run_pipeline(
             if score >= weakness_threshold:
                 continue
 
-            # Find closest donor by Riemannian distance
-            dists = {
-                dsid: float(_dist_riemann(target_means[sid], donor_means[dsid]))
-                for dsid in donor_subjects
-                if dsid != sid
-            }
-            best_donor = min(dists, key=dists.get)
-
-            donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
             target_feat, target_mc = X_by_subject[i]
 
-            aug_score = _augmented_nested_cv_subject(
-                target_feat,
-                target_mc,
-                y_by_subject[i],
-                donor_feat,
-                donor_mc,
-                donor_y,
-                sfreq=sfreq,
-                n_outer_folds=cfg.n_outer_folds,
-                n_inner_folds=cfg.n_inner_folds,
-                k_best=cfg.k_best,
-                trial_ptps=trial_ptps_by_subject[i],
-                split_strategy=cfg.split_strategy,
-                groups=trial_groups_by_subject[i],
-                random_state=cfg.random_state,
+            aug_score, best_donor, best_dist = (
+                _augmented_nested_cv_with_donor_selection(
+                    target_feat,
+                    target_mc,
+                    y_by_subject[i],
+                    donor_subjects=donor_subjects,
+                    donor_means=donor_means,
+                    target_sid=sid,
+                    sfreq=sfreq,
+                    n_outer_folds=cfg.n_outer_folds,
+                    n_inner_folds=cfg.n_inner_folds,
+                    k_best=cfg.k_best,
+                    trial_ptps=trial_ptps_by_subject[i],
+                    split_strategy=cfg.split_strategy,
+                    groups=trial_groups_by_subject[i],
+                    random_state=cfg.random_state,
+                    cov_estimator=_cov_est,
+                )
             )
             aug_nested_scores[i] = aug_score
             print(
-                f"    {sid}: +{best_donor} (d={dists[best_donor]:.1f}) "
+                f"    {sid}: +{best_donor} (d={best_dist:.1f}) "
                 f"{score:.1%} -> {aug_score:.1%} ({aug_score - score:+.1%})"
             )
 
@@ -919,6 +953,38 @@ def run_pipeline(
             sid: float(s) for sid, s in zip(subject_ids, aug_nested_scores)
         }
         results["augmented_nested_mean"] = float(aug_nested_mean)
+
+    # Dual reporting: separate original subjects from new
+    original_subject_ids = [
+        sid
+        for sid in subject_ids
+        if not sid.startswith("subject010")  # 0100-0106 are MI_DATA_NEW
+    ]
+    if len(original_subject_ids) < len(subject_ids):
+        original_indices = [
+            i for i, sid in enumerate(subject_ids) if sid in original_subject_ids
+        ]
+        original_nested = [nested_scores[i] for i in original_indices]
+        results["original_subjects"] = original_subject_ids
+        results["original_nested_mean"] = float(np.mean(original_nested))
+        results["original_nested_std"] = float(np.std(original_nested))
+        if aug_nested_scores is not None:
+            original_aug = [aug_nested_scores[i] for i in original_indices]
+            results["original_augmented_nested_mean"] = float(np.mean(original_aug))
+
+        # Per-subject trial counts for new subjects
+        trial_counts = {}
+        for i, sid in enumerate(subject_ids):
+            trial_counts[sid] = len(y_by_subject[i])
+        results["trial_counts"] = trial_counts
+
+        n_original = len(original_subject_ids)
+        n_new = len(subject_ids) - n_original
+        print(f"\nDual reporting: {n_original} original + {n_new} new subjects")
+        print(
+            f"  Original {n_original} nested mean: {results['original_nested_mean']:.1%}"
+        )
+        print(f"  All {len(subject_ids)} nested mean:      {nested_mean:.1%}")
 
     results_path = output_dir / "training_results.json"
     runtime_seconds["total"] = time.perf_counter() - total_start

@@ -9,11 +9,11 @@ from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
 from pyriemann.utils.geodesic import geodesic_riemann
 from pyriemann.utils.mean import mean_covariance
-from scipy.linalg import fractional_matrix_power
 from sklearn.linear_model import LogisticRegression
 
+from src.alignment import euclidean_align
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR
-from src.data_loader import CHANNELS, load_recording
+from src.data_loader import CHANNELS, get_recordings_by_subject, load_recording
 from src.epochs import (
     compute_rejection_threshold,
     extract_left_right_epochs,
@@ -22,29 +22,6 @@ from src.epochs import (
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
-
-
-def _get_recordings_with_trials(
-    data_dir: Path,
-    min_trials: int = 10,
-) -> dict[str, list[Path]]:
-    """Find recordings with at least min_trials phase-3 events, grouped by subject.
-
-    Unlike get_complete_recordings (which requires exactly 100 trials), this
-    accepts any recording with sufficient phase-3 events — needed for MI_DATA_NEW
-    recordings that have 32 trials each.
-    """
-    import pandas as pd
-
-    grouped: dict[str, list[Path]] = {}
-    for csv_path in sorted(data_dir.glob("subject*/session*/*.csv")):
-        stim = pd.read_csv(csv_path, usecols=["stim"])["stim"].to_numpy(copy=False)
-        nonzero = stim[stim != 0].astype(int)
-        phase3_count = int(np.sum((nonzero // 10) % 10 == 3))
-        if phase3_count >= min_trials:
-            subject_id = csv_path.parent.parent.name
-            grouped.setdefault(subject_id, []).append(csv_path)
-    return grouped
 
 
 def load_all_subjects(
@@ -72,7 +49,9 @@ def load_all_subjects(
 
     all_recordings: dict[str, list[Path]] = {}
     for data_dir in data_dirs:
-        for sid, paths in _get_recordings_with_trials(data_dir, min_trials).items():
+        for sid, paths in get_recordings_by_subject(
+            data_dir, min_trials=min_trials
+        ).items():
             canonical = subject_merge.get(sid, sid)
             all_recordings.setdefault(canonical, []).extend(paths)
 
@@ -131,17 +110,6 @@ def load_all_subjects(
     return subjects
 
 
-def _euclidean_align(
-    X_mc: np.ndarray,
-    cov_estimator: Covariances,
-) -> np.ndarray:
-    """Apply Euclidean Alignment: re-center covariances to the identity matrix."""
-    covs = cov_estimator.fit_transform(X_mc)
-    ref = mean_covariance(covs, metric="riemann")
-    ref_inv_sqrt = fractional_matrix_power(ref, -0.5).real
-    return ref_inv_sqrt @ covs @ ref_inv_sqrt.T
-
-
 def align_subjects(
     subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     sfreq: float = 250.0,
@@ -169,7 +137,8 @@ def align_subjects(
 
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
-        covs_aligned = _euclidean_align(X_mc, cov_estimator)
+        covs = cov_estimator.fit_transform(X_mc)
+        covs_aligned, _ = euclidean_align(covs)
 
         all_covs.append(covs_aligned)
         all_labels.append(y)
@@ -237,7 +206,8 @@ def regularized_within_subject_cv(
     all_aligned_covs = []
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
-        covs_aligned = _euclidean_align(X_mc, cov_estimator)
+        covs = cov_estimator.fit_transform(X_mc)
+        covs_aligned, _ = euclidean_align(covs)
         aligned_per_subject[sid] = (covs_aligned, y)
         all_aligned_covs.append(covs_aligned)
 
@@ -406,7 +376,8 @@ def loso_cv(
     aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for sid in sorted(subjects.keys()):
         _, X_mc, y = subjects[sid]
-        covs_aligned = _euclidean_align(X_mc, cov_estimator)
+        covs = cov_estimator.fit_transform(X_mc)
+        covs_aligned, _ = euclidean_align(covs)
         aligned_per_subject[sid] = (covs_aligned, y)
 
     subject_ids = sorted(subjects.keys())
