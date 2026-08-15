@@ -6,6 +6,7 @@ import pandas as pd
 from src.transfer import (
     align_subjects,
     gated_ea_augmented_nested_cv,
+    leakfree_group_shrink_cv,
     load_all_subjects,
     loso_cv,
     regularized_within_subject_cv,
@@ -313,4 +314,21 @@ def test_regularized_within_subject_cv_returns_scores():
     assert isinstance(scores, dict)
     assert len(scores) == 3
     for sid, score in scores.items():
+        assert 0.0 <= score <= 1.0
+
+
+def test_leakfree_group_shrink_cv_stays_near_chance():
+    n_channels = 8
+    subjects = {}
+    for i in range(3):
+        local = np.random.default_rng(200 + i)
+        X = local.standard_normal((30, n_channels, 375))
+        y = np.array([0] * 15 + [1] * 15)
+        subjects[f"subj{i:02d}"] = (np.zeros((len(y), 45)), X, y)
+
+    scores = leakfree_group_shrink_cv(subjects, n_folds=5, random_state=42)
+    assert len(scores) == 3
+    mean_acc = float(np.mean(list(scores.values())))
+    assert mean_acc < 0.70
+    for score in scores.values():
         assert 0.0 <= score <= 1.0

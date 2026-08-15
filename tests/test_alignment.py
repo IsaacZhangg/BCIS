@@ -7,6 +7,7 @@ from src.alignment import (
     align_trials_ea,
     apply_ea_to_trials,
     apply_ea_transform,
+    apply_session_ea_train_only,
     compute_ea_transform,
     compute_trial_ea_transform,
     euclidean_align,
@@ -77,3 +78,31 @@ def test_trial_ea_transform_is_fit_on_train_only():
     assert aligned_test.shape == test.shape
     # Fitting on train+test must not be required for a finite transform.
     assert np.isfinite(aligned_test).all()
+
+
+def test_session_ea_is_noop_for_single_session():
+    rng = np.random.default_rng(3)
+    X = rng.standard_normal((16, 8, 200))
+    session_ids = np.zeros(16, dtype=int)
+    train_idx = np.arange(12)
+    test_idx = np.arange(12, 16)
+    X_tr, X_te = apply_session_ea_train_only(X, session_ids, train_idx, test_idx)
+    np.testing.assert_allclose(X_tr, X[train_idx])
+    np.testing.assert_allclose(X_te, X[test_idx])
+
+
+def test_session_ea_uses_train_only_per_session():
+    rng = np.random.default_rng(5)
+    X = rng.standard_normal((20, 8, 200))
+    session_ids = np.array([0] * 10 + [1] * 10)
+    train_idx = np.array([0, 1, 2, 3, 4, 10, 11, 12, 13, 14])
+    test_idx = np.array([5, 6, 7, 8, 9, 15, 16, 17, 18, 19])
+    X_tr, X_te = apply_session_ea_train_only(X, session_ids, train_idx, test_idx)
+    assert X_tr.shape == (10, 8, 200)
+    assert X_te.shape == (10, 8, 200)
+    assert np.isfinite(X_tr).all()
+    assert np.isfinite(X_te).all()
+    # Train-only transform for session 0 should match a direct fit.
+    ref0 = compute_trial_ea_transform(X[train_idx[session_ids[train_idx] == 0]])
+    expected = apply_ea_to_trials(X[test_idx[session_ids[test_idx] == 0]], ref0)
+    np.testing.assert_allclose(X_te[session_ids[test_idx] == 0], expected, atol=1e-10)

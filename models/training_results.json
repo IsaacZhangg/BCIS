@@ -37,7 +37,10 @@
     "use_pyriemann_transfer": false,
     "temporal_augmentation": false,
     "aug_window_sec": 2.5,
-    "aug_stride_sec": 0.25
+    "aug_stride_sec": 0.25,
+    "use_composite_csp": true,
+    "composite_csp_lam": 0.3,
+    "session_level_ea": false
   },
   "models": [
     "FBCSP+LDA (nested k)",
@@ -149,44 +152,44 @@
     "subject0106": "Riemann"
   },
   "nested_scores": {
-    "subject0001": 0.4600000000000001,
+    "subject0001": 0.47250000000000003,
     "subject0002": 0.37662698412698414,
     "subject0004": 0.5566666666666666,
-    "subject0005": 0.5063888888888889,
+    "subject0005": 0.5427777777777778,
     "subject0006": 0.85,
     "subject0007": 0.64,
-    "subject0008": 0.6677777777777777,
+    "subject0008": 0.7,
     "subject0009": 0.5218253968253969,
     "subject0010": 0.8111111111111111,
     "subject0011": 0.5789682539682539,
     "subject0100": 0.4523809523809524,
-    "subject0101": 0.549047619047619,
-    "subject0102": 0.4749999999999999,
+    "subject0101": 0.5204761904761905,
+    "subject0102": 0.5027777777777778,
     "subject0104": 0.5845238095238096,
-    "subject0106": 0.4388888888888889
+    "subject0106": 0.4944444444444445
   },
   "nested_methods": {
-    "subject0001": "FBCSP",
+    "subject0001": "SVM",
     "subject0002": "SVM",
     "subject0004": "SVM",
     "subject0005": "SVM",
     "subject0006": "FBCSP",
     "subject0007": "FBCSP",
-    "subject0008": "FBCSP",
+    "subject0008": "CCSP",
     "subject0009": "Riemann",
-    "subject0010": "FBCSP",
+    "subject0010": "Ensemble",
     "subject0011": "Riemann",
     "subject0100": "Ensemble",
-    "subject0101": "SVM",
+    "subject0101": "Ensemble",
     "subject0102": "SVM",
     "subject0104": "Ensemble",
-    "subject0106": "SVM"
+    "subject0106": "CCSP"
   },
   "nested_band_configs": {
     "subject0001": "standard",
     "subject0002": "standard",
     "subject0004": "wide_mu",
-    "subject0005": "high_mu",
+    "subject0005": "standard",
     "subject0006": "standard",
     "subject0007": "wide_mu",
     "subject0008": "standard",
@@ -196,7 +199,7 @@
     "subject0100": "standard",
     "subject0101": "high_mu",
     "subject0102": "standard",
-    "subject0104": "high_mu",
+    "subject0104": "standard",
     "subject0106": "standard"
   },
   "fbcsp_mean_accuracy": 0.5797010582010582,
@@ -205,8 +208,8 @@
   "ensemble_mean_accuracy": 0.564089947089947,
   "best_mean_accuracy": 0.6182592592592593,
   "best_std_accuracy": 0.12039130656929044,
-  "nested_mean_accuracy": 0.5646137566137566,
-  "nested_std_accuracy": 0.1284205827386664,
+  "nested_mean_accuracy": 0.5736719576719577,
+  "nested_std_accuracy": 0.12518705988881934,
   "stacking_scores": {
     "subject0001": 0.4530555555555556,
     "subject0002": 0.5648412698412698,
@@ -246,31 +249,31 @@
     "subject0106"
   ],
   "model_paths": {
-    "subject0001": "models/subject0001_fbcsp_lda.joblib",
+    "subject0001": "models/subject0001_svm.joblib",
     "subject0002": "models/subject0002_svm.joblib",
     "subject0004": "models/subject0004_svm.joblib",
     "subject0005": "models/subject0005_svm.joblib",
     "subject0006": "models/subject0006_fbcsp_lda.joblib",
     "subject0007": "models/subject0007_fbcsp_lda.joblib",
-    "subject0008": "models/subject0008_fbcsp_lda.joblib",
+    "subject0008": "models/subject0008_ccsp_lda.joblib",
     "subject0009": "models/subject0009_riemann.joblib",
-    "subject0010": "models/subject0010_fbcsp_lda.joblib",
+    "subject0010": "models/subject0010_ensemble_lda.joblib",
     "subject0011": "models/subject0011_riemann.joblib",
     "subject0100": "models/subject0100_ensemble_lda.joblib",
-    "subject0101": "models/subject0101_svm.joblib",
+    "subject0101": "models/subject0101_ensemble_lda.joblib",
     "subject0102": "models/subject0102_svm.joblib",
     "subject0104": "models/subject0104_ensemble_lda.joblib",
-    "subject0106": "models/subject0106_svm.joblib"
+    "subject0106": "models/subject0106_ccsp_lda.joblib"
   },
   "runtime_seconds": {
-    "find_recordings": 2.23981062497478,
-    "load_preprocess": 9.126986165996641,
-    "cross_validation": 64.99641487497138,
-    "augmented_nested_cv": 1695.8566602499923,
-    "cross_session_eval": 0.7775532079976983,
-    "transfer_eval": 86.41383995796787,
-    "train_and_save_models": 2.985731582972221,
-    "total": 1862.3972050839802
+    "find_recordings": 1.269952500006184,
+    "load_preprocess": 7.546279292029794,
+    "cross_validation": 64.20178975001909,
+    "augmented_nested_cv": 447.51690420805244,
+    "cross_session_eval": 0.7950657079927623,
+    "transfer_eval": 84.5015422909637,
+    "train_and_save_models": 3.014654166006949,
+    "total": 608.8465007079649
   },
   "transfer_results": {
     "fbcsp_base_scores": {
@@ -330,23 +333,23 @@
     "n_subjects": 15
   },
   "augmented_nested_scores": {
-    "subject0001": 0.4563888888888889,
+    "subject0001": 0.47250000000000003,
     "subject0002": 0.48817460317460315,
     "subject0004": 0.5566666666666666,
-    "subject0005": 0.5063888888888889,
+    "subject0005": 0.5427777777777778,
     "subject0006": 0.85,
     "subject0007": 0.64,
-    "subject0008": 0.6677777777777777,
+    "subject0008": 0.7,
     "subject0009": 0.5218253968253969,
     "subject0010": 0.8111111111111111,
     "subject0011": 0.5789682539682539,
-    "subject0100": 0.5842857142857143,
-    "subject0101": 0.549047619047619,
-    "subject0102": 0.5777777777777778,
+    "subject0100": 0.5473809523809524,
+    "subject0101": 0.5204761904761905,
+    "subject0102": 0.5027777777777778,
     "subject0104": 0.5845238095238096,
-    "subject0106": 0.4388888888888889
+    "subject0106": 0.4944444444444445
   },
-  "augmented_nested_mean": 0.5874550264550265,
+  "augmented_nested_mean": 0.5874417989417989,
   "original_subjects": [
     "subject0001",
     "subject0002",
@@ -359,9 +362,9 @@
     "subject0010",
     "subject0011"
   ],
-  "original_nested_mean": 0.596936507936508,
-  "original_nested_std": 0.14137107327983423,
-  "original_augmented_nested_mean": 0.6077301587301587,
+  "original_nested_mean": 0.6050476190476191,
+  "original_nested_std": 0.1400966217618231,
+  "original_augmented_nested_mean": 0.616202380952381,
   "trial_counts": {
     "subject0001": 100,
     "subject0002": 100,

@@ -52,6 +52,9 @@ class TrainingConfig:
     temporal_augmentation: bool = False
     aug_window_sec: float = 2.5
     aug_stride_sec: float = 0.25
+    use_composite_csp: bool = True
+    composite_csp_lam: float = 0.3
+    session_level_ea: bool = False
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""

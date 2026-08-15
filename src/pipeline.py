@@ -51,6 +51,7 @@ _NESTED_TO_DISPLAY = {
     "svm": "SVM",
     "ensemble": "Ensemble",
     "stacking": "Stacking",
+    "ccsp": "CCSP",
 }
 
 _LINE_WIDTH = 68
@@ -399,6 +400,12 @@ def run_pipeline(
     holdout_fraction: float = 0.0,
     training_config: TrainingConfig | None = None,
     quiet_output: bool = True,
+    skip_all_models_cv: bool = False,
+    skip_aug: bool = False,
+    skip_transfer: bool = False,
+    skip_cross_session: bool = False,
+    skip_save: bool = False,
+    results_path: Path | None = None,
 ) -> dict:
     """Run the full training pipeline for left/right motor imagery classification."""
     configure_console_output(quiet_output)
@@ -446,6 +453,7 @@ def run_pipeline(
     subject_ids: list[str] = []
     trial_ptps_by_subject: list[np.ndarray] = []
     trial_groups_by_subject: list[np.ndarray] = []
+    trial_session_ids_by_subject: list[np.ndarray] = []
     augmentation_by_subject: list[AugmentationContext | None] = []
 
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
@@ -458,8 +466,12 @@ def run_pipeline(
         # Accumulate left/right epoch pairs across all recordings for this subject
         left_pairs_by_channel: dict[str, list] = {ch: [] for ch in CHANNELS}
         right_pairs_by_channel: dict[str, list] = {ch: [] for ch in CHANNELS}
+        left_session_ids: list[int] = []
+        right_session_ids: list[int] = []
 
-        for rec_path in rec_paths:
+        for rec_i, rec_path in enumerate(rec_paths):
+            n_left_before = len(left_pairs_by_channel[CHANNELS[0]])
+            n_right_before = len(right_pairs_by_channel[CHANNELS[0]])
             data, events, rec_sfreq = load_recording(rec_path)
             if abs(rec_sfreq - sfreq) > 1e-6:
                 raise ValueError(
@@ -479,6 +491,11 @@ def run_pipeline(
                 )
                 left_pairs_by_channel[ch_name].extend(left)
                 right_pairs_by_channel[ch_name].extend(right)
+
+            n_left_added = len(left_pairs_by_channel[CHANNELS[0]]) - n_left_before
+            n_right_added = len(right_pairs_by_channel[CHANNELS[0]]) - n_right_before
+            left_session_ids.extend([rec_i] * n_left_added)
+            right_session_ids.extend([rec_i] * n_right_added)
 
         n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
         n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
@@ -525,6 +542,7 @@ def run_pipeline(
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
             )
+            trial_session_ids_by_subject.append(np.zeros(len(y), dtype=int))
             augmentation_by_subject.append(
                 _build_augmentation_context(
                     train_left,
@@ -575,6 +593,9 @@ def run_pipeline(
             trial_groups_by_subject.append(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
             )
+            trial_session_ids_by_subject.append(
+                np.asarray(left_session_ids + right_session_ids, dtype=int)
+            )
             augmentation_by_subject.append(
                 _build_augmentation_context(
                     left_pairs_by_channel,
@@ -594,44 +615,66 @@ def run_pipeline(
     # Step 3: Cross-validation (four classifiers + nested model selection)
     step_start = time.perf_counter()
     _print_step(3, 5, "Running cross-validation")
-    print(f"({cfg.n_folds}-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)")
-
+    n_subj = len(subject_ids)
     aug_payload = augmentation_by_subject if cfg.temporal_augmentation else None
-    cv_results = train_within_subject_cv_all_models(
-        X_by_subject,
-        y_by_subject,
-        sfreq=sfreq,
-        n_folds=cfg.n_folds,
-        trial_ptps_by_subject=trial_ptps_by_subject,
-        split_strategy=cfg.split_strategy,
-        trial_groups_by_subject=trial_groups_by_subject,
-        trial_group_size=cfg.trial_group_size,
-        random_state=cfg.random_state,
-        k_best=cfg.k_best,
-        k_candidates=cfg.k_candidates,
-        n_jobs=cfg.n_jobs,
-        parallel_backend=cfg.parallel_backend,
-        max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
-        enable_band_cache=cfg.enable_band_cache,
-        augmentation_by_subject=aug_payload,
-    )
-    fbcsp_scores, fbcsp_mean, fbcsp_std = cv_results["lda"]
-    riemann_scores, riemann_mean, riemann_std = cv_results["riemann"]
-    svm_scores, svm_mean, svm_std = cv_results["svm"]
-    ensemble_scores, ensemble_mean, ensemble_std = cv_results["ensemble"]
 
-    best_scores = []
-    best_methods_posthoc = []
-    for fs, rs, ss, es in zip(
-        fbcsp_scores, riemann_scores, svm_scores, ensemble_scores
-    ):
-        candidates = [("FBCSP", fs), ("Riemann", rs), ("SVM", ss), ("Ensemble", es)]
-        best_method, best_score = max(candidates, key=lambda x: x[1])
-        best_scores.append(best_score)
-        best_methods_posthoc.append(best_method)
+    if skip_all_models_cv:
+        print("  Skipping all-models CV (nested-only experiment)")
+        fbcsp_scores = [None] * n_subj
+        riemann_scores = [None] * n_subj
+        svm_scores = [None] * n_subj
+        ensemble_scores = [None] * n_subj
+        fbcsp_mean = fbcsp_std = None
+        riemann_mean = riemann_std = None
+        svm_mean = svm_std = None
+        ensemble_mean = ensemble_std = None
+        best_scores = [None] * n_subj
+        best_methods_posthoc = ["n/a"] * n_subj
+        best_mean = best_std = None
+    else:
+        print(
+            f"({cfg.n_folds}-fold CV per subject: FBCSP+LDA, Riemannian, SVM, Ensemble)"
+        )
+        cv_results = train_within_subject_cv_all_models(
+            X_by_subject,
+            y_by_subject,
+            sfreq=sfreq,
+            n_folds=cfg.n_folds,
+            trial_ptps_by_subject=trial_ptps_by_subject,
+            split_strategy=cfg.split_strategy,
+            trial_groups_by_subject=trial_groups_by_subject,
+            trial_group_size=cfg.trial_group_size,
+            random_state=cfg.random_state,
+            k_best=cfg.k_best,
+            k_candidates=cfg.k_candidates,
+            n_jobs=cfg.n_jobs,
+            parallel_backend=cfg.parallel_backend,
+            max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
+            enable_band_cache=cfg.enable_band_cache,
+            augmentation_by_subject=aug_payload,
+        )
+        fbcsp_scores, fbcsp_mean, fbcsp_std = cv_results["lda"]
+        riemann_scores, riemann_mean, riemann_std = cv_results["riemann"]
+        svm_scores, svm_mean, svm_std = cv_results["svm"]
+        ensemble_scores, ensemble_mean, ensemble_std = cv_results["ensemble"]
 
-    best_mean = float(np.mean(best_scores))
-    best_std = float(np.std(best_scores))
+        best_scores = []
+        best_methods_posthoc = []
+        for fs, rs, ss, es in zip(
+            fbcsp_scores, riemann_scores, svm_scores, ensemble_scores
+        ):
+            candidates = [
+                ("FBCSP", fs),
+                ("Riemann", rs),
+                ("SVM", ss),
+                ("Ensemble", es),
+            ]
+            best_method, best_score = max(candidates, key=lambda x: x[1])
+            best_scores.append(best_score)
+            best_methods_posthoc.append(best_method)
+
+        best_mean = float(np.mean(best_scores))
+        best_std = float(np.std(best_scores))
 
     print("\nRunning nested model-selection CV (unbiased best-of estimate)...")
     (
@@ -660,50 +703,73 @@ def run_pipeline(
         cache_scope=cfg.cache_scope,
         band_candidates=FBCSP_BAND_CANDIDATES,
         augmentation_by_subject=aug_payload,
+        use_composite_csp=cfg.use_composite_csp,
+        composite_csp_lam=cfg.composite_csp_lam,
+        session_level_ea=cfg.session_level_ea,
+        trial_session_ids_by_subject=trial_session_ids_by_subject,
     )
     runtime_seconds["cross_validation"] = time.perf_counter() - step_start
     nested_methods_display = [_NESTED_TO_DISPLAY[m] for m in nested_methods]
 
-    print(
-        f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} "
-        f"{'Ensemble':>10} {'Best':>10} {'Nested':>10}"
-    )
-    print("-" * 84)
-    for sid, fs, rs, ss, es, bs, bm, ns, nm, bc in zip(
-        subject_ids,
-        fbcsp_scores,
-        riemann_scores,
-        svm_scores,
-        ensemble_scores,
-        best_scores,
-        best_methods_posthoc,
-        nested_scores,
-        nested_methods_display,
-        nested_band_configs,
-    ):
-        status = "signal" if ns >= 0.60 else "chance"
+    if skip_all_models_cv:
+        print(f"\n{'Subject':<14} {'Nested':>10} {'Selected':>12}")
+        print("-" * 40)
+        for sid, ns, nm, bc in zip(
+            subject_ids, nested_scores, nested_methods_display, nested_band_configs
+        ):
+            status = "signal" if ns >= 0.60 else "chance"
+            print(f"  {sid:<12} {ns:>9.1%}  [{nm}, {bc}, {status}]")
         print(
-            f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {es:>9.1%} "
-            f"{bs:>9.1%} {ns:>9.1%}  [{nm}, {bc}, {status}]"
+            f"\nNested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})"
         )
+        stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
+        stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
+        print(
+            f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
+        )
+    else:
+        print(
+            f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} "
+            f"{'Ensemble':>10} {'Best':>10} {'Nested':>10}"
+        )
+        print("-" * 84)
+        for sid, fs, rs, ss, es, bs, bm, ns, nm, bc in zip(
+            subject_ids,
+            fbcsp_scores,
+            riemann_scores,
+            svm_scores,
+            ensemble_scores,
+            best_scores,
+            best_methods_posthoc,
+            nested_scores,
+            nested_methods_display,
+            nested_band_configs,
+        ):
+            status = "signal" if ns >= 0.60 else "chance"
+            print(
+                f"  {sid:<12} {fs:>9.1%} {rs:>9.1%} {ss:>9.1%} {es:>9.1%} "
+                f"{bs:>9.1%} {ns:>9.1%}  [{nm}, {bc}, {status}]"
+            )
 
-    print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
-    print(f"Riemann mean:   {riemann_mean:.1%} (+/- {riemann_std:.1%})")
-    print(f"SVM mean:       {svm_mean:.1%} (+/- {svm_std:.1%})")
-    print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
-    print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
-    print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
-    stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
-    stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
-    print(
-        f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
-    )
+        print(f"\nFBCSP+LDA mean: {fbcsp_mean:.1%} (+/- {fbcsp_std:.1%})")
+        print(f"Riemann mean:   {riemann_mean:.1%} (+/- {riemann_std:.1%})")
+        print(f"SVM mean:       {svm_mean:.1%} (+/- {svm_std:.1%})")
+        print(f"Ensemble mean:  {ensemble_mean:.1%} (+/- {ensemble_std:.1%})")
+        print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
+        print(
+            f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})"
+        )
+        stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
+        stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
+        print(
+            f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
+        )
 
     # Step 3b: EA-gated augmented nested CV (leakage-free donor pooling)
     aug_nested_scores = None
     aug_nested_mean = None
     step_start_aug = time.perf_counter()
-    if cfg.ea_donor_augmentation and len(subject_ids) >= 2:
+    if cfg.ea_donor_augmentation and len(subject_ids) >= 2 and not skip_aug:
         print("\n[3b/5] EA-gated augmented nested CV (combined datasets, no leakage)")
         from pyriemann.estimation import Covariances as _Cov
         from pyriemann.utils.mean import mean_covariance as _mean_cov
@@ -754,10 +820,12 @@ def run_pipeline(
                 random_state=cfg.random_state,
                 signal_donor_ids=signal_donor_ids,
             )
-            aug_nested_scores[i] = aug_score
+            if aug_score > score:
+                aug_nested_scores[i] = aug_score
             print(
                 f"    {sid}: strategy={strategy} "
-                f"{score:.1%} -> {aug_score:.1%} ({aug_score - score:+.1%})"
+                f"{score:.1%} -> {aug_nested_scores[i]:.1%} "
+                f"({aug_nested_scores[i] - score:+.1%})"
             )
 
         aug_nested_mean = float(np.mean(aug_nested_scores))
@@ -819,7 +887,9 @@ def run_pipeline(
     }
 
     cross_session_results: dict[str, dict[str, float]] = {}
-    if multi_session_subjects:
+    if skip_cross_session:
+        print("  Skipping cross-session evaluation")
+    elif multi_session_subjects:
         for sid, paths in multi_session_subjects.items():
             print(f"  {sid}: {len(paths)} sessions, evaluating cross-session...")
             result_a = _process_recording(paths[0], sfreq)
@@ -846,20 +916,25 @@ def run_pipeline(
 
     # Step 4b: Cross-subject transfer evaluation
     step_start = time.perf_counter()
-    print("\n[4b/5] Cross-subject transfer evaluation (Euclidean Alignment + LOSO)")
     transfer_results: dict | None = None
-    try:
-        transfer_data_dirs = [data_dir]
-        if MI_DATA_NEW_DIR.exists():
-            transfer_data_dirs.append(MI_DATA_NEW_DIR)
-        within_scores = {sid: float(s) for sid, s in zip(subject_ids, nested_scores)}
-        transfer_results = run_transfer_evaluation(
-            data_dirs=transfer_data_dirs,
-            sfreq=sfreq,
-            within_subject_scores=within_scores,
-        )
-    except Exception as e:
-        print(f"  Transfer evaluation failed: {e}")
+    if skip_transfer:
+        print("\n[4b/5] Skipping cross-subject transfer evaluation")
+    else:
+        print("\n[4b/5] Cross-subject transfer evaluation (Euclidean Alignment + LOSO)")
+        try:
+            transfer_data_dirs = [data_dir]
+            if MI_DATA_NEW_DIR.exists():
+                transfer_data_dirs.append(MI_DATA_NEW_DIR)
+            within_scores = {
+                sid: float(s) for sid, s in zip(subject_ids, nested_scores)
+            }
+            transfer_results = run_transfer_evaluation(
+                data_dirs=transfer_data_dirs,
+                sfreq=sfreq,
+                within_subject_scores=within_scores,
+            )
+        except Exception as e:
+            print(f"  Transfer evaluation failed: {e}")
     runtime_seconds["transfer_eval"] = time.perf_counter() - step_start
 
     # Step 5: Train & save per-subject models (nested CV method)
@@ -868,61 +943,74 @@ def run_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
-    for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
-        zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
-    ):
-        if trial_ptps_by_subject:
-            ptps = trial_ptps_by_subject[i]
-            thresh = adaptive_threshold(ptps, 4.0)
-            clean_mask = (ptps >= 1.0) & (ptps <= thresh)
-            X_features = X_features[clean_mask]
-            X_multichannel = X_multichannel[clean_mask]
-            y = y[clean_mask]
-            if len(y) < 2:
-                print(f"  Skipping {sid} - too few clean trials for deployment model")
-                continue
+    if skip_save:
+        print("  Skipping model export")
+    else:
+        for i, (sid, (X_features, X_multichannel), y, method) in enumerate(
+            zip(subject_ids, X_by_subject, y_by_subject, nested_methods_display)
+        ):
+            if trial_ptps_by_subject:
+                ptps = trial_ptps_by_subject[i]
+                thresh = adaptive_threshold(ptps, 4.0)
+                clean_mask = (ptps >= 1.0) & (ptps <= thresh)
+                X_features = X_features[clean_mask]
+                X_multichannel = X_multichannel[clean_mask]
+                y = y[clean_mask]
+                if len(y) < 2:
+                    print(
+                        f"  Skipping {sid} - too few clean trials for deployment model"
+                    )
+                    continue
 
-        # Look up the selected band config for this subject
-        selected_band_name = nested_band_configs[i]
-        selected_bands = FBCSP_BAND_CANDIDATES.get(selected_band_name, FBCSP_BANDS)
+            selected_band_name = nested_band_configs[i]
+            selected_bands = FBCSP_BAND_CANDIDATES.get(selected_band_name, FBCSP_BANDS)
 
-        if method == "SVM":
-            model = train_final_model_svm(
-                X_features,
-                X_multichannel,
-                y,
-                sfreq=sfreq,
-                k_best=cfg.k_best,
-                bands=selected_bands,
-            )
-            model_path = output_dir / f"{sid}_svm.joblib"
-        elif method == "Riemann":
-            model = train_final_model_riemann(X_multichannel, y, sfreq=sfreq)
-            model_path = output_dir / f"{sid}_riemann.joblib"
-        elif method == "Ensemble":
-            # Ensemble is CV-only; save FBCSP+LDA as deployable model
-            model = train_final_model(
-                X_features,
-                X_multichannel,
-                y,
-                sfreq=sfreq,
-                k_best=cfg.k_best,
-                bands=selected_bands,
-            )
-            model_path = output_dir / f"{sid}_ensemble_lda.joblib"
-        else:
-            model = train_final_model(
-                X_features,
-                X_multichannel,
-                y,
-                sfreq=sfreq,
-                k_best=cfg.k_best,
-                bands=selected_bands,
-            )
-            model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
-        joblib.dump(model, model_path)
-        model_paths[sid] = str(model_path)
-        print(f"  Saved {model_path} ({method})")
+            if method == "SVM":
+                model = train_final_model_svm(
+                    X_features,
+                    X_multichannel,
+                    y,
+                    sfreq=sfreq,
+                    k_best=cfg.k_best,
+                    bands=selected_bands,
+                )
+                model_path = output_dir / f"{sid}_svm.joblib"
+            elif method == "Riemann":
+                model = train_final_model_riemann(X_multichannel, y, sfreq=sfreq)
+                model_path = output_dir / f"{sid}_riemann.joblib"
+            elif method == "Ensemble":
+                model = train_final_model(
+                    X_features,
+                    X_multichannel,
+                    y,
+                    sfreq=sfreq,
+                    k_best=cfg.k_best,
+                    bands=selected_bands,
+                )
+                model_path = output_dir / f"{sid}_ensemble_lda.joblib"
+            elif method == "CCSP":
+                model = train_final_model(
+                    X_features,
+                    X_multichannel,
+                    y,
+                    sfreq=sfreq,
+                    k_best=cfg.k_best,
+                    bands=selected_bands,
+                )
+                model_path = output_dir / f"{sid}_ccsp_lda.joblib"
+            else:
+                model = train_final_model(
+                    X_features,
+                    X_multichannel,
+                    y,
+                    sfreq=sfreq,
+                    k_best=cfg.k_best,
+                    bands=selected_bands,
+                )
+                model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
+            joblib.dump(model, model_path)
+            model_paths[sid] = str(model_path)
+            print(f"  Saved {model_path} ({method})")
     runtime_seconds["train_and_save_models"] = time.perf_counter() - step_start
 
     above_chance, at_chance = [], []
@@ -934,7 +1022,8 @@ def run_pipeline(
     print("=" * _LINE_WIDTH)
     print(f"Subjects with signal (>=60%): {', '.join(above_chance) or 'none'}")
     print(f"Subjects at chance  (<60%):  {', '.join(at_chance) or 'none'}")
-    print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
+    if best_mean is not None:
+        print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
     print(
         f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
@@ -953,15 +1042,26 @@ def run_pipeline(
             "Ensemble (soft voting)",
         ],
         "n_subjects": len(subject_ids),
-        "fbcsp_scores": {sid: float(s) for sid, s in zip(subject_ids, fbcsp_scores)},
+        "fbcsp_scores": {
+            sid: (None if s is None else float(s))
+            for sid, s in zip(subject_ids, fbcsp_scores)
+        },
         "riemann_scores": {
-            sid: float(s) for sid, s in zip(subject_ids, riemann_scores)
+            sid: (None if s is None else float(s))
+            for sid, s in zip(subject_ids, riemann_scores)
         },
-        "svm_scores": {sid: float(s) for sid, s in zip(subject_ids, svm_scores)},
+        "svm_scores": {
+            sid: (None if s is None else float(s))
+            for sid, s in zip(subject_ids, svm_scores)
+        },
         "ensemble_scores": {
-            sid: float(s) for sid, s in zip(subject_ids, ensemble_scores)
+            sid: (None if s is None else float(s))
+            for sid, s in zip(subject_ids, ensemble_scores)
         },
-        "best_scores": {sid: float(s) for sid, s in zip(subject_ids, best_scores)},
+        "best_scores": {
+            sid: (None if s is None else float(s))
+            for sid, s in zip(subject_ids, best_scores)
+        },
         "best_methods_posthoc": {
             sid: m for sid, m in zip(subject_ids, best_methods_posthoc)
         },
@@ -972,12 +1072,14 @@ def run_pipeline(
         "nested_band_configs": {
             sid: bc for sid, bc in zip(subject_ids, nested_band_configs)
         },
-        "fbcsp_mean_accuracy": float(fbcsp_mean),
-        "riemann_mean_accuracy": float(riemann_mean),
-        "svm_mean_accuracy": float(svm_mean),
-        "ensemble_mean_accuracy": float(ensemble_mean),
-        "best_mean_accuracy": float(best_mean),
-        "best_std_accuracy": float(best_std),
+        "fbcsp_mean_accuracy": None if fbcsp_mean is None else float(fbcsp_mean),
+        "riemann_mean_accuracy": None if riemann_mean is None else float(riemann_mean),
+        "svm_mean_accuracy": None if svm_mean is None else float(svm_mean),
+        "ensemble_mean_accuracy": None
+        if ensemble_mean is None
+        else float(ensemble_mean),
+        "best_mean_accuracy": None if best_mean is None else float(best_mean),
+        "best_std_accuracy": None if best_std is None else float(best_std),
         "nested_mean_accuracy": float(nested_mean),
         "nested_std_accuracy": float(nested_std),
         "stacking_scores": {
@@ -1039,7 +1141,7 @@ def run_pipeline(
         )
         print(f"  All {len(subject_ids)} nested mean:      {nested_mean:.1%}")
 
-    results_path = output_dir / "training_results.json"
+    results_path = results_path or (output_dir / "training_results.json")
     runtime_seconds["total"] = time.perf_counter() - total_start
     results["runtime_seconds"] = runtime_seconds
 

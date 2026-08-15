@@ -28,6 +28,8 @@ from src.config import (
 )
 from src.eegnet import TORCH_AVAILABLE as EEGNET_TORCH_AVAILABLE
 from src.epochs import adaptive_threshold
+from src.alignment import apply_session_ea_train_only
+from src.composite_csp import extract_composite_fbcsp, pool_source_class_covariances
 from src.validation import (
     adaptive_fold_count,
     build_classwise_trial_groups,
@@ -1240,6 +1242,59 @@ def _evaluate_classifier(
     return scores[name]
 
 
+def _evaluate_ccsp_lda(
+    X_feat_train: np.ndarray,
+    X_feat_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    X_mc_train: np.ndarray,
+    X_mc_test: np.ndarray,
+    source_covs_by_band: dict[tuple[float, float], dict[int, np.ndarray]],
+    sfreq: float,
+    k_best: int,
+    lam: float,
+    bands: list[tuple[float, float]],
+    prefiltered_train: BandCache | None,
+    prefiltered_test: BandCache | None,
+) -> float:
+    """Score Composite-CSP + LDA on a fixed split (target trials only)."""
+    fbcsp_train, fbcsp_test = extract_composite_fbcsp(
+        X_mc_train,
+        X_mc_test,
+        y_train,
+        source_covs_by_band,
+        bands=bands,
+        lam=lam,
+        train_cache=prefiltered_train,
+        test_cache=prefiltered_test,
+        sfreq=sfreq,
+    )
+    if fbcsp_train.shape[1] == 0:
+        return 0.5
+    X_train_combined = np.hstack([fbcsp_train, X_feat_train])
+    X_test_combined = np.hstack([fbcsp_test, X_feat_test])
+    k_values = _safe_k_values(
+        n_features=X_train_combined.shape[1],
+        n_train_trials=len(y_train),
+        k_best=k_best,
+        k_candidates=DEFAULT_K_CANDIDATES,
+    )
+    if not k_values:
+        return 0.5
+    k = k_values[-1]
+    selector = SelectKBest(f_classif, k=k)
+    X_train_sel = selector.fit_transform(X_train_combined, y_train)
+    X_test_sel = selector.transform(X_test_combined)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_sel)
+    X_test_scaled = scaler.transform(X_test_sel)
+    _, counts = np.unique(y_train, return_counts=True)
+    priors = counts / counts.sum()
+    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
+    lda.fit(X_train_scaled, y_train)
+    return float(lda.score(X_test_scaled, y_test))
+
+
 def _evaluate_subject_nested_model_selection(
     X_features: np.ndarray,
     X_multichannel: np.ndarray,
@@ -1257,6 +1312,10 @@ def _evaluate_subject_nested_model_selection(
     max_blas_threads_per_worker: int,
     band_candidates: dict[str, list[tuple[float, float]]] | None = None,
     augmentation: AugmentationContext | None = None,
+    source_covs_by_band: dict[tuple[float, float], dict[int, np.ndarray]] | None = None,
+    composite_csp_lam: float = 0.3,
+    session_ids: np.ndarray | None = None,
+    session_level_ea: bool = False,
 ) -> tuple[float, str, str, float]:
     """Nested model-selection CV for a single subject.
 
@@ -1277,6 +1336,12 @@ def _evaluate_subject_nested_model_selection(
     ]
     classifier_names = [c for c in ALL_CLASSIFIERS if c != "stacking"]
     aug_enabled = augmentation is not None
+    use_session_ea = (
+        session_level_ea
+        and session_ids is not None
+        and not aug_enabled
+        and len(np.unique(session_ids)) >= 2
+    )
 
     all_bands = sorted(
         {band for bands in effective_candidates.values() for band in bands}
@@ -1286,7 +1351,10 @@ def _evaluate_subject_nested_model_selection(
         n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
         subject_band_cache = (
             _precompute_bandpassed(X_multichannel, sfreq, bands=all_bands)
-            if enable_band_cache and cache_scope == "subject" and not aug_enabled
+            if enable_band_cache
+            and cache_scope == "subject"
+            and not aug_enabled
+            and not use_session_ea
             else None
         )
         outer_splits = make_cv_splits(
@@ -1324,6 +1392,14 @@ def _evaluate_subject_nested_model_selection(
                 X_mc_otest = X_multichannel[outer_test_idx]
                 y_otrain = y[outer_train_idx]
                 y_otest = y[outer_test_idx]
+                if use_session_ea:
+                    assert session_ids is not None
+                    X_mc_otrain, X_mc_otest = apply_session_ea_train_only(
+                        X_multichannel,
+                        session_ids,
+                        outer_train_idx,
+                        outer_test_idx,
+                    )
 
             outer_train_cache: BandCache | None = None
             outer_test_cache: BandCache | None = None
@@ -1418,6 +1494,8 @@ def _evaluate_subject_nested_model_selection(
                     for clf_name in fbcsp_classifier_names:
                         inner_scores[(clf_name, band_cfg_name)] = []
                 inner_scores[("riemann", _RIEMANN_BAND_KEY)] = []
+                if source_covs_by_band:
+                    inner_scores[("ccsp", "standard")] = []
 
                 for inner_train_idx, inner_val_idx in inner_splits:
                     inner_train_cache: BandCache | None = None
@@ -1463,6 +1541,25 @@ def _evaluate_subject_nested_model_selection(
                         for clf_name, sc in fbcsp_scores.items():
                             inner_scores[(clf_name, band_cfg_name)].append(sc)
 
+                    if source_covs_by_band:
+                        inner_scores[("ccsp", "standard")].append(
+                            _evaluate_ccsp_lda(
+                                X_feat_otrain[inner_train_idx],
+                                X_feat_otrain[inner_val_idx],
+                                y_otrain[inner_train_idx],
+                                y_otrain[inner_val_idx],
+                                X_mc_otrain[inner_train_idx],
+                                X_mc_otrain[inner_val_idx],
+                                source_covs_by_band,
+                                sfreq,
+                                k_best,
+                                composite_csp_lam,
+                                FBCSP_BANDS,
+                                inner_train_cache,
+                                inner_val_cache,
+                            )
+                        )
+
                 inner_means = {
                     key: float(np.mean(scores)) if scores else 0.5
                     for key, scores in inner_scores.items()
@@ -1470,15 +1567,34 @@ def _evaluate_subject_nested_model_selection(
 
                 def _sort_key(
                     item: tuple[tuple[str, str], float],
-                ) -> tuple[float, int]:
-                    (_, band_name), mean_score = item
+                ) -> tuple[float, int, int]:
+                    (clf_name, band_name), mean_score = item
                     prefer_standard = 0 if band_name == "standard" else 1
-                    return (mean_score, -prefer_standard)
+                    prefer_existing = 0 if clf_name != "ccsp" else 1
+                    return (mean_score, -prefer_standard, -prefer_existing)
 
                 best_key = max(inner_means.items(), key=_sort_key)[0]
                 best_clf, best_band_key = best_key
 
-                if best_clf == "riemann":
+                if best_clf == "ccsp":
+                    best_band_cfg_name = "standard"
+                    assert source_covs_by_band is not None
+                    outer_score = _evaluate_ccsp_lda(
+                        X_feat_otrain,
+                        X_feat_otest,
+                        y_otrain,
+                        y_otest,
+                        X_mc_otrain,
+                        X_mc_otest,
+                        source_covs_by_band,
+                        sfreq,
+                        k_best,
+                        composite_csp_lam,
+                        FBCSP_BANDS,
+                        outer_train_cache,
+                        outer_test_cache,
+                    )
+                elif best_clf == "riemann":
                     best_band_cfg_name = "standard"
                     outer_score = _evaluate_classifier(
                         best_clf,
@@ -1562,6 +1678,10 @@ def train_nested_model_selection_cv(
     cache_scope: CacheScope = "subject",
     band_candidates: dict[str, list[tuple[float, float]]] | None = None,
     augmentation_by_subject: list[AugmentationContext | None] | None = None,
+    use_composite_csp: bool = False,
+    composite_csp_lam: float = 0.3,
+    session_level_ea: bool = False,
+    trial_session_ids_by_subject: list[np.ndarray] | None = None,
 ) -> tuple[list[float], float, float, list[str], list[str], list[float]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
@@ -1585,6 +1705,7 @@ def train_nested_model_selection_cv(
             np.ndarray | None,
             np.ndarray | None,
             AugmentationContext | None,
+            np.ndarray | None,
         ]
     ] = []
     for subj_idx, ((X_features, X_multichannel), y) in enumerate(
@@ -1603,7 +1724,32 @@ def train_nested_model_selection_cv(
             if augmentation_by_subject is not None
             else None
         )
-        payloads.append((X_features, X_multichannel, y, groups, trial_ptps, aug))
+        session_ids = (
+            trial_session_ids_by_subject[subj_idx]
+            if trial_session_ids_by_subject is not None
+            else None
+        )
+        payloads.append(
+            (X_features, X_multichannel, y, groups, trial_ptps, aug, session_ids)
+        )
+
+    source_covs_by_subject: list[
+        dict[tuple[float, float], dict[int, np.ndarray]] | None
+    ] = [None] * len(payloads)
+    if use_composite_csp and len(X_by_subject) >= 2:
+        source_caches = [
+            _precompute_bandpassed(X_mc, sfreq, bands=FBCSP_BANDS)
+            for _, X_mc in X_by_subject
+        ]
+        for i in range(len(X_by_subject)):
+            sources = [
+                (source_caches[j], y_by_subject[j])
+                for j in range(len(X_by_subject))
+                if j != i
+            ]
+            source_covs_by_subject[i] = pool_source_class_covariances(
+                sources, FBCSP_BANDS
+            )
 
     eval_kwargs = dict(
         sfreq=sfreq,
@@ -1616,6 +1762,8 @@ def train_nested_model_selection_cv(
         cache_scope=cache_scope,
         max_blas_threads_per_worker=max_blas_threads_per_worker,
         band_candidates=band_candidates,
+        composite_csp_lam=composite_csp_lam,
+        session_level_ea=session_level_ea,
     )
 
     if n_jobs == 1:
@@ -1627,9 +1775,19 @@ def train_nested_model_selection_cv(
                 trial_ptps=trial_ptps,
                 groups=groups,
                 augmentation=aug,
+                source_covs_by_band=source_covs,
+                session_ids=session_ids,
                 **eval_kwargs,
             )
-            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
+            for (
+                X_features,
+                X_multichannel,
+                y,
+                groups,
+                trial_ptps,
+                aug,
+                session_ids,
+            ), source_covs in zip(payloads, source_covs_by_subject)
         ]
     else:
         per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
@@ -1640,9 +1798,19 @@ def train_nested_model_selection_cv(
                 trial_ptps=trial_ptps,
                 groups=groups,
                 augmentation=aug,
+                source_covs_by_band=source_covs,
+                session_ids=session_ids,
                 **eval_kwargs,
             )
-            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
+            for (
+                X_features,
+                X_multichannel,
+                y,
+                groups,
+                trial_ptps,
+                aug,
+                session_ids,
+            ), source_covs in zip(payloads, source_covs_by_subject)
         )
 
     scores = [result[0] for result in per_subject_results]

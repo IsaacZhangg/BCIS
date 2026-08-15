@@ -12,7 +12,7 @@ from pyriemann.utils.geodesic import geodesic_riemann
 from pyriemann.utils.mean import mean_covariance
 from sklearn.linear_model import LogisticRegression
 
-from src.alignment import euclidean_align
+from src.alignment import apply_ea_transform, compute_ea_transform, euclidean_align
 
 # pyriemann.transfer availability probe (pyriemann 0.10 on 2026-04-17):
 # TLCenter and TLScale are available; TLStretch was renamed to TLScale in
@@ -312,6 +312,70 @@ def regularized_within_subject_cv(
 
         scores[sid] = float(np.mean(fold_scores))
 
+    return scores
+
+
+def leakfree_group_shrink_cv(
+    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    shrinkage_k: float = 20.0,
+    n_folds: int = 10,
+    random_state: int = 42,
+    split_strategy: str = "stratified_group",
+    groups_by_subject: dict[str, np.ndarray] | None = None,
+) -> dict[str, float]:
+    """Within-subject Riemann CV with group-mean shrinkage that never sees test trials.
+
+    Group mean is the Riemannian mean of *other* subjects' EA-aligned covariances.
+    Target EA is fit on the training fold only, then train and test covariances
+    are shrunk toward that source-only mean.
+    """
+    from src.validation import make_cv_splits
+
+    cov_estimator = Covariances(estimator="lwf")
+    raw_covs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    aligned_full: dict[str, np.ndarray] = {}
+    for sid in sorted(subjects.keys()):
+        _, X_mc, y = subjects[sid]
+        covs = cov_estimator.fit_transform(X_mc)
+        raw_covs[sid] = (covs, y)
+        aligned, _ = euclidean_align(covs)
+        aligned_full[sid] = aligned
+
+    scores: dict[str, float] = {}
+    sids = sorted(subjects.keys())
+    for sid in sids:
+        covs, y = raw_covs[sid]
+        others = [aligned_full[o] for o in sids if o != sid]
+        if not others:
+            scores[sid] = 0.5
+            continue
+        group_mean = mean_covariance(np.vstack(others), metric="riemann")
+        groups = None if groups_by_subject is None else groups_by_subject.get(sid)
+        splits = make_cv_splits(
+            y,
+            n_splits=n_folds,
+            strategy=split_strategy,  # type: ignore[arg-type]
+            groups=groups,
+            random_state=random_state,
+        )
+        n_train_typical = max(len(y) - max(1, len(y) // n_folds), 1)
+        alpha = shrinkage_k / (shrinkage_k + n_train_typical)
+        fold_scores = []
+        for train_idx, test_idx in splits:
+            if len(train_idx) < 2 or len(test_idx) < 1:
+                continue
+            ref_inv = compute_ea_transform(covs[train_idx])
+            train_aln = apply_ea_transform(covs[train_idx], ref_inv)
+            test_aln = apply_ea_transform(covs[test_idx], ref_inv)
+            train_shrunk = shrink_covariances(train_aln, group_mean, alpha)
+            test_shrunk = shrink_covariances(test_aln, group_mean, alpha)
+            ts = TangentSpace(metric="riemann")
+            X_train = ts.fit_transform(train_shrunk)
+            X_test = ts.transform(test_shrunk)
+            clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
+            clf.fit(X_train, y[train_idx])
+            fold_scores.append(float(clf.score(X_test, y[test_idx])))
+        scores[sid] = float(np.mean(fold_scores)) if fold_scores else 0.5
     return scores
 
 

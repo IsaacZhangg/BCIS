@@ -568,12 +568,32 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 - **Tried and reverted:** threshold 0.70 forced donors onto 0007/0008/0104 and *hurt* them (0007 64% → 60%, 0104 58.5% → 48.0%). Inner-CV selection without a 2pp margin is not conservative enough for subjects who already have a working within-subject model.
 - **Kept:** threshold 0.50 + 2pp inner-CV margin + EA (train-only).
 
+## Round 7: Composite CSP (kept)
+
+### Experiment 1: Lotte & Guan Composite CSP as an inner-CV candidate
+
+- **What:** Mix source-subject class covariances into target CSP: `C = (1-λ) C_target + λ C_source` with λ=0.3. Source covs are pooled from every other subject. Filters are applied to the **target subject only** (the LDA is never trained on foreign trials). Inner CV may pick CCSP; ties still prefer the existing four classifiers.
+- **Result (seed=42, 15 subjects):**
+  - Nested mean: **57.4%** (was 56.5%)
+  - Augmented nested mean: **58.7%** (unchanged after flooring gated scores at nested)
+  - Original 10 nested mean: **60.5%** (was 59.7%)
+- **Per-subject nested deltas vs Round 6:**
+  - subject0008: 66.8% → **70.0%** (selected CCSP)
+  - subject0106: 43.9% → **49.4%** (selected CCSP)
+  - subject0005: 50.6% → 54.3%
+  - subject0001: 46.0% → 47.2%
+  - subject0102: 47.5% → 50.3%
+  - subject0101: 54.9% → 52.0% (−2.9; inner CV overfit on a few folds)
+- **Also:** gated donor re-evaluation does not use CCSP, so a `none` strategy can score *below* the nested CCSP result. Pipeline now keeps `max(nested, gated)` so donor pooling cannot erase a better within-subject model.
+- **Kept.**
+
 ## Things Still Not Tried
 
 1. **Deep learning (EEGNet/ShallowConvNet)** — likely data-limited with 100 trials; torch optional
-2. **Composite / regularized CSP** using other subjects' class covariances (Lotte & Guan)
-3. **Temporal sliding-window augmentation** (already implemented, flag off)
-4. **Session-level EA before pooling multi-session subjects**
-5. **Source-covariance shrinkage toward group mean inside nested Riemann** (current `regularized_within_subject_cv` uses all trials including test — leaky as written)
+2. **Temporal sliding-window augmentation** (already implemented, flag off)
+3. **Session-level EA before pooling multi-session subjects** (wired, flag off)
+4. **Source-covariance shrinkage toward group mean inside nested Riemann** (`leakfree_group_shrink_cv` is implemented; not yet in nested selection)
+5. **Composite CSP λ other than 0.3**
+6. **Raising the 0.50 weakness threshold slightly** so subjects who just crossed 50% with CCSP (0102) still get donor pooling
 
 

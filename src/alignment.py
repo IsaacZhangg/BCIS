@@ -95,3 +95,33 @@ def align_trials_ea(
     """
     ref_inv_sqrt = compute_trial_ea_transform(X, ridge=ridge)
     return apply_ea_to_trials(X, ref_inv_sqrt), ref_inv_sqrt
+
+
+def apply_session_ea_train_only(
+    X: np.ndarray,
+    session_ids: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    ridge: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Align train/test trials per session using a train-only EA transform.
+
+    Sessions with fewer than 2 training trials are left unchanged. Single-session
+    recordings are a no-op so within-subject CSP is not globally whitened.
+    """
+    X_train = np.array(X[train_idx], copy=True)
+    X_test = np.array(X[test_idx], copy=True)
+    if len(np.unique(session_ids)) < 2:
+        return X_train, X_test
+    sess_train = session_ids[train_idx]
+    sess_test = session_ids[test_idx]
+    for sid in np.unique(session_ids):
+        tr_mask = sess_train == sid
+        te_mask = sess_test == sid
+        if int(tr_mask.sum()) < 2:
+            continue
+        ref_inv = compute_trial_ea_transform(X_train[tr_mask], ridge=ridge)
+        X_train[tr_mask] = apply_ea_to_trials(X_train[tr_mask], ref_inv)
+        if te_mask.any():
+            X_test[te_mask] = apply_ea_to_trials(X_test[te_mask], ref_inv)
+    return X_train, X_test

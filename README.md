@@ -12,17 +12,17 @@ A machine learning pipeline that reads EEG brain signals and classifies whether 
 
 ## Results
 
-**56.5% nested selection accuracy** (unbiased) across 15 subjects, up from 53.4% after combining both data folders with content-hash dedup and in-fold rejection (no test-set leakage). 4 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010. EA-gated donor augmentation for weak subjects: **58.7%**. Original 10-subject nested mean is unchanged at 59.7%. LOSO transfer mean: 51.3%.
+**57.4% nested selection accuracy** (unbiased) across 15 subjects after adding Composite CSP (Lotte & Guan) as an inner-CV candidate. 4 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010. EA-gated donor augmentation for weak subjects: **58.7%**. Original 10-subject nested mean is **60.5%**. LOSO transfer mean: 51.3%.
 
-The 15-subject mean is still pulled down by several BCI-illiterate recordings; the gain vs the previous 15-subject 53.4% comes from pooling extra sessions in `MI_DATA_NEW` without duplicating files or leaking artifact thresholds.
+The 15-subject mean is still pulled down by several BCI-illiterate recordings. Composite CSP mixes other subjects' class covariances into the target CSP filters (λ=0.3) without training the classifier on foreign trials.
 
 Top performers:
 
 | Subject | Accuracy | Best Classifier |
 |---------|----------|-----------------|
 | subject0006 | **85.0%** | FBCSP+LDA |
-| subject0010 | **81.1%** | FBCSP+LDA |
-| subject0008 | **66.8%** | FBCSP+LDA |
+| subject0010 | **81.1%** | Ensemble |
+| subject0008 | **70.0%** | Composite CSP |
 | subject0007 | **64.0%** | FBCSP+LDA |
 | subject0104 | **58.5%** | Ensemble |
 
@@ -31,27 +31,27 @@ Top performers:
 
 | Subject | FBCSP+LDA | Riemann | SVM | Ensemble | Nested (unbiased) | Selected |
 |---------|-----------|---------|-----|----------|--------------------|----------|
-| subject0001 | 48.5% | 39.1% | 49.3% | 45.7% | **46.0%** | FBCSP |
+| subject0001 | 48.5% | 39.1% | 49.3% | 45.7% | **47.2%** | SVM |
 | subject0002 | 43.9% | 41.7% | 41.6% | 34.2% | **37.7%** | SVM |
 | subject0004 | 42.8% | 30.9% | 62.9% | 47.2% | **55.7%** | SVM |
-| subject0005 | 56.8% | 54.6% | 55.6% | 55.5% | **50.6%** | SVM |
+| subject0005 | 56.8% | 54.6% | 55.6% | 55.5% | **54.3%** | SVM |
 | subject0006 | 90.0% | 39.0% | 82.0% | 85.0% | **85.0%** | FBCSP |
 | subject0007 | 65.0% | 44.0% | 50.0% | 60.0% | **64.0%** | FBCSP |
-| subject0008 | 69.8% | 52.8% | 57.2% | 63.4% | **66.8%** | FBCSP |
+| subject0008 | 69.8% | 52.8% | 57.2% | 63.4% | **70.0%** | CCSP |
 | subject0009 | 49.1% | 57.7% | 54.9% | 47.6% | **52.2%** | Riemann |
-| subject0010 | 78.0% | 60.3% | 85.3% | 83.1% | **81.1%** | FBCSP |
+| subject0010 | 78.0% | 60.3% | 85.3% | 83.1% | **81.1%** | Ensemble |
 | subject0011 | 53.6% | 60.4% | 49.9% | 49.6% | **57.9%** | Riemann |
 | subject0100 | 39.6% | 45.7% | 47.6% | 44.9% | **45.2%** | Ensemble |
-| subject0101 | 58.0% | 47.4% | 56.6% | 61.7% | **54.9%** | SVM |
-| subject0102 | 58.3% | 49.2% | 48.1% | 51.1% | **47.5%** | SVM |
+| subject0101 | 58.0% | 47.4% | 56.6% | 61.7% | **52.0%** | Ensemble |
+| subject0102 | 58.3% | 49.2% | 48.1% | 51.1% | **50.3%** | SVM |
 | subject0104 | 57.4% | 35.6% | 49.6% | 58.2% | **58.5%** | Ensemble |
-| subject0106 | 58.9% | 60.6% | 59.4% | 58.9% | **43.9%** | SVM |
+| subject0106 | 58.9% | 60.6% | 59.4% | 58.9% | **49.4%** | CCSP |
 
 </details>
 
 Signal quality with the consumer-grade 8-channel headset remains the primary bottleneck.
 
-## The Four Classifiers
+## The Classifiers
 
 | Classifier | What It Does |
 |------------|--------------|
@@ -59,6 +59,7 @@ Signal quality with the consumer-grade 8-channel headset remains the primary bot
 | **Riemannian** | Works directly with covariance matrices on a curved (Riemannian) manifold — no hand-crafted features needed |
 | **FBCSP+SVM** | Same spatial filtering as FBCSP+LDA, but uses a Support Vector Machine (RBF kernel) for classification |
 | **Ensemble** | Averages the confidence scores of LDA and SVM for a combined vote |
+| **Composite CSP** | Mixes other subjects' class covariances into the target CSP filters (Lotte & Guan, λ=0.3). Filters are applied to the target subject only |
 
 A **nested cross-validation** scheme (inner 7-fold selects the best classifier, outer 10-fold evaluates) ensures the reported accuracy is unbiased. Stacking (logistic regression on out-of-fold base probabilities) is reported as an extra metric and does not participate in model selection. EEGNet is optional and skipped unless PyTorch is installed.
 
@@ -129,6 +130,7 @@ BCIS/
 │   ├── epochs.py        # Cuts continuous EEG into trials
 │   ├── features.py      # Feature extraction (handcrafted + CSP)
 │   ├── train.py         # Classifier training, nested CV, model selection
+│   ├── composite_csp.py # Lotte & Guan Composite CSP
 │   ├── transfer.py      # Cross-subject transfer learning
 │   ├── alignment.py     # Shared Euclidean Alignment utility
 │   ├── validation.py    # CV split policies
