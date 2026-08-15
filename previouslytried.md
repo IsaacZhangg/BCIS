@@ -638,12 +638,26 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 - **Why it helps:** CCSP had nudged 0102 just over the old 0.50 cutoff, which dropped the donor boost. 0.52 restores pooling without forcing donors onto subjects who already have a working within-subject model.
 - **Kept.** Earlier 0.55/0.60 tests on the 10-subject set are a different regime (they pulled in people like 0007).
 
+## Round 11: Further methods after 61.3% augmented
+
+### Experiment 1: Weakness threshold 0.55 on the current 15-subject setup
+
+- **What:** 0.55 would also send subject0005 (54.3%) and subject0009 (52.2%) through the donor gate.
+- **Result:** Augmented nested still **61.3%**. 0005 and 0009 both gated `none` / no delta.
+- **Reverted** (keep 0.52; same aug mean with a tighter cutoff).
+
+### Experiment 2: Composite CSP sources with ≥80 trials only
+
+- **What:** Pool source class covariances only from other subjects with ≥80 trials (the original 10), dropping short MI_DATA_NEW recordings from the mix.
+- **Result:** Nested **58.0%** (was 59.3%). subject0008 70.0% → 65.7% and no longer selects CCSP.
+- **Why it hurts:** The extra sessions (especially 0101/0104, now signal subjects) are useful source covariances. Restricting to long recordings throws that away.
+- **Reverted.**
+
 ## Things Still Not Tried
 
-1. **Deep learning (EEGNet/ShallowConvNet)** — torch not installed; likely data-limited with ~100 trials
-2. **Weakness threshold 0.55 on the current 15-subject + session-EA setup** (would also pull in subject0005 at 54.3%)
-3. **Re-extracting handcrafted features after session EA** (currently only the multichannel CSP/Riemann tensors are aligned)
-4. **Wiring session EA into the all-models CV table** (nested already uses it; FBCSP+LDA column for 0101/0104 is still unaligned)
+1. **Deep learning (EEGNet/ShallowConvNet)** — torch not installed; ~100 trials per subject is below typical EEGNet sample needs
+2. **Re-extracting handcrafted features after session EA** — those features need baseline epochs, which are not in the nested multichannel tensor
+3. **Wiring session EA into the all-models CV table** — nested already uses it; would not change the nested metric
 
 
 
