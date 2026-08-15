@@ -587,13 +587,26 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 - **Also:** gated donor re-evaluation does not use CCSP, so a `none` strategy can score *below* the nested CCSP result. Pipeline now keeps `max(nested, gated)` so donor pooling cannot erase a better within-subject model.
 - **Kept.**
 
+## Round 8: Session-level Euclidean Alignment (kept)
+
+### Experiment 1: Train-only EA per recording before pooling sessions
+
+- **What:** For subjects with ≥2 recordings (0100, 0101, 0104), each outer fold fits He & Wu trial-level EA on that session's *training* trials and applies it to the session's train and test trials. Single-session subjects are unchanged (no-op).
+- **Result (seed=42, on top of Composite CSP):**
+  - Nested mean: **59.3%** (was 57.4%)
+  - Augmented nested mean: **60.3%** (was 58.7%)
+  - Original 10 nested mean: **60.5%** (unchanged — no extra sessions)
+  - New signal subjects: subject0101 (52.0% → **71.0%**), subject0104 (58.5% → **69.6%**)
+  - subject0100: 45.2% → 43.7% (−1.5, still chance)
+- **Why it helps:** Extra sessions were pooled as if they shared one covariance. Session EA removes headset placement / impedance drift so CSP sees a consistent spatial distribution. 0101 and 0104 become donors, which also lifts weak-subject pool_ea (subject0002 37.7% → 52.0%).
+- **Kept.**
+
 ## Things Still Not Tried
 
-1. **Deep learning (EEGNet/ShallowConvNet)** — likely data-limited with 100 trials; torch optional
+1. **Deep learning (EEGNet/ShallowConvNet)** — torch not installed; likely data-limited with 100 trials
 2. **Temporal sliding-window augmentation** (already implemented, flag off)
-3. **Session-level EA before pooling multi-session subjects** (wired, flag off)
-4. **Source-covariance shrinkage toward group mean inside nested Riemann** (`leakfree_group_shrink_cv` is implemented; not yet in nested selection)
-5. **Composite CSP λ other than 0.3**
-6. **Raising the 0.50 weakness threshold slightly** so subjects who just crossed 50% with CCSP (0102) still get donor pooling
+3. **Source-covariance shrinkage toward group mean inside nested Riemann** (`leakfree_group_shrink_cv` is implemented; not yet in nested selection)
+4. **Composite CSP λ other than 0.3**
+5. **Raising the 0.50 weakness threshold slightly** so subject0102 (50.3%) still gets donor pooling
 
 

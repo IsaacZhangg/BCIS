@@ -54,7 +54,7 @@ class TrainingConfig:
     aug_stride_sec: float = 0.25
     use_composite_csp: bool = True
     composite_csp_lam: float = 0.3
-    session_level_ea: bool = False
+    session_level_ea: bool = True
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""

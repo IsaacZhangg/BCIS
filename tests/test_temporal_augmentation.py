@@ -143,7 +143,7 @@ def test_config_defaults_are_off():
     cfg = TrainingConfig()
     assert cfg.temporal_augmentation is False
     assert cfg.use_composite_csp is True
-    assert cfg.session_level_ea is False
+    assert cfg.session_level_ea is True
     assert cfg.aug_window_sec == 2.5
     assert cfg.aug_stride_sec == 0.25
 
