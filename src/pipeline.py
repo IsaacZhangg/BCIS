@@ -2,7 +2,6 @@
 
 import json
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import joblib
@@ -11,9 +10,8 @@ import numpy as np
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR, TrainingConfig
 from src.data_loader import (
     CHANNELS,
-    get_recordings,
+    discover_recordings,
     get_recordings_by_subject,
-    get_recordings_flexible,
     load_recording,
 )
 from src.epochs import (
@@ -33,7 +31,7 @@ from src.features import (
 )
 from src.preprocess import preprocess_multichannel_eeg
 from src.runtime_output import configure_console_output
-from src.transfer import run_transfer_evaluation
+from src.transfer import gated_ea_augmented_nested_cv, run_transfer_evaluation
 from src.train import (
     AugmentationContext,
     FBCSP_BAND_CANDIDATES,
@@ -410,14 +408,23 @@ def run_pipeline(
     runtime_seconds: dict[str, float] = {}
     total_start = time.perf_counter()
 
-    # Step 1: Find recordings (scan primary + MI_DATA_NEW directories)
+    # Step 1: Find recordings across both data directories (content-hash dedup)
     step_start = time.perf_counter()
     _print_step(1, 5, "Finding recordings")
     min_trials = cfg.min_evaluation_trials
-    recordings = get_recordings(data_dir, min_trials=min_trials)
-    if MI_DATA_NEW_DIR.exists():
-        recordings.extend(get_recordings(MI_DATA_NEW_DIR, min_trials=min_trials))
-    print(f"Found {len(recordings)} recordings (min_trials={min_trials})")
+    data_dirs = [data_dir]
+    if MI_DATA_NEW_DIR.exists() and MI_DATA_NEW_DIR.resolve() != data_dir.resolve():
+        data_dirs.append(MI_DATA_NEW_DIR)
+    recordings_grouped = discover_recordings(
+        data_dirs,
+        min_trials=min_trials,
+        subject_merge=DEFAULT_SUBJECT_MERGE,
+    )
+    n_recordings = sum(len(paths) for paths in recordings_grouped.values())
+    print(
+        f"Found {n_recordings} unique recordings across {len(recordings_grouped)} "
+        f"subjects (min_trials={min_trials})"
+    )
 
     if holdout_fraction > 0:
         print(f"  Held-out fraction: {holdout_fraction:.0%}")
@@ -444,13 +451,7 @@ def run_pipeline(
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_holdout_by_subject: list[np.ndarray] = []
 
-    # Group recordings by subject, applying merge rules (e.g. subject0104 sessions)
-    recordings_grouped: dict[str, list[Path]] = defaultdict(list)
-    for rec_path in recordings:
-        raw_id = rec_path.parent.parent.name
-        subject_id = DEFAULT_SUBJECT_MERGE.get(raw_id, raw_id)
-        recordings_grouped[subject_id].append(rec_path)
-
+    # Grouped recordings already merged/deduped in discover_recordings
     for subject_id, rec_paths in sorted(recordings_grouped.items()):
         print(f"  Processing {subject_id} ({len(rec_paths)} recording(s))...")
 
@@ -590,82 +591,6 @@ def run_pipeline(
         raise ValueError("No valid subjects found")
     runtime_seconds["load_preprocess"] = time.perf_counter() - step_start
 
-    # Load additional subjects from MI_DATA_NEW (subject-level merge)
-    if MI_DATA_NEW_DIR.exists():
-        mi_new_grouped = get_recordings_flexible(MI_DATA_NEW_DIR, min_trials=20)
-
-        # Apply subject merge mapping
-        merged_grouped: dict[str, list[Path]] = {}
-        for sid, paths in mi_new_grouped.items():
-            canonical = DEFAULT_SUBJECT_MERGE.get(sid, sid)
-            merged_grouped.setdefault(canonical, []).extend(paths)
-
-        # Skip subjects already loaded from unicorn-data
-        for sid in sorted(merged_grouped.keys()):
-            if sid in subject_ids:
-                continue
-
-            rec_paths = merged_grouped[sid]
-            print(f"  Processing {sid} (MI_DATA_NEW, {len(rec_paths)} recording(s))...")
-
-            all_left: dict[str, list] = {ch: [] for ch in CHANNELS}
-            all_right: dict[str, list] = {ch: [] for ch in CHANNELS}
-
-            for rec_path in rec_paths:
-                data, events, rec_sfreq = load_recording(rec_path)
-                if abs(rec_sfreq - sfreq) > 1e-6:
-                    continue
-                preprocessed = preprocess_multichannel_eeg(data, sfreq)
-
-                left_pairs: dict[str, list] = {}
-                right_pairs: dict[str, list] = {}
-                for ch_idx, ch_name in enumerate(CHANNELS):
-                    signal = preprocessed[ch_idx]
-                    left, right = extract_left_right_epochs(
-                        signal,
-                        events,
-                        sfreq,
-                        task_duration=3.0,
-                        baseline_duration=1.0,
-                        skip_duration=0.25,
-                    )
-                    left_pairs[ch_name] = left
-                    right_pairs[ch_name] = right
-
-                # Per-recording artifact rejection
-                threshold = compute_rejection_threshold(left_pairs, right_pairs)
-                left_pairs, right_pairs, _, _ = reject_bad_epochs(
-                    left_pairs,
-                    right_pairs,
-                    threshold_uv=threshold,
-                )
-
-                for ch in CHANNELS:
-                    all_left[ch].extend(left_pairs[ch])
-                    all_right[ch].extend(right_pairs[ch])
-
-            n_left = len(all_left[CHANNELS[0]])
-            n_right = len(all_right[CHANNELS[0]])
-            if n_left == 0 or n_right == 0:
-                print(f"    Skipping {sid} — no clean epochs")
-                continue
-
-            print(
-                f"    Epochs: {n_left}L/{n_right}R (merged from {len(rec_paths)} recording(s))"
-            )
-
-            X_feat, X_mc, y = _pairs_to_features(all_left, all_right, sfreq)
-            trial_ptps = compute_trial_max_ptp(X_mc)
-
-            X_by_subject.append((X_feat, X_mc))
-            y_by_subject.append(y)
-            subject_ids.append(sid)
-            trial_ptps_by_subject.append(trial_ptps)
-            trial_groups_by_subject.append(
-                build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
-            )
-            augmentation_by_subject.append(None)
-
     # Step 3: Cross-validation (four classifiers + nested model selection)
     step_start = time.perf_counter()
     _print_step(3, 5, "Running cross-validation")
@@ -774,26 +699,23 @@ def run_pipeline(
         f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
     )
 
-    # Step 3b: Augmented nested CV for weak subjects (leakage-free)
+    # Step 3b: EA-gated augmented nested CV (leakage-free donor pooling)
     aug_nested_scores = None
     aug_nested_mean = None
     step_start_aug = time.perf_counter()
-    if MI_DATA_NEW_DIR.exists():
-        print("\n[3b/5] Augmented nested CV (cross-subject data for weak subjects)")
+    if cfg.ea_donor_augmentation and len(subject_ids) >= 2:
+        print("\n[3b/5] EA-gated augmented nested CV (combined datasets, no leakage)")
         from pyriemann.estimation import Covariances as _Cov
         from pyriemann.utils.mean import mean_covariance as _mean_cov
 
-        from src.transfer import load_all_subjects
+        donor_subjects = {
+            sid: (X_feat, X_mc, y_subj)
+            for sid, (X_feat, X_mc), y_subj in zip(
+                subject_ids, X_by_subject, y_by_subject
+            )
+        }
+        print(f"  Donor pool: {len(donor_subjects)} subjects (content-deduped)")
 
-        transfer_data_dirs = [data_dir, MI_DATA_NEW_DIR]
-        donor_subjects = load_all_subjects(
-            transfer_data_dirs,
-            sfreq=sfreq,
-            subject_merge=DEFAULT_SUBJECT_MERGE,
-        )
-        print(f"  Donor pool: {len(donor_subjects)} subjects")
-
-        # Compute raw Riemannian means for donor selection (pre-EA)
         _cov_est = _Cov(estimator="lwf")
         donor_means = {
             sid: _mean_cov(_cov_est.fit_transform(d[1]), metric="riemann")
@@ -801,36 +723,40 @@ def run_pipeline(
         }
 
         weakness_threshold = cfg.augmentation_weakness_threshold
-        aug_nested_scores = list(nested_scores)  # start with original scores
+        signal_donor_ids = {
+            sid for sid, score in zip(subject_ids, nested_scores) if score >= 0.60
+        }
+        print(
+            f"  Signal donors (>=60% nested): "
+            f"{', '.join(sorted(signal_donor_ids)) or 'none'}"
+        )
+        aug_nested_scores = list(nested_scores)
 
         for i, (sid, score) in enumerate(zip(subject_ids, nested_scores)):
             if score >= weakness_threshold:
                 continue
 
             target_feat, target_mc = X_by_subject[i]
-
-            aug_score, best_donor, best_dist = (
-                _augmented_nested_cv_with_donor_selection(
-                    target_feat,
-                    target_mc,
-                    y_by_subject[i],
-                    donor_subjects=donor_subjects,
-                    donor_means=donor_means,
-                    target_sid=sid,
-                    sfreq=sfreq,
-                    n_outer_folds=cfg.n_outer_folds,
-                    n_inner_folds=cfg.n_inner_folds,
-                    k_best=cfg.k_best,
-                    trial_ptps=trial_ptps_by_subject[i],
-                    split_strategy=cfg.split_strategy,
-                    groups=trial_groups_by_subject[i],
-                    random_state=cfg.random_state,
-                    cov_estimator=_cov_est,
-                )
+            aug_score, strategy, _ = gated_ea_augmented_nested_cv(
+                target_feat,
+                target_mc,
+                y_by_subject[i],
+                donor_subjects=donor_subjects,
+                donor_means=donor_means,
+                target_sid=sid,
+                sfreq=sfreq,
+                n_outer_folds=cfg.n_outer_folds,
+                n_inner_folds=cfg.n_inner_folds,
+                k_best=cfg.k_best,
+                trial_ptps=trial_ptps_by_subject[i],
+                split_strategy=cfg.split_strategy,
+                groups=trial_groups_by_subject[i],
+                random_state=cfg.random_state,
+                signal_donor_ids=signal_donor_ids,
             )
             aug_nested_scores[i] = aug_score
             print(
-                f"    {sid}: +{best_donor} (d={best_dist:.1f}) "
+                f"    {sid}: strategy={strategy} "
                 f"{score:.1%} -> {aug_score:.1%} ({aug_score - score:+.1%})"
             )
 
@@ -846,7 +772,7 @@ def run_pipeline(
         print(f"\n  Original nested mean:  {nested_mean:.1%}")
         print(f"  Augmented nested mean: {aug_nested_mean:.1%}")
         print(f"  Delta:                 {aug_nested_mean - nested_mean:+.1%}")
-        print("  (* = weak subject, augmented with closest neighbor)")
+        print("  (* = below threshold; inner CV gated none / nearest_ea / pool_ea)")
     runtime_seconds["augmented_nested_cv"] = time.perf_counter() - step_start_aug
 
     holdout_results: dict[str, float] = {}

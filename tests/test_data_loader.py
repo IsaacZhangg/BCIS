@@ -2,12 +2,35 @@
 
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 from src.data_loader import (
     get_complete_recordings,
     get_recordings,
     get_recordings_by_subject,
     load_recording,
 )
+
+
+def _write_synthetic_recording(path, seed: int = 0) -> None:
+    """Minimal phase-3 recording so discover_recordings can see it."""
+    sfreq = 250.0
+    n_left, n_right = 20, 20
+    n_trials = n_left + n_right
+    n_samples_per_trial = int(sfreq * 5)
+    n_total = 2000 + n_samples_per_trial * n_trials
+    rng = np.random.default_rng(seed)
+    data = rng.standard_normal((n_total, 8)) * 50
+    stim = np.zeros(n_total)
+    for i in range(n_trials):
+        event_idx = 1000 + i * n_samples_per_trial
+        stim[event_idx] = 31 if i < n_left else 32
+    df = pd.DataFrame(data, columns=["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"])
+    df["stim"] = stim
+    df["timestamps"] = np.arange(n_total) / sfreq
+    df = df[["timestamps", "Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8", "stim"]]
+    df.to_csv(path, index=False)
 
 
 def test_load_recording_returns_data_and_events():
@@ -107,3 +130,59 @@ def test_get_recordings_flexible_respects_min_trials():
     grouped = get_recordings_flexible(data_dir, min_trials=50)
     assert "subject0106" not in grouped
     assert "subject0104" not in grouped
+
+
+def test_discover_recordings_dedups_identical_copies(tmp_path):
+    """The same file copied into two roots is loaded once."""
+    from src.data_loader import discover_recordings
+
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    rec_a = dir_a / "subject0001" / "session000"
+    rec_b = dir_b / "subject0001" / "session000"
+    rec_a.mkdir(parents=True)
+    rec_b.mkdir(parents=True)
+    _write_synthetic_recording(rec_a / "recording.csv", seed=1)
+    _write_synthetic_recording(rec_b / "recording.csv", seed=1)
+
+    grouped = discover_recordings([dir_a, dir_b], min_trials=20)
+    assert list(grouped) == ["subject0001"]
+    assert len(grouped["subject0001"]) == 1
+
+
+def test_discover_recordings_merges_subject_aliases(tmp_path):
+    """Alias map pools recordings under the canonical subject id."""
+    from src.data_loader import discover_recordings
+
+    rec_a = tmp_path / "subject0100" / "session001"
+    rec_b = tmp_path / "subject0100_2" / "session001"
+    rec_a.mkdir(parents=True)
+    rec_b.mkdir(parents=True)
+    _write_synthetic_recording(rec_a / "recording.csv", seed=1)
+    _write_synthetic_recording(rec_b / "recording.csv", seed=2)
+
+    grouped = discover_recordings(
+        [tmp_path],
+        min_trials=20,
+        subject_merge={"subject0100_2": "subject0100"},
+    )
+    assert list(grouped) == ["subject0100"]
+    assert len(grouped["subject0100"]) == 2
+
+
+def test_discover_recordings_real_data_no_duplicate_subject0000():
+    """unicorn-data and MI_DATA_NEW copies of subject0000 are not double-counted."""
+    from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR
+    from src.data_loader import discover_recordings
+
+    grouped = discover_recordings(
+        [Path("data/unicorn-data"), MI_DATA_NEW_DIR],
+        min_trials=20,
+        subject_merge=DEFAULT_SUBJECT_MERGE,
+    )
+    assert "subject0000" not in grouped
+    assert "subject0100" in grouped
+    assert "subject0100_2" not in grouped
+    assert len(grouped["subject0100"]) == 2
+    assert "subject0101" in grouped
+    assert len(grouped["subject0101"]) == 2

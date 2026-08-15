@@ -535,7 +535,45 @@ Added subjects 0100-0102, 0104, 0106 from MI_DATA_NEW to the main pipeline. Subj
 - **Impact:** Mixed. Band optimization adds an extra dimension to inner CV model selection, which can cause overfitting on subjects with few inner-fold trials. The 15-subject nested mean is 53.4%, but this is not comparable to the previous 10-subject 62.0% because the new subjects (mostly at chance) drag the mean down.
 - **Conclusion:** Subject-specific band optimization shows some subjects naturally prefer different band configs, but the accuracy impact is modest. The main value is benchmark expansion (15 subjects) and discovering subject0101 as a new signal subject.
 
+## Round 6: Combine both data folders without leakage (kept)
+
+Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-hash dedup, in-fold rejection for every subject, and Euclidean-Alignment donor pooling gated by inner CV.
+
+### Experiment 1: Content-hash dedup + unified in-fold loading
+
+- **What:** `discover_recordings()` scans both roots, drops identical files (subject0000 copies), applies `subject0100_2` → `subject0100`, and routes every subject through the same in-fold artifact rejection path. Extra sessions for 0100/0101/0104 are pooled (64 trials) instead of globally rejected down to ~54.
+- **Result (seed=42, 15 subjects):**
+  - Nested mean: **56.5%** (was 53.4%)
+  - Augmented nested mean: **58.7%** (was 56.3%)
+  - Original 10 nested mean: **59.7%** (unchanged)
+  - 18 unique recordings, 15 subjects
+- **Per-subject nested (MI_DATA_NEW):**
+  - subject0100: 33.8% → 45.2%
+  - subject0101: 64.3% → 54.9% (old score was inflated by leaky global rejection)
+  - subject0102: 31.7% → 47.5%
+  - subject0104: 37.8% → 58.5%
+  - subject0106: 36.7% → 43.9%
+- **Why it helps:** More within-subject trials for multi-session people, and test-fold amplitudes no longer leak into the rejection threshold.
+- **Kept.**
+
+### Experiment 2: EA-gated donor augmentation (threshold 0.50)
+
+- **What:** For subjects with nested < 50%, inner CV chooses among target-only, nearest donor after He & Wu trial-level EA (transform fit on target train only), and a pool of up to 3 nearest signal donors. Ties / insufficient inner-CV margin keep target-only.
+- **Result:** Augmented mean 58.7%. Weak-subject deltas:
+  - subject0002: 37.7% → 48.8% (+11.2)
+  - subject0100: 45.2% → 58.4% (+13.2)
+  - subject0102: 47.5% → 57.8% (+10.3)
+  - subject0001: 46.0% → 45.6% (−0.4, within noise)
+  - subject0106: 43.9% → 43.9% (gate kept none)
+- **Tried and reverted:** threshold 0.70 forced donors onto 0007/0008/0104 and *hurt* them (0007 64% → 60%, 0104 58.5% → 48.0%). Inner-CV selection without a 2pp margin is not conservative enough for subjects who already have a working within-subject model.
+- **Kept:** threshold 0.50 + 2pp inner-CV margin + EA (train-only).
+
 ## Things Still Not Tried
 
-1. **Deep learning (EEGNet/ShallowConvNet)** — likely data-limited with 100 trials
+1. **Deep learning (EEGNet/ShallowConvNet)** — likely data-limited with 100 trials; torch optional
+2. **Composite / regularized CSP** using other subjects' class covariances (Lotte & Guan)
+3. **Temporal sliding-window augmentation** (already implemented, flag off)
+4. **Session-level EA before pooling multi-session subjects**
+5. **Source-covariance shrinkage toward group mean inside nested Riemann** (current `regularized_within_subject_cv` uses all trials including test — leaky as written)
+
 

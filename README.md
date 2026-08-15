@@ -12,9 +12,9 @@ A machine learning pipeline that reads EEG brain signals and classifies whether 
 
 ## Results
 
-**53.4% nested selection accuracy** (unbiased) across 15 subjects. 5 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010, subject0101. Augmented nested mean: 56.3%. LOSO transfer mean: 51.3%.
+**56.5% nested selection accuracy** (unbiased) across 15 subjects, up from 53.4% after combining both data folders with content-hash dedup and in-fold rejection (no test-set leakage). 4 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010. EA-gated donor augmentation for weak subjects: **58.7%**. Original 10-subject nested mean is unchanged at 59.7%. LOSO transfer mean: 51.3%.
 
-Note: the 15-subject mean is not comparable to the previous 10-subject 62.0% because the new subjects (mostly at chance) drag the mean down.
+The 15-subject mean is still pulled down by several BCI-illiterate recordings; the gain vs the previous 15-subject 53.4% comes from pooling extra sessions in `MI_DATA_NEW` without duplicating files or leaking artifact thresholds.
 
 Top performers:
 
@@ -23,8 +23,8 @@ Top performers:
 | subject0006 | **85.0%** | FBCSP+LDA |
 | subject0010 | **81.1%** | FBCSP+LDA |
 | subject0008 | **66.8%** | FBCSP+LDA |
-| subject0101 | **64.3%** | Ensemble |
 | subject0007 | **64.0%** | FBCSP+LDA |
+| subject0104 | **58.5%** | Ensemble |
 
 <details>
 <summary>Full results table</summary>
@@ -35,17 +35,17 @@ Top performers:
 | subject0002 | 43.9% | 41.7% | 41.6% | 34.2% | **37.7%** | SVM |
 | subject0004 | 42.8% | 30.9% | 62.9% | 47.2% | **55.7%** | SVM |
 | subject0005 | 56.8% | 54.6% | 55.6% | 55.5% | **50.6%** | SVM |
-| subject0006 | 90.0% | 39.0% | 87.0% | 85.0% | **85.0%** | FBCSP |
-| subject0007 | 64.0% | 44.0% | 52.0% | 62.0% | **64.0%** | FBCSP |
+| subject0006 | 90.0% | 39.0% | 82.0% | 85.0% | **85.0%** | FBCSP |
+| subject0007 | 65.0% | 44.0% | 50.0% | 60.0% | **64.0%** | FBCSP |
 | subject0008 | 69.8% | 52.8% | 57.2% | 63.4% | **66.8%** | FBCSP |
 | subject0009 | 49.1% | 57.7% | 54.9% | 47.6% | **52.2%** | Riemann |
 | subject0010 | 78.0% | 60.3% | 85.3% | 83.1% | **81.1%** | FBCSP |
 | subject0011 | 53.6% | 60.4% | 49.9% | 49.6% | **57.9%** | Riemann |
-| subject0100 | 44.3% | 22.3% | 31.2% | 42.2% | **33.8%** | SVM |
-| subject0101 | 66.0% | 58.7% | 64.7% | 64.7% | **64.3%** | Ensemble |
-| subject0102 | 56.7% | 38.3% | 46.7% | 50.0% | **31.7%** | Riemann |
-| subject0104 | 39.7% | 32.0% | 45.7% | 43.7% | **37.8%** | SVM |
-| subject0106 | 36.7% | 40.0% | 46.7% | 43.3% | **36.7%** | FBCSP |
+| subject0100 | 39.6% | 45.7% | 47.6% | 44.9% | **45.2%** | Ensemble |
+| subject0101 | 58.0% | 47.4% | 56.6% | 61.7% | **54.9%** | SVM |
+| subject0102 | 58.3% | 49.2% | 48.1% | 51.1% | **47.5%** | SVM |
+| subject0104 | 57.4% | 35.6% | 49.6% | 58.2% | **58.5%** | Ensemble |
+| subject0106 | 58.9% | 60.6% | 59.4% | 58.9% | **43.9%** | SVM |
 
 </details>
 
@@ -157,7 +157,8 @@ The `stim` column encodes events as `phase * 10 + movement` (phase 3 = motor ima
 
 - **In-fold artifact rejection** — Thresholds computed from training data only, preventing data leakage
 - **Nested CV** — Separates model selection from evaluation so accuracy numbers are honest
-- **In-fold donor selection** — Cross-subject augmentation never sees the test fold
+- **Content-hash dedup** — Identical recordings copied into both data folders are loaded once
+- **In-fold donor selection + Euclidean Alignment** — Cross-subject augmentation never sees the test fold; EA is fit on target training trials only; inner CV must beat target-only by 2pp before donors are used
 - **Subject-level parallelism** — Each subject processed independently via joblib
 - **Bandpass caching** — Filtered signals precomputed once per subject, reused across folds
 

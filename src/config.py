@@ -41,6 +41,7 @@ class TrainingConfig:
     enable_band_cache: bool = True
     cache_scope: CacheScope = "subject"
     augmentation_weakness_threshold: float = 0.50
+    ea_donor_augmentation: bool = True
     fbcsp_band_candidates: tuple[str, ...] = ("standard", "high_mu", "wide_mu")
     min_evaluation_trials: int = 30
     # Optimized Riemannian flags (defaults preserve the 60.1% baseline).
