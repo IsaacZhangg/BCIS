@@ -12,7 +12,7 @@ A machine learning pipeline that reads EEG brain signals and classifies whether 
 
 ## Results
 
-**59.3% nested selection accuracy** (unbiased) across 15 subjects after Composite CSP plus per-session Euclidean Alignment on multi-session recordings. 6 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010, subject0101, subject0104. EA-gated donor augmentation for weak subjects: **60.3%**. Original 10-subject nested mean is **60.5%**. LOSO transfer mean: 51.3%.
+**59.3% nested selection accuracy** (unbiased) across 15 subjects after Composite CSP plus per-session Euclidean Alignment on multi-session recordings. 6 of 15 above chance (>=60%): subject0006, subject0007, subject0008, subject0010, subject0101, subject0104. EA-gated donor augmentation for weak subjects (nested < 52%): **61.3%**. Original 10-subject nested mean is **60.5%**. LOSO transfer mean: 51.3%.
 
 The 15-subject mean is still pulled down by several BCI-illiterate recordings. Composite CSP mixes other subjects' class covariances into the target CSP filters (λ=0.3) without training the classifier on foreign trials. Session-level EA (train-fold only) removes headset/session drift before pooling extra recordings for 0100/0101/0104.
 

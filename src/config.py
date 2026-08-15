@@ -40,7 +40,7 @@ class TrainingConfig:
     max_blas_threads_per_worker: int = 1
     enable_band_cache: bool = True
     cache_scope: CacheScope = "subject"
-    augmentation_weakness_threshold: float = 0.50
+    augmentation_weakness_threshold: float = 0.52
     ea_donor_augmentation: bool = True
     fbcsp_band_candidates: tuple[str, ...] = ("standard", "high_mu", "wide_mu")
     min_evaluation_trials: int = 30

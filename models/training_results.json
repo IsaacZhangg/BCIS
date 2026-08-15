@@ -24,7 +24,7 @@
     "max_blas_threads_per_worker": 1,
     "enable_band_cache": true,
     "cache_scope": "subject",
-    "augmentation_weakness_threshold": 0.5,
+    "augmentation_weakness_threshold": 0.52,
     "ea_donor_augmentation": true,
     "fbcsp_band_candidates": [
       "standard",
@@ -345,11 +345,11 @@
     "subject0011": 0.5789682539682539,
     "subject0100": 0.44071428571428567,
     "subject0101": 0.7095238095238094,
-    "subject0102": 0.5027777777777778,
+    "subject0102": 0.6583333333333333,
     "subject0104": 0.6961904761904761,
     "subject0106": 0.4944444444444445
   },
-  "augmented_nested_mean": 0.6027275132275134,
+  "augmented_nested_mean": 0.6130978835978838,
   "original_subjects": [
     "subject0001",
     "subject0002",
@@ -364,7 +364,7 @@
   ],
   "original_nested_mean": 0.6050476190476191,
   "original_nested_std": 0.1400966217618231,
-  "original_augmented_nested_mean": 0.6197261904761905,
+  "original_augmented_nested_mean": 0.6197261904761906,
   "trial_counts": {
     "subject0001": 100,
     "subject0002": 100,

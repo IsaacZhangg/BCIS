@@ -601,12 +601,51 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 - **Why it helps:** Extra sessions were pooled as if they shared one covariance. Session EA removes headset placement / impedance drift so CSP sees a consistent spatial distribution. 0101 and 0104 become donors, which also lifts weak-subject pool_ea (subject0002 37.7% → 52.0%).
 - **Kept.**
 
+## Round 9: Methods that did not beat 59.3% nested
+
+### Experiment 1: Temporal sliding-window augmentation (flag on)
+
+- **What:** Enabled `temporal_augmentation` (2.5s windows, 0.25s stride on train; 2.5s center crop at test). As implemented, the augmented nested path skips Composite CSP, session EA, and band-config search.
+- **Result:** Nested **58.6%** (was 59.3%). Original 10 nested 61.0% (was 60.5%).
+- **Why it hurts / is confounded:** Test windows are 2.5s vs the proven 3.0s `task_duration`, and the aug code path drops the two methods that just raised the 15-subject mean (CCSP + session EA). Multi-session subjects 0101/0104 lose their session-EA gains.
+- **Reverted** (flag remains off).
+
+### Experiment 2: Composite CSP λ=0.1
+
+- **What:** Same CCSP + session EA as Round 8, but λ=0.1 (less source mixing).
+- **Result:** Nested **58.5%** (was 59.3%). subject0008 70.0% → 67.8% and no longer selects CCSP.
+- **Reverted** (keep λ=0.3).
+
+### Experiment 3: Composite CSP λ=0.5
+
+- **What:** Same as Round 8 with λ=0.5 (more source mixing).
+- **Result:** Nested **58.2%** (was 59.3%). subject0106 49.4% → 39.7%.
+- **Reverted** (keep λ=0.3).
+
+### Experiment 4: Leak-free group-mean Riemann shrinkage
+
+- **What:** Shrink each subject's EA-aligned covariances toward the Riemannian mean of *other* subjects only; target EA fit on the training fold.
+- **Result:** Leak-free mean **46.5%**, leaky `regularized_within_subject_cv` **46.7%**. Both below Riemannian all-models (47.9%) and nested (59.3%).
+- **Why it fails:** Group-mean shrinkage pulls strong motor-imagery subjects toward a chance-level centroid.
+- **Not wired into nested selection.**
+
+## Round 10: Weakness threshold 0.52 (kept)
+
+### Experiment 1: Include subject0102 in EA-gated donor pooling
+
+- **What:** Raise `augmentation_weakness_threshold` from 0.50 to 0.52 so subject0102 (nested 50.3%) is still treated as weak. Nested CV is unchanged. Only 0102 is in the (0.50, 0.52] band; 0005 (54.3%) and 0004 (55.7%) stay target-only.
+- **Result:** Augmented nested **61.3%** (was 60.3%). subject0102 50.3% → **65.8%** via `pool_ea` (+15.6). Nested mean still **59.3%**.
+- **Why it helps:** CCSP had nudged 0102 just over the old 0.50 cutoff, which dropped the donor boost. 0.52 restores pooling without forcing donors onto subjects who already have a working within-subject model.
+- **Kept.** Earlier 0.55/0.60 tests on the 10-subject set are a different regime (they pulled in people like 0007).
+
 ## Things Still Not Tried
 
-1. **Deep learning (EEGNet/ShallowConvNet)** — torch not installed; likely data-limited with 100 trials
-2. **Temporal sliding-window augmentation** (already implemented, flag off)
-3. **Source-covariance shrinkage toward group mean inside nested Riemann** (`leakfree_group_shrink_cv` is implemented; not yet in nested selection)
-4. **Composite CSP λ other than 0.3**
-5. **Raising the 0.50 weakness threshold slightly** so subject0102 (50.3%) still gets donor pooling
+1. **Deep learning (EEGNet/ShallowConvNet)** — torch not installed; likely data-limited with ~100 trials
+2. **Weakness threshold 0.55 on the current 15-subject + session-EA setup** (would also pull in subject0005 at 54.3%)
+3. **Re-extracting handcrafted features after session EA** (currently only the multichannel CSP/Riemann tensors are aligned)
+4. **Wiring session EA into the all-models CV table** (nested already uses it; FBCSP+LDA column for 0101/0104 is still unaligned)
+
+
+
 
 
