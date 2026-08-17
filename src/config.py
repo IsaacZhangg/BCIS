@@ -44,7 +44,7 @@ class TrainingConfig:
     ea_donor_augmentation: bool = True
     fbcsp_band_candidates: tuple[str, ...] = ("standard", "high_mu", "wide_mu")
     min_evaluation_trials: int = 30
-    # Optimized Riemannian flags (defaults preserve the 60.1% baseline).
+    # Riemannian knobs (defaults: broadband LWF + TangentSpace + LR).
     riemannian_band: tuple[float, float] | None = None
     riemannian_classifier: RiemannianClassifier = "tangent_lr"
     use_pyriemann_transfer: bool = False

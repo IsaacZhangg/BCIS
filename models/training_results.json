@@ -44,9 +44,10 @@
   },
   "models": [
     "FBCSP+LDA (nested k)",
-    "Riemannian (8-30Hz + OAS+TangentSpace+LR)",
+    "Riemannian (LWF+TangentSpace+LR)",
     "FBCSP+SVM (nested k+C)",
-    "Ensemble (soft voting)"
+    "Ensemble (soft voting)",
+    "Composite CSP (Lotte & Guan, λ=0.3)"
   ],
   "n_subjects": 15,
   "fbcsp_scores": {

@@ -830,10 +830,10 @@ def train_within_subject_cv_riemann(
     """Within-subject CV using Riemannian tangent-space classifier.
 
     Per fold:
-    1. Bandpass filter 8-30Hz (mu/beta bands)
-    2. Covariances(estimator='oas') — shrinkage covariance estimation
+    1. Broadband input (1–40 Hz preprocess; optional `riemannian_band` is off by default)
+    2. Covariances(estimator='lwf') — Ledoit-Wolf shrinkage
     3. TangentSpace(metric='riemann') — project SPD matrices to tangent space
-    4. LogisticRegression(C=1.0, solver='lbfgs') — classify
+    4. LogisticRegression(C=0.1, solver='lbfgs') — classify
 
     Args:
         X_by_subject: List of multichannel EEG arrays (n_trials, n_channels, n_samples).

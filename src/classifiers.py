@@ -33,7 +33,7 @@ from src.band_cache import (
     precompute_bandpassed,
 )
 
-DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25)
+DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25, 30)
 
 
 class ClassifierAdapter(ABC):

@@ -1,55 +1,78 @@
 # BCIS Auto-Research Program
 
 ## Objective
-Maximize augmented nested CV accuracy for left/right motor imagery classification using 8-channel consumer EEG (g.tec Unicorn).
+Maximize **augmented nested CV** accuracy for left/right motor imagery classification using 8-channel consumer EEG (g.tec Unicorn).
 
 ## Primary Metric
-**Augmented nested CV mean accuracy** — the unbiased estimate of pick-best-classifier accuracy, with cross-subject donor augmentation for weak subjects.
+**Augmented nested CV mean accuracy** — unbiased nested selection (inner 7-fold picks the classifier, outer 10-fold evaluates), with leakage-free Euclidean-Alignment donor pooling for weak subjects (nested < 52%). Nested mean is reported alongside it; donor pooling must not erase a better within-subject model (`max(nested, gated)`).
 
-## Baseline
-- Nested CV: 62.0% (seed=42), true mean 58.9% ± 1.4%
-- Augmented nested CV: 64.6% (seed=42)
-- Parameter tuning ceiling reached (25+ experiments, all neutral or negative)
+## Current Result (seed=42, 15 subjects)
+
+| Metric | Value |
+|--------|-------|
+| Nested CV | **59.3%** |
+| Augmented nested CV | **61.3%** |
+| Original 10-subject nested | **60.5%** |
+| LOSO transfer | **51.3%** |
+| Signal subjects (≥60%) | 0006, 0007, 0008, 0010, 0101, 0104 |
+
+Historical 10-subject parameter-tuning ceiling (before MI_DATA_NEW + Composite CSP + session EA): nested 62.0% / augmented 64.6% at seed=42, true mean 58.9% ± 1.4% across 10 seeds. That 10-subject 62.0% is **not** the current headline number.
+
+Full per-subject scores live in `models/training_results.json`. Experiment narrative lives in `previouslytried.md`.
 
 ## Constraints
 1. **Fixed evaluation**: nested CV structure (10 outer, 7 inner folds) must not change
-2. **No data leakage**: all thresholds/models fitted on training folds only
-3. **Fixed data**: same recordings, same subjects — cannot collect more data
-4. **Dependencies**: only packages in pyproject.toml (may add new ones if justified)
-5. **Reproducibility**: seed=42 for all experiments, document everything
+2. **No data leakage**: thresholds, EA transforms, donor choice, and models fitted on training folds only
+3. **Fixed recordings**: same files under `data/unicorn-data/` and `data/MI_DATA_NEW/`
+4. **Dependencies**: packages in `pyproject.toml` (new ones only if justified)
+5. **Reproducibility**: seed=42 for reported runs; document every experiment
+
+## Current Configuration (kept)
+
+- Epochs: 1.0 s baseline, 0.25 s skip, 3.0 s task; in-fold PTP rejection (`n_mad=3.5`)
+- Classifiers in nested selection: FBCSP+LDA, Riemannian (LWF + TangentSpace + LR), FBCSP+SVM (C=20), Ensemble, Composite CSP (λ=0.3)
+- Inner CV also picks FBCSP band config: `standard` / `high_mu` / `wide_mu`
+- Session-level EA on multi-session subjects (0100, 0101, 0104), train-fold only
+- Donor augmentation: weakness threshold **0.52**, 2 pp inner-CV margin, nearest Riemannian neighbor / pool_ea
+- `min_evaluation_trials=30` (skips 0000, 0003, 0105)
 
 ## Modifiable Files
-- `src/train.py` — classifiers, model selection, feature pipelines
+- `src/train.py` — classifiers, nested CV, model selection
 - `src/features.py` — handcrafted feature extraction
-- `src/config.py` — hyperparameters
-- `src/epochs.py` — windowing, artifact rejection
-- `src/preprocess.py` — preprocessing pipeline
-- `src/pipeline.py` — orchestration (to connect new components)
+- `src/config.py` — hyperparameters (`TrainingConfig`)
+- `src/epochs.py` / `src/rejection.py` — windowing and in-fold rejection
+- `src/preprocess.py` — filtering (ASR exists, not default)
+- `src/composite_csp.py` / `src/alignment.py` / `src/transfer.py` — CCSP, EA, donor pooling
+- `src/pipeline.py` — orchestration
 
 ## Fixed Files
-- `src/data_loader.py` — raw data loading
+- `src/data_loader.py` — raw loading, content-hash dedup, subject aliases
 - `src/validation.py` — CV split mechanics
-- `tests/` — must still pass
+- `tests/` — must still pass (`uv run pytest tests/`)
 
-## Experiments Completed
+## Experiments (summary)
 
-| # | Experiment | Nested | Augmented | Status |
-|---|-----------|--------|-----------|--------|
-| 1 | LightGBM 5th classifier | 62.0% | 63.8% | Reverted |
-| 2 | ASR preprocessing | 60.4% | 62.0% | Reverted |
-| 3a | Augmentation threshold 0.55 | 62.0% | 64.6% | Reverted (no change) |
-| 3b | Augmentation threshold 0.60 | 62.0% | 64.2% | Reverted |
-| 5 | Early/late ERD temporal features | 60.2% | 59.5% | Reverted |
-| 6 | Multi-donor augmentation (k=2) | 62.0% | 63.5% | Reverted |
+| Round | What | Nested | Augmented | Status |
+|-------|------|--------|-----------|--------|
+| 1–3 | Parameter tuning (10 subjects) | 62.0% | 64.6% | Kept as 10-subject config |
+| 4 | Structural (LightGBM, ASR, PLV, …) | ≤62.3% | ≤64.6% | All reverted |
+| 5 | Add MI_DATA_NEW + FBCSP band search | 53.4% | — | Kept (15-subject set) |
+| 6 | Unified load, dedup, EA-gated donors | 56.5% | 58.7% | Kept |
+| 7 | Composite CSP (λ=0.3) | 57.4% | 58.7% | Kept |
+| 8 | Session-level EA | **59.3%** | 60.3% | Kept |
+| 9 | Temporal aug / CCSP λ=0.1, 0.5 / group-mean shrink | ≤58.6% | — | Reverted |
+| 10 | Weakness threshold 0.50 → **0.52** | 59.3% | **61.3%** | Kept |
+| 11 | Threshold 0.55; CCSP sources ≥80 trials | 58.0% / same aug | 61.3% | Reverted |
+
+Details and failed parameter sweeps: `previouslytried.md`. Machine-readable log: `research/results.tsv`.
 
 ## Conclusion
 
-After 6 structural experiments (on top of 25+ parameter experiments in previouslytried.md),
-the **64.6% augmented nested CV** is confirmed as the algorithmic ceiling for this data.
+The current algorithmic ceiling on this dataset is **59.3% nested / 61.3% augmented** (15 subjects, seed=42). Composite CSP, session EA, and the 0.52 donor cutoff are the methods that moved the 15-subject mean after the original 10-subject parameter search.
 
-The bottleneck is hardware and subject-level signal quality, not the algorithm:
-- 4 of 10 subjects are effectively BCI-illiterate (~50% accuracy)
+The bottleneck is still hardware and subject-level signal quality:
+- 9 of 15 subjects remain at chance on nested CV
 - 8-channel dry electrodes limit spatial resolution
-- ~100 trials per subject limit covariance estimation quality
+- Several MI_DATA_NEW recordings have only 32–64 trials
 
-Further improvement requires: more data, better hardware, or subject training protocols.
+Further improvement needs more data, better hardware, or subject training protocols — not another small hyperparameter tweak.

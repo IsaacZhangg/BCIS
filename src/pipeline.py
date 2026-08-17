@@ -1037,9 +1037,10 @@ def run_pipeline(
         "training_config": cfg.to_dict(),
         "models": [
             "FBCSP+LDA (nested k)",
-            "Riemannian (8-30Hz + OAS+TangentSpace+LR)",
+            "Riemannian (LWF+TangentSpace+LR)",
             "FBCSP+SVM (nested k+C)",
             "Ensemble (soft voting)",
+            "Composite CSP (Lotte & Guan, λ=0.3)",
         ],
         "n_subjects": len(subject_ids),
         "fbcsp_scores": {

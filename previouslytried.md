@@ -3,41 +3,52 @@
 This document records every parameter experiment conducted during accuracy optimization of the BCI motor imagery classifier. Use this to avoid re-testing things that have already been explored.
 
 **Starting baseline (before any changes):** 43.9% nested, 45.4% FBCSP+LDA, 48.4% best-of
-**Final result (seed=42):** 62.0% nested, 59.3% FBCSP+LDA, 63.8% best-of
-**Mean across 10 seeds:** 58.9% ± 1.4% nested (true expected accuracy)
+**10-subject parameter-tuning result (seed=42):** 62.0% nested, 59.3% FBCSP+LDA, 63.8% best-of
+**Mean across 10 seeds (10-subject config):** 58.9% ± 1.4% nested
+**Current 15-subject result (seed=42):** 59.3% nested, 61.3% augmented nested, original-10 nested 60.5%
+
+The 10-subject 62.0%/64.6% numbers in Rounds 1–4 are historical. Current defaults are Composite CSP + session EA + donor threshold 0.52 on 15 subjects. See `research/program.md`.
 
 ## Current Best Configuration
 
 
-| Parameter                   | Value                                                          | File          | Line     |
-| --------------------------- | -------------------------------------------------------------- | ------------- | -------- |
-| FBCSP_BANDS                 | (8,10),(10,12),(12,14),(14,16),(16,18),(18,20),(20,24),(24,30) | train.py      | 20-29    |
-| N_CSP_COMPONENTS            | 3                                                              | train.py      | 31       |
-| CSP reg                     | "oas"                                                          | train.py      | 68       |
-| DEFAULT_K_CANDIDATES        | (3, 5, 8, 10, 15, 20, 25)                                      | train.py      | 32       |
-| Riemannian covariance       | "lwf"                                                          | train.py      | multiple |
-| SVM C                       | 20.0                                                           | train.py      | multiple |
-| SVM kernel                  | "rbf"                                                          | train.py      | multiple |
-| SVM gamma                   | "scale"                                                        | train.py      | multiple |
-| Riemannian LR C             | 0.1                                                            | train.py      | multiple |
-| LDA shrinkage               | "auto"                                                         | train.py      | multiple |
-| LDA solver                  | "lsqr"                                                         | train.py      | multiple |
-| n_mad (artifact rejection)  | 3.5                                                            | train.py      | 109      |
-| flat_uv                     | 1.0                                                            | train.py      | 110      |
-| task_duration               | 3.0                                                            | pipeline.py   | ~104     |
-| baseline_duration           | 1.0                                                            | pipeline.py   | ~105     |
-| skip_duration               | 0.25                                                           | pipeline.py   | ~106     |
-| n_folds                     | 10                                                             | config.py     | 20       |
-| n_outer_folds               | 10                                                             | config.py     | 21       |
-| n_inner_folds               | 7                                                              | config.py     | 22       |
-| k_best                      | 10                                                             | config.py     | 23       |
-| trial_group_size            | 1                                                              | config.py     | 26       |
-| random_state                | 42                                                             | config.py     | 27       |
-| LDA inner k-selection folds | 3                                                              | train.py      | ~269     |
-| Handcrafted features        | 45                                                             | features.py   | —        |
-| Preprocessing bandpass      | 1-40 Hz                                                        | preprocess.py | 11-12    |
-| Notch filter                | 60 Hz                                                          | preprocess.py | —        |
-| Welch nperseg               | min(sfreq/2, len(epoch)//2)                                    | features.py   | multiple |
+| Parameter                          | Value                                                          | File                         |
+| ---------------------------------- | -------------------------------------------------------------- | ---------------------------- |
+| FBCSP_BANDS                        | (8,10),(10,12),(12,14),(14,16),(16,18),(18,20),(20,24),(24,30) | train.py, band_cache.py      |
+| FBCSP_BAND_CANDIDATES              | standard / high_mu / wide_mu                                   | train.py, config.py          |
+| N_CSP_COMPONENTS                   | 3                                                              | train.py, band_cache.py      |
+| CSP reg                            | "oas"                                                          | train.py                     |
+| DEFAULT_K_CANDIDATES               | (3, 5, 8, 10, 15, 20, 25, 30)                                  | train.py, config.py          |
+| Riemannian covariance              | "lwf" (broadband; `riemannian_band=None`)                      | train.py                     |
+| SVM C                              | 20.0                                                           | train.py                     |
+| SVM kernel                         | "rbf"                                                          | train.py                     |
+| SVM gamma                          | "scale"                                                        | train.py                     |
+| Riemannian LR C                    | 0.1                                                            | train.py                     |
+| LDA shrinkage                      | "auto"                                                         | train.py                     |
+| LDA solver                         | "lsqr"                                                         | train.py                     |
+| n_mad (in-fold artifact rejection) | 3.5                                                            | rejection.py, train.py       |
+| flat_uv                            | 1.0                                                            | rejection.py                 |
+| task_duration                      | 3.0                                                            | pipeline.py                  |
+| baseline_duration                  | 1.0                                                            | pipeline.py                  |
+| skip_duration                      | 0.25                                                           | pipeline.py                  |
+| n_folds / n_outer_folds            | 10                                                             | config.py                    |
+| n_inner_folds                      | 7                                                              | config.py                    |
+| k_best                             | 10                                                             | config.py                    |
+| split_strategy                     | stratified_group                                               | config.py                    |
+| trial_group_size                   | 1                                                              | config.py                    |
+| random_state                       | 42                                                             | config.py                    |
+| min_evaluation_trials              | 30                                                             | config.py                    |
+| augmentation_weakness_threshold    | 0.52                                                           | config.py                    |
+| ea_donor_augmentation              | True                                                           | config.py                    |
+| use_composite_csp                  | True                                                           | config.py                    |
+| composite_csp_lam                  | 0.3                                                            | config.py                    |
+| session_level_ea                   | True                                                           | config.py                    |
+| temporal_augmentation              | False                                                          | config.py                    |
+| LDA inner k-selection folds        | 3                                                              | train.py                     |
+| Handcrafted features               | 45                                                             | features.py                  |
+| Preprocessing bandpass             | 1-40 Hz                                                        | preprocess.py                |
+| Notch filter                       | 60 Hz                                                          | preprocess.py                |
+| Welch nperseg                      | min(sfreq/2, len(epoch)//2)                                    | features.py                  |
 
 
 ## Experiments That Helped (kept in final config)
@@ -481,7 +492,7 @@ Applied Karpathy's auto-research methodology: single metric (augmented nested CV
 
 ## Final Conclusion
 
-After **12 structural experiments** in Round 4 + **25+ parameter experiments** in Round 3 + **10-seed robustness analysis** in Round 2, the **64.6% augmented nested CV (seed=42)** is the definitive algorithmic ceiling.
+After **12 structural experiments** in Round 4 + **25+ parameter experiments** in Round 3 + **10-seed robustness analysis** in Round 2, the **64.6% augmented nested CV (seed=42)** was the 10-subject structural ceiling. Rounds 5–11 below expand the dataset and add Composite CSP / session EA; the current 15-subject numbers are 59.3% nested / 61.3% augmented.
 
 The feature set is perfectly balanced:
 - Adding features hurts (temporal dynamics: -5.1%, PLV: -0.4%, filter-bank Riemannian: -2.1%)
@@ -655,7 +666,7 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 
 ## Things Still Not Tried
 
-1. **Deep learning (EEGNet/ShallowConvNet)** — torch not installed; ~100 trials per subject is below typical EEGNet sample needs
+1. **Deep learning (EEGNet/ShallowConvNet)** — `src/eegnet.py` exists but torch is not a default dependency; ~100 trials per subject is below typical EEGNet sample needs
 2. **Re-extracting handcrafted features after session EA** — those features need baseline epochs, which are not in the nested multichannel tensor
 3. **Wiring session EA into the all-models CV table** — nested already uses it; would not change the nested metric
 

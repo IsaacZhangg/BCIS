@@ -5,10 +5,11 @@ A machine learning pipeline that reads EEG brain signals and classifies whether 
 ## How It Works
 
 1. **Record** — 8-channel EEG via a [g.tec Unicorn](https://www.unicorn-bi.com/) headset (dry electrodes, 250 Hz)
-2. **Clean** — Bandpass filter (1–40 Hz), notch filter (60 Hz), surface Laplacian to sharpen spatial signals
-3. **Extract** — 45 features per trial (ERD, Hjorth parameters, coherence, entropy, CSP spatial filters)
-4. **Classify** — 4 classifiers compete; nested cross-validation picks the best one per subject (and the FBCSP band config)
-5. **Deploy** — Saved models output `0` (left) or `1` (right) in real time
+2. **Clean** — Bandpass filter (1–40 Hz) and notch filter (60 Hz)
+3. **Epoch** — 1.0 s baseline, 0.25 s skip, 3.0 s task window; in-fold artifact rejection
+4. **Extract** — 45 handcrafted features per trial (surface Laplacian on C3/C4, ERD, Hjorth parameters, coherence, entropy) plus filter-bank CSP spatial filters
+5. **Classify** — Nested cross-validation picks among FBCSP+LDA, Riemannian, FBCSP+SVM, Ensemble, and Composite CSP (and the FBCSP band config) per subject
+6. **Deploy** — Saved models output `0` (left) or `1` (right)
 
 ## Results
 
@@ -57,12 +58,12 @@ Signal quality with the consumer-grade 8-channel headset remains the primary bot
 | Classifier | What It Does |
 |------------|--------------|
 | **FBCSP+LDA** | Applies filter-bank Common Spatial Patterns to isolate motor-related brain activity, then classifies with Linear Discriminant Analysis. Inner CV also selects among `standard` / `high_mu` / `wide_mu` band configs |
-| **Riemannian** | Works directly with covariance matrices on a curved (Riemannian) manifold — no hand-crafted features needed |
-| **FBCSP+SVM** | Same spatial filtering as FBCSP+LDA, but uses a Support Vector Machine (RBF kernel) for classification |
+| **Riemannian** | LWF covariances mapped through TangentSpace into logistic regression (C=0.1) — no hand-crafted features needed |
+| **FBCSP+SVM** | Same spatial filtering as FBCSP+LDA, but uses a Support Vector Machine (RBF kernel, C=20) for classification |
 | **Ensemble** | Averages the confidence scores of LDA and SVM for a combined vote |
 | **Composite CSP** | Mixes other subjects' class covariances into the target CSP filters (Lotte & Guan, λ=0.3). Filters are applied to the target subject only |
 
-A **nested cross-validation** scheme (inner 7-fold selects the best classifier, outer 10-fold evaluates) ensures the reported accuracy is unbiased. Stacking (logistic regression on out-of-fold base probabilities) is reported as an extra metric and does not participate in model selection. EEGNet is optional and skipped unless PyTorch is installed.
+A **nested cross-validation** scheme (inner 7-fold selects the best classifier, outer 10-fold evaluates) ensures the reported accuracy is unbiased. Stacking (logistic regression on out-of-fold base probabilities) is reported as an extra metric and does not participate in model selection. EEGNet is implemented in `src/eegnet.py` but skipped unless PyTorch is installed (it is not a default dependency).
 
 ## Cross-Subject Transfer Learning
 
@@ -72,7 +73,7 @@ Not every subject has enough data to train a good model on their own. `src/trans
 2. Re-center each subject's data to a common reference (removes headset placement differences)
 3. Train on everyone else, test on the held-out subject (leave-one-subject-out CV)
 
-Weak subjects can also be evaluated with leakage-free donor augmentation (nearest Riemannian neighbor selected from the training fold only).
+Weak subjects can also be evaluated with leakage-free donor augmentation (nearest Riemannian neighbor selected from the training fold only). The full pipeline runs this transfer evaluation automatically; `uv run python -m src.transfer` runs it on its own.
 
 ## Quick Start
 
@@ -84,18 +85,22 @@ cd BCIS
 uv sync
 ```
 
-Recordings are loaded from `data/unicorn-data/` and, when present, `data/MI_DATA_NEW/`. Layout: `subject{NNNN}/session{NNN}/recording_*.csv`.
+Recordings are loaded from `data/unicorn-data/` and, when present, `data/MI_DATA_NEW/`. Layout: `subject{NNNN}/session{NNN}/recording_*.csv`. Folder aliases (`subject0100_2` → `subject0100`) are applied after grouping.
 
 ```bash
-# Run the full pipeline
+# Run the full pipeline (nested CV, donor augmentation, transfer, model export)
 uv run python -m src.pipeline
 
-# Useful flags
-uv run python -m src.pipeline --subjects 0006,0010 --verbose
-uv run python -m src.pipeline --holdout-fraction 0.2 --no-cache
+# Useful flags (wired into the pipeline)
+uv run python -m src.pipeline --verbose
+uv run python -m src.pipeline --holdout-fraction 0.2
+uv run python -m src.pipeline --data-dir data/unicorn-data --output-dir models
 
 # Run cross-subject transfer evaluation only
 uv run python -m src.transfer
+
+# Nested-only experiment without overwriting models/training_results.json
+uv run python scripts/run_nested_experiment.py --name my_run --composite-csp --session-ea
 
 # Run tests
 uv run pytest tests/ -v
@@ -105,52 +110,63 @@ Trained models and `models/training_results.json` are committed so a clone can l
 
 ### Loading a Trained Model
 
+FBCSP+LDA, FBCSP+SVM, Ensemble, and Composite CSP artifacts all share the same dict layout (`csp_models`, `selector`, `scaler`, `classifier`), so they use `predict()`. Riemannian models use `predict_riemann()`.
+
 ```python
 import joblib
 from src.train import predict, predict_riemann
 
-# For FBCSP+LDA or SVM models
+# FBCSP+LDA, SVM, Ensemble, or CCSP
 model = joblib.load("models/subject0006_fbcsp_lda.joblib")
 predictions = predict(model, X_features, X_multichannel)  # 0=left, 1=right
 
-# For Riemannian models
+# Riemannian
 model = joblib.load("models/subject0011_riemann.joblib")
 predictions = predict_riemann(model, X_multichannel)
 ```
+
+Selected deployment models are listed in `models/training_results.json` under `model_paths`.
 
 ## Project Structure
 
 ```
 BCIS/
 ├── src/
-│   ├── pipeline.py      # Main entry point — runs everything
+│   ├── pipeline.py      # Main entry point — load, CV, transfer, export
 │   ├── cli.py           # Command-line flags (RunConfig)
 │   ├── config.py        # Experiment settings (TrainingConfig)
-│   ├── data_loader.py   # Reads CSVs, parses event markers
-│   ├── preprocess.py    # Bandpass + notch filtering
+│   ├── data_loader.py   # Reads CSVs, parses event markers, dedups recordings
+│   ├── preprocess.py    # Bandpass + notch (ASR helper exists, not default)
 │   ├── epochs.py        # Cuts continuous EEG into trials
-│   ├── features.py      # Feature extraction (handcrafted + CSP)
+│   ├── features.py      # Handcrafted features (Laplacian, ERD, Hjorth, …)
 │   ├── train.py         # Classifier training, nested CV, model selection
+│   ├── classifiers.py   # Adapter registry (parallel to train.py orchestration)
 │   ├── composite_csp.py # Lotte & Guan Composite CSP
 │   ├── transfer.py      # Cross-subject transfer learning
-│   ├── alignment.py     # Shared Euclidean Alignment utility
+│   ├── alignment.py     # Euclidean Alignment (subject- and session-level)
 │   ├── validation.py    # CV split policies
+│   ├── rejection.py     # In-fold peak-to-peak artifact rejection
+│   ├── band_cache.py    # Per-band filtered-trial cache for FBCSP
+│   ├── stage_cache.py   # On-disk NPZ cache keyed by config + content hash
+│   ├── runtime_output.py# Quiet MNE / warning defaults
 │   ├── experiments.py   # Optional experiment JSON logging
 │   └── eegnet.py        # Optional EEGNet (requires torch)
-├── tests/               # 168 tests covering pipeline stages and new modules
+├── tests/               # 184 tests covering pipeline stages and modules
 ├── models/              # Saved models (.joblib) + training_results.json (tracked)
 ├── data/
 │   ├── unicorn-data/    # Original EEG recordings
-│   └── MI_DATA_NEW/     # Additional MI recordings (incl. subjects 0104–0106)
-├── scripts/             # Smoke tests and analysis helpers
+│   └── MI_DATA_NEW/     # Additional MI recordings (incl. subjects 0100–0106)
+├── scripts/             # Nested-experiment runner, stacking/temporal-aug checks, analysis helpers
+├── research/            # Experiment log (program.md, results.tsv)
+├── previouslytried.md   # Parameter and structural experiment history
 └── pyproject.toml       # Dependencies and project config
 ```
 
 ## Data Format
 
-Each CSV contains columns: `timestamp`, `Fz`, `C3`, `Cz`, `C4`, `Pz`, `PO7`, `Oz`, `PO8`, `stim`.
+Each CSV contains columns: `timestamps`, `Fz`, `C3`, `Cz`, `C4`, `Pz`, `PO7`, `Oz`, `PO8`, `stim`.
 
-The `stim` column encodes events as `phase * 10 + movement` (phase 3 = motor imagery; movement 1 = left, 2 = right). Original unicorn recordings typically have 100 trials (50 left, 50 right); `MI_DATA_NEW` recordings may have fewer and are still included when they meet `min_evaluation_trials` (default 30).
+The `stim` column encodes events as `phase * 10 + movement` (phase 3 = motor imagery; movement 1 = left, 2 = right). Original unicorn recordings typically have 100 trials (50 left, 50 right). `MI_DATA_NEW` recordings may have fewer and are still included when they meet `min_evaluation_trials` (default 30): 0100/0101/0104 have 64 trials after session pooling; 0102/0106 have 32. Recordings below that threshold (subject0000, subject0003, subject0105) are skipped.
 
 ## Hardware
 
@@ -160,11 +176,15 @@ The `stim` column encodes events as `phase * 10 + movement` (phase 3 = motor ima
 
 - **In-fold artifact rejection** — Thresholds computed from training data only, preventing data leakage
 - **Nested CV** — Separates model selection from evaluation so accuracy numbers are honest
+- **Grouped stratified splits** — Default `stratified_group` CV keeps nearby trials together while preserving class balance
 - **Content-hash dedup** — Identical recordings copied into both data folders are loaded once
+- **Subject aliases** — `subject0100_2` and similar folder names are merged into the canonical subject id
 - **In-fold donor selection + Euclidean Alignment** — Cross-subject augmentation never sees the test fold; EA is fit on target training trials only; inner CV must beat target-only by 2pp before donors are used
-- **Subject-level parallelism** — Each subject processed independently via joblib
-- **Bandpass caching** — Filtered signals precomputed once per subject, reused across folds
+- **Session-level EA** — Multi-session subjects (0100/0101/0104) are aligned with a train-fold-only transform before pooling
+- **Subject-level parallelism** — Each subject processed independently via joblib; BLAS threads capped per worker
+- **Bandpass caching** — Filtered FBCSP bands precomputed once per subject, reused across folds
+- **ASR is not default** — Artifact Subspace Reconstruction is implemented (`asrpy`) but was reverted from the main path because it removed discriminative motor-imagery signal
 
 ## Dependencies
 
-MNE-Python, scikit-learn, pyriemann, NumPy, SciPy, pandas, joblib, threadpoolctl. Dev: pytest, ruff. Optional: torch (EEGNet). See `pyproject.toml` for full list.
+MNE-Python, scikit-learn, pyriemann, NumPy, SciPy, pandas, joblib, asrpy. Dev: pytest, pytest-cov, ruff. Optional: torch (EEGNet). See `pyproject.toml` for the full list.
