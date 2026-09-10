@@ -2,10 +2,10 @@ experiment	nested_mean	augmented_mean	status	description
 baseline_10subj	0.620	0.646	kept_historical	10-subject parameter-tuning ceiling (seed=42); true mean 58.9% ± 1.4% across 10 seeds
 exp1_lightgbm	0.620	0.638	reverted	LightGBM 5th classifier: nested same, augmented worse (threshold interaction)
 exp2_asr	0.604	0.620	reverted	ASR preprocessing: both metrics worse, removes discriminative signal
-exp3a_thresh055	0.620	0.646	reverted	Augmentation threshold 0.55 on 10-subject set: same (subject0009 augmentation neutral)
-exp3b_thresh060	0.620	0.642	reverted	Augmentation threshold 0.60 on 10-subject set: worse (subject0005 hurt by donor data)
+exp3a_thresh055	0.620	0.646	reverted	Augmentation threshold 0.55 on 10-subject set: unchanged aggregate result
+exp3b_thresh060	0.620	0.642	reverted	Augmentation threshold 0.60 on 10-subject set: augmented mean decreased
 exp5_timefreq	0.602	0.595	reverted	Early/late ERD temporal features: both metrics worse, diluted feature pool
-exp6_multidonor	0.620	0.635	reverted	Top-2 donors: subject0001 improved but subject0002 hurt by weak 2nd donor
+exp6_multidonor	0.620	0.635	reverted	Top-2 donors: mixed target effects, lower augmented mean
 exp7_fb_riemann	0.599	0.625	reverted	Filter-bank Riemannian (3 bands): 108 tangent features overfit ~90 samples
 exp8_plv	0.623	0.642	reverted	PLV features (mu+beta): nested +0.3% but augmented -0.4%, within noise
 exp9_xdawn	n/a	n/a	skipped	xDAWN designed for P300 evoked responses, not oscillatory motor imagery
@@ -15,11 +15,11 @@ exp12_reduced_feat	0.601	0.629	reverted	Removed Cz+Fz+Hjorth features (45->34): 
 round5_mi_data_new	0.534	n/a	kept	15-subject set + inner-CV FBCSP band configs (standard/high_mu/wide_mu)
 round6_unified_load	0.565	0.587	kept	Content-hash dedup, both data folders, in-fold rejection, EA-gated donors @ 0.50
 round7_composite_csp	0.574	0.587	kept	Lotte & Guan Composite CSP (λ=0.3) as nested candidate
-round8_session_ea	0.593	0.603	kept	Train-only session-level EA for 0100/0101/0104
+round8_session_ea	0.593	0.603	kept	Train-only session-level EA for multi-session recordings
 round9_temporal_aug	0.586	n/a	reverted	Sliding-window temporal aug; drops CCSP/session EA/band search on that path
-round9_ccsp_lam01	0.585	n/a	reverted	Composite CSP λ=0.1 (less source mixing); subject0008 no longer selects CCSP
-round9_ccsp_lam05	0.582	n/a	reverted	Composite CSP λ=0.5 (more source mixing); subject0106 drops
+round9_ccsp_lam01	0.585	n/a	reverted	Composite CSP lambda=0.1: less source mixing, lower nested mean
+round9_ccsp_lam05	0.582	n/a	reverted	Composite CSP lambda=0.5: more source mixing, lower nested mean
 round9_group_mean_shrink	0.465	n/a	reverted	Leak-free Riemannian group-mean shrinkage; below nested and all-models Riemann
-round10_thresh052	0.593	0.613	kept	Weakness threshold 0.50→0.52 so subject0102 still gets pool_ea (+15.6)
-round11_thresh055	0.593	0.613	reverted	Threshold 0.55 also gates 0005/0009; both stay target-only, same aug mean
-round11_ccsp_long_sources	0.580	n/a	reverted	CCSP sources restricted to ≥80-trial subjects; subject0008 loses CCSP
+round10_thresh052	0.593	0.613	kept	Weakness threshold raised from 0.50 to 0.52; augmented mean improved
+round11_thresh055	0.593	0.613	reverted	Threshold 0.55 expands donor eligibility without changing augmented mean
+round11_ccsp_long_sources	0.580	n/a	reverted	CCSP sources restricted to recordings with at least 80 trials; nested mean decreased

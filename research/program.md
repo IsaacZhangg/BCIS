@@ -14,16 +14,16 @@ Maximize **augmented nested CV** accuracy for left/right motor imagery classific
 | Augmented nested CV | **61.3%** |
 | Original 10-subject nested | **60.5%** |
 | LOSO transfer | **51.3%** |
-| Signal subjects (≥60%) | 0006, 0007, 0008, 0010, 0101, 0104 |
+| Subjects reaching ≥60% | 6 of 15 |
 
 Historical 10-subject parameter-tuning ceiling (before MI_DATA_NEW + Composite CSP + session EA): nested 62.0% / augmented 64.6% at seed=42, true mean 58.9% ± 1.4% across 10 seeds. That 10-subject 62.0% is **not** the current headline number.
 
-Full per-subject scores live in `models/training_results.json`. Experiment narrative lives in `previouslytried.md`.
+Full per-subject scores are generated locally in the gitignored `models/training_results.json`. This public log retains aggregate results only. Experiment narrative lives in `previouslytried.md`.
 
 ## Constraints
 1. **Fixed evaluation**: nested CV structure (10 outer, 7 inner folds) must not change
 2. **No data leakage**: thresholds, EA transforms, donor choice, and models fitted on training folds only
-3. **Fixed recordings**: same files under `data/unicorn-data/` and `data/MI_DATA_NEW/`
+3. **Fixed recordings**: use the same authorized local files under the gitignored `data/unicorn-data/` and `data/MI_DATA_NEW/` directories when comparing experiments
 4. **Dependencies**: packages in `pyproject.toml` (new ones only if justified)
 5. **Reproducibility**: seed=42 for reported runs; document every experiment
 
@@ -32,9 +32,9 @@ Full per-subject scores live in `models/training_results.json`. Experiment narra
 - Epochs: 1.0 s baseline, 0.25 s skip, 3.0 s task; in-fold PTP rejection (`n_mad=3.5`)
 - Classifiers in nested selection: FBCSP+LDA, Riemannian (LWF + TangentSpace + LR), FBCSP+SVM (C=20), Ensemble, Composite CSP (λ=0.3)
 - Inner CV also picks FBCSP band config: `standard` / `high_mu` / `wide_mu`
-- Session-level EA on multi-session subjects (0100, 0101, 0104), train-fold only
+- Session-level EA on multi-session subjects, train-fold only
 - Donor augmentation: weakness threshold **0.52**, 2 pp inner-CV margin, nearest Riemannian neighbor / pool_ea
-- `min_evaluation_trials=30` (skips 0000, 0003, 0105)
+- `min_evaluation_trials=30` excludes subjects with too few trials
 
 ## Modifiable Files
 - `src/train.py` — classifiers, nested CV, model selection

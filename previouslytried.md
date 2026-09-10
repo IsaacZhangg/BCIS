@@ -1,6 +1,6 @@
 # Previously Tried Parameter Experiments
 
-This document records every parameter experiment conducted during accuracy optimization of the BCI motor imagery classifier. Use this to avoid re-testing things that have already been explored.
+This public log records parameter experiments and aggregate results from the BCI motor imagery classifier. Participant-level measurements are kept in local, gitignored results. Use this log to avoid repeating earlier experiments.
 
 **Starting baseline (before any changes):** 43.9% nested, 45.4% FBCSP+LDA, 48.4% best-of
 **10-subject parameter-tuning result (seed=42):** 62.0% nested, 59.3% FBCSP+LDA, 63.8% best-of
@@ -150,7 +150,7 @@ The 10-subject 62.0%/64.6% numbers in Rounds 1–4 are historical. Current defau
 
 ### Preprocessing bandpass: 1-40Hz → 2-40Hz
 
-- **Result:** 53.7% FBCSP+LDA (was 54.8%), some subjects dropped dramatically (subject0005: 51%→38.9%)
+- **Result:** FBCSP+LDA mean fell to 53.7% from 54.8%.
 - **Why it hurts:** The 1-2Hz range contains slow cortical potentials that may carry motor preparation information for some subjects. Removing it disproportionately hurts certain individuals.
 
 ### Preprocessing bandpass: h_freq 40 → 45Hz
@@ -430,33 +430,33 @@ Applied Karpathy's auto-research methodology: single metric (augmented nested CV
 ### Experiment 1: LightGBM classifier (5th classifier option)
 
 - **Result:** Nested 62.0% (same), augmented 63.8% (was 64.6%) — **worse**
-- **Why it hurts augmented:** LightGBM improved subject0001 from 47.2% to 53.8%, which moved it above the 0.50 augmentation threshold, losing the donor boost that gave 54.6%. Net effect: augmented mean dropped. LightGBM standalone scored 58.4% (between Riemann and LDA/SVM).
+- **Why it hurts augmented:** Classifier improvements moved targets above the augmentation cutoff and removed useful donor boosts. The augmented mean dropped. LightGBM standalone mean was 58.4%.
 
 ### Experiment 2: ASR preprocessing (Artifact Subspace Reconstruction)
 
 - **Result:** Nested 60.4% (was 62.0%), augmented 62.0% (was 64.6%) — **much worse**
-- **Why it hurts:** ASR reduced artifact counts (subject0002: 17→0 flagged) but also removed discriminative motor imagery signal. The current adaptive per-fold artifact rejection is better suited to consumer-grade EEG.
+- **Why it hurts:** ASR reduced artifact counts but also removed discriminative motor imagery signal. Adaptive per-fold rejection performed better in this experiment.
 
 ### Experiment 3a: Augmentation weakness threshold 0.50 → 0.55
 
 - **Result:** Nested 62.0% (same), augmented 64.6% (same) — **no change**
-- **Why:** Only subject0009 (54.0%) was newly below threshold. Donor augmentation had no effect on it (54.0% → 54.0%).
+- **Why:** Expanding the eligible donor-augmentation group did not change the aggregate result.
 
 ### Experiment 3b: Augmentation weakness threshold 0.50 → 0.60
 
 - **Result:** Nested 62.0% (same), augmented 64.2% (was 64.6%) — **worse**
-- **Why:** Subject0005 (55.9%) was newly augmented but the donor hurt it (55.9% → 51.2%). Not all subjects benefit from donor data.
+- **Why:** Extending donor augmentation to more targets reduced the aggregate result.
 
 ### Experiment 5: Time-frequency features (early/late ERD temporal dynamics)
 
 - **Result:** Nested 60.2% (was 62.0%), augmented 59.5% (was 64.6%) — **much worse**
 - **What:** Added 8 features: early vs late mu/beta ERD ratio and ERD timing difference for C3 and C4 (Laplacian-filtered). Total features: 45 → 53.
-- **Why it hurts:** Additional features diluted the feature pool without adding discriminative value. Subject0004 dropped from 62.9% to 49.3%. With ~90 training samples, more features increases overfitting risk.
+- **Why it hurts:** Additional features increased model complexity without improving the aggregate result. The training folds were small relative to the feature count.
 
 ### Experiment 6: Multi-donor augmentation (top-2 closest donors)
 
 - **Result:** Nested 62.0% (same), augmented 63.5% (was 64.6%) — **worse**
-- **Why:** Subject0001 improved (47.2% → 57.6%) with donors [subject0005+subject0102] vs 54.6% with single donor. But subject0002 dropped badly (39.9% → 45.0% vs 58.7% with single donor) because the 2nd donor (subject0005) is itself a weak subject with noisy data.
+- **Why:** Additional donors had mixed effects across targets, and the augmented mean fell. Donor proximity alone did not ensure useful additional training data.
 
 ### Experiment 7: Filter-bank Riemannian (3-band tangent space)
 
@@ -468,7 +468,7 @@ Applied Karpathy's auto-research methodology: single metric (augmented nested CV
 
 - **Result:** Nested 62.3% (was 62.0%), augmented 64.2% (was 64.6%) — **marginally worse**
 - **What:** Added 2 PLV features: C3-C4 phase locking in mu (8-12Hz) and beta (13-30Hz) bands, computed on Laplacian-filtered task epochs via Hilbert transform. Total features: 45 → 47.
-- **Why it's ambiguous:** Nested improved +0.3% (within 1.4% seed noise) but augmented dropped -0.4%. Subject0002 improved from 39.9% to 44.7%, but augmented version for subject0002 was worse (56.6% vs 58.7%).
+- **Why it's ambiguous:** Nested mean improved by 0.3 percentage points, within the 1.4-point seed variation, while augmented mean fell by 0.4 points.
 
 ### Experiment 9: xDAWN spatial filtering — SKIPPED
 
@@ -488,7 +488,7 @@ Applied Karpathy's auto-research methodology: single metric (augmented nested CV
 
 - **Result:** Nested 60.1% (was 62.0%), augmented 62.9% (was 64.6%) — **worse**
 - **What:** Removed 11 features: Cz mu/beta ERD + log power (4), Fz theta ratio (1), C3/C4 Hjorth parameters (6). Total: 45 → 34.
-- **Why it hurts:** The removed features carry genuine discriminative information. Subject0004 dropped from 62.9% to 57.7%, subject0006 from 88% to 85%. The current 45-feature set is well-balanced — neither too many nor too few.
+- **Why it hurts:** Removing the features reduced both aggregate metrics. The 45-feature set performed better in this comparison.
 
 ## Final Conclusion
 
@@ -518,17 +518,12 @@ The bottleneck is fundamentally **hardware and data quality**:
 
 ## Round 5: New Subjects & FBCSP Band Optimization (Apr 2026)
 
-Added subjects 0100-0102, 0104, 0106 from MI_DATA_NEW to the main pipeline. Subject 0105 excluded (empty recording). Also added subject-specific FBCSP band optimization with 3 candidate configs selected via inner CV.
+Expanded evaluation to 15 subjects using additional local recordings, excluding empty recordings. Added FBCSP band optimization with three candidate configurations selected via inner CV.
 
 ### Experiment 1: Integrate MI_DATA_NEW subjects into main pipeline
 
-- **What:** Extended pipeline to load MI_DATA_NEW subjects alongside unicorn-data. Subject 0104's 2 sessions merged (64 trials → 54 clean). Flexible loader accepts recordings with >= 20 phase-3 trials.
-- **Result:** 15 subjects now evaluated. New subject accuracies:
-  - subject0100: 33.8% nested (57 trials) — at chance
-  - subject0101: 64.3% nested (56 trials) — **signal detected!**
-  - subject0102: 31.7% nested (30 trials) — at chance (very low trial count)
-  - subject0104: 37.8% nested (54 trials) — at chance
-  - subject0106: 36.7% nested (30 trials) — at chance (very low trial count)
+- **What:** Extended the pipeline to load both local data roots and merge multiple sessions. The flexible loader accepts recordings with at least 20 phase-3 trials.
+- **Result:** The expanded benchmark evaluates 15 subjects.
 - **Impact on original 10 subjects:** Negligible (their data unchanged, only the donor pool grew). Augmented nested for weak subjects now has 15-subject donor pool.
 
 ### Experiment 2: Subject-specific FBCSP band optimization
@@ -537,14 +532,9 @@ Added subjects 0100-0102, 0104, 0106 from MI_DATA_NEW to the main pipeline. Subj
   - "standard": (8,10),(10,12),(12,14),(14,16),(16,18),(18,20),(20,24),(24,30) — proven default
   - "high_mu": (9,11),(11,13),(13,15),(15,18),(18,22),(22,26),(26,30) — shifted mu bands
   - "wide_mu": (8,12),(10,14),(12,16),(16,20),(20,24),(24,30) — wider sub-bands
-- **Result:** Most subjects selected "standard" (the proven default). Non-standard selections:
-  - subject0004: wide_mu (55.7% nested)
-  - subject0005: high_mu (50.6% nested)
-  - subject0007: wide_mu (64.0% nested)
-  - subject0101: high_mu (64.3% nested)
-  - subject0104: high_mu (37.8% nested)
+- **Result:** Most selections used "standard", with some "high_mu" and "wide_mu" selections.
 - **Impact:** Mixed. Band optimization adds an extra dimension to inner CV model selection, which can cause overfitting on subjects with few inner-fold trials. The 15-subject nested mean is 53.4%, but this is not comparable to the previous 10-subject 62.0% because the new subjects (mostly at chance) drag the mean down.
-- **Conclusion:** Subject-specific band optimization shows some subjects naturally prefer different band configs, but the accuracy impact is modest. The main value is benchmark expansion (15 subjects) and discovering subject0101 as a new signal subject.
+- **Conclusion:** Band selection varied, but the aggregate accuracy impact was modest. This round expanded the benchmark to 15 subjects.
 
 ## Round 6: Combine both data folders without leakage (kept)
 
@@ -552,31 +542,20 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 
 ### Experiment 1: Content-hash dedup + unified in-fold loading
 
-- **What:** `discover_recordings()` scans both roots, drops identical files (subject0000 copies), applies `subject0100_2` → `subject0100`, and routes every subject through the same in-fold artifact rejection path. Extra sessions for 0100/0101/0104 are pooled (64 trials) instead of globally rejected down to ~54.
+- **What:** `discover_recordings()` scans both roots, removes duplicate files, applies configured aliases, and routes every subject through in-fold artifact rejection. Additional sessions are pooled before fold-specific processing.
 - **Result (seed=42, 15 subjects):**
   - Nested mean: **56.5%** (was 53.4%)
   - Augmented nested mean: **58.7%** (was 56.3%)
   - Original 10 nested mean: **59.7%** (unchanged)
   - 18 unique recordings, 15 subjects
-- **Per-subject nested (MI_DATA_NEW):**
-  - subject0100: 33.8% → 45.2%
-  - subject0101: 64.3% → 54.9% (old score was inflated by leaky global rejection)
-  - subject0102: 31.7% → 47.5%
-  - subject0104: 37.8% → 58.5%
-  - subject0106: 36.7% → 43.9%
 - **Why it helps:** More within-subject trials for multi-session people, and test-fold amplitudes no longer leak into the rejection threshold.
 - **Kept.**
 
 ### Experiment 2: EA-gated donor augmentation (threshold 0.50)
 
 - **What:** For subjects with nested < 50%, inner CV chooses among target-only, nearest donor after He & Wu trial-level EA (transform fit on target train only), and a pool of up to 3 nearest signal donors. Ties / insufficient inner-CV margin keep target-only.
-- **Result:** Augmented mean 58.7%. Weak-subject deltas:
-  - subject0002: 37.7% → 48.8% (+11.2)
-  - subject0100: 45.2% → 58.4% (+13.2)
-  - subject0102: 47.5% → 57.8% (+10.3)
-  - subject0001: 46.0% → 45.6% (−0.4, within noise)
-  - subject0106: 43.9% → 43.9% (gate kept none)
-- **Tried and reverted:** threshold 0.70 forced donors onto 0007/0008/0104 and *hurt* them (0007 64% → 60%, 0104 58.5% → 48.0%). Inner-CV selection without a 2pp margin is not conservative enough for subjects who already have a working within-subject model.
+- **Result:** Augmented mean reached 58.7%.
+- **Tried and reverted:** A 0.70 cutoff extended donor pooling too broadly and reduced performance. Retained the 2-point inner-CV improvement margin.
 - **Kept:** threshold 0.50 + 2pp inner-CV margin + EA (train-only).
 
 ## Round 7: Composite CSP (kept)
@@ -588,13 +567,6 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
   - Nested mean: **57.4%** (was 56.5%)
   - Augmented nested mean: **58.7%** (unchanged after flooring gated scores at nested)
   - Original 10 nested mean: **60.5%** (was 59.7%)
-- **Per-subject nested deltas vs Round 6:**
-  - subject0008: 66.8% → **70.0%** (selected CCSP)
-  - subject0106: 43.9% → **49.4%** (selected CCSP)
-  - subject0005: 50.6% → 54.3%
-  - subject0001: 46.0% → 47.2%
-  - subject0102: 47.5% → 50.3%
-  - subject0101: 54.9% → 52.0% (−2.9; inner CV overfit on a few folds)
 - **Also:** gated donor re-evaluation does not use CCSP, so a `none` strategy can score *below* the nested CCSP result. Pipeline now keeps `max(nested, gated)` so donor pooling cannot erase a better within-subject model.
 - **Kept.**
 
@@ -602,14 +574,12 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 
 ### Experiment 1: Train-only EA per recording before pooling sessions
 
-- **What:** For subjects with ≥2 recordings (0100, 0101, 0104), each outer fold fits He & Wu trial-level EA on that session's *training* trials and applies it to the session's train and test trials. Single-session subjects are unchanged (no-op).
+- **What:** For subjects with multiple recordings, each outer fold fits He & Wu trial-level EA on each session's training trials and applies it to that session's train and test trials. Single-session subjects are unchanged.
 - **Result (seed=42, on top of Composite CSP):**
   - Nested mean: **59.3%** (was 57.4%)
   - Augmented nested mean: **60.3%** (was 58.7%)
   - Original 10 nested mean: **60.5%** (unchanged — no extra sessions)
-  - New signal subjects: subject0101 (52.0% → **71.0%**), subject0104 (58.5% → **69.6%**)
-  - subject0100: 45.2% → 43.7% (−1.5, still chance)
-- **Why it helps:** Extra sessions were pooled as if they shared one covariance. Session EA removes headset placement / impedance drift so CSP sees a consistent spatial distribution. 0101 and 0104 become donors, which also lifts weak-subject pool_ea (subject0002 37.7% → 52.0%).
+- **Why it helps:** Session EA adjusts for covariance differences between recordings before pooling. The aligned recordings also contribute source covariances and donor trials.
 - **Kept.**
 
 ## Round 9: Methods that did not beat 59.3% nested
@@ -618,19 +588,19 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 
 - **What:** Enabled `temporal_augmentation` (2.5s windows, 0.25s stride on train; 2.5s center crop at test). As implemented, the augmented nested path skips Composite CSP, session EA, and band-config search.
 - **Result:** Nested **58.6%** (was 59.3%). Original 10 nested 61.0% (was 60.5%).
-- **Why it hurts / is confounded:** Test windows are 2.5s vs the proven 3.0s `task_duration`, and the aug code path drops the two methods that just raised the 15-subject mean (CCSP + session EA). Multi-session subjects 0101/0104 lose their session-EA gains.
+- **Why it hurts / is confounded:** Test windows shrink from 3.0 to 2.5 seconds, and this code path omits Composite CSP, session EA, and band selection. This comparison changes several methods at once.
 - **Reverted** (flag remains off).
 
 ### Experiment 2: Composite CSP λ=0.1
 
 - **What:** Same CCSP + session EA as Round 8, but λ=0.1 (less source mixing).
-- **Result:** Nested **58.5%** (was 59.3%). subject0008 70.0% → 67.8% and no longer selects CCSP.
+- **Result:** Nested mean fell to **58.5%** from 59.3%.
 - **Reverted** (keep λ=0.3).
 
 ### Experiment 3: Composite CSP λ=0.5
 
 - **What:** Same as Round 8 with λ=0.5 (more source mixing).
-- **Result:** Nested **58.2%** (was 59.3%). subject0106 49.4% → 39.7%.
+- **Result:** Nested mean fell to **58.2%** from 59.3%.
 - **Reverted** (keep λ=0.3).
 
 ### Experiment 4: Leak-free group-mean Riemann shrinkage
@@ -642,26 +612,26 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 
 ## Round 10: Weakness threshold 0.52 (kept)
 
-### Experiment 1: Include subject0102 in EA-gated donor pooling
+### Experiment 1: Raise the EA-gated donor cutoff
 
-- **What:** Raise `augmentation_weakness_threshold` from 0.50 to 0.52 so subject0102 (nested 50.3%) is still treated as weak. Nested CV is unchanged. Only 0102 is in the (0.50, 0.52] band; 0005 (54.3%) and 0004 (55.7%) stay target-only.
-- **Result:** Augmented nested **61.3%** (was 60.3%). subject0102 50.3% → **65.8%** via `pool_ea` (+15.6). Nested mean still **59.3%**.
-- **Why it helps:** CCSP had nudged 0102 just over the old 0.50 cutoff, which dropped the donor boost. 0.52 restores pooling without forcing donors onto subjects who already have a working within-subject model.
-- **Kept.** Earlier 0.55/0.60 tests on the 10-subject set are a different regime (they pulled in people like 0007).
+- **What:** Raise `augmentation_weakness_threshold` from 0.50 to 0.52, expanding eligibility for donor evaluation. Nested CV is unchanged.
+- **Result:** Augmented nested mean rose to **61.3%** from 60.3%. Nested mean remained **59.3%**.
+- **Why it helps:** The wider eligibility range allows inner CV to evaluate useful donor pooling that the old cutoff excluded.
+- **Kept.** Earlier 0.55/0.60 tests used the smaller 10-subject benchmark and a different configuration.
 
 ## Round 11: Further methods after 61.3% augmented
 
 ### Experiment 1: Weakness threshold 0.55 on the current 15-subject setup
 
-- **What:** 0.55 would also send subject0005 (54.3%) and subject0009 (52.2%) through the donor gate.
-- **Result:** Augmented nested still **61.3%**. 0005 and 0009 both gated `none` / no delta.
+- **What:** Raise the donor-evaluation cutoff to 0.55 on the current 15-subject configuration.
+- **Result:** Augmented nested mean remained **61.3%**. The broader eligibility range added no benefit.
 - **Reverted** (keep 0.52; same aug mean with a tighter cutoff).
 
 ### Experiment 2: Composite CSP sources with ≥80 trials only
 
 - **What:** Pool source class covariances only from other subjects with ≥80 trials (the original 10), dropping short MI_DATA_NEW recordings from the mix.
-- **Result:** Nested **58.0%** (was 59.3%). subject0008 70.0% → 65.7% and no longer selects CCSP.
-- **Why it hurts:** The extra sessions (especially 0101/0104, now signal subjects) are useful source covariances. Restricting to long recordings throws that away.
+- **Result:** Nested mean fell to **58.0%** from 59.3%.
+- **Why it hurts:** Restricting source covariances to long recordings discards useful information from shorter recordings.
 - **Reverted.**
 
 ## Things Still Not Tried
@@ -669,8 +639,3 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 1. **Deep learning (EEGNet/ShallowConvNet)** — `src/eegnet.py` exists but torch is not a default dependency; ~100 trials per subject is below typical EEGNet sample needs
 2. **Re-extracting handcrafted features after session EA** — those features need baseline epochs, which are not in the nested multichannel tensor
 3. **Wiring session EA into the all-models CV table** — nested already uses it; would not change the nested metric
-
-
-
-
-
