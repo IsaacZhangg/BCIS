@@ -39,9 +39,14 @@ htmlcov/
 .env
 .env.local
 
-# Trained models (.joblib) and training_results.json are tracked in git.
-# Uncomment the next line to stop tracking newly created model files:
-# models/*.joblib
+# Participant recordings, including historical directory names
+/data/
+/Data/
+/unicorn-data/
+
+# Trained models and generated per-subject results stay local
+/models/
+/simulation_results.csv
 
 # Pipeline cache (regenerated locally)
 cache/

@@ -2,7 +2,14 @@
 
 from pathlib import Path
 
+import pytest
+
 from src.data_loader import load_recording, get_complete_recordings
+
+# Participant recordings are gitignored; these tests run only where they exist locally.
+pytestmark = pytest.mark.skipif(
+    not Path("unicorn-data").is_dir(), reason="unicorn-data/ recordings not present"
+)
 
 
 def test_load_recording_returns_data_and_events():
