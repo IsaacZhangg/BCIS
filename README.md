@@ -40,8 +40,8 @@ BCIS/
 │   └── profile_pipeline.py       # Pipeline bottleneck analysis
 ├── tests/                        # Test suite (9 test modules)
 ├── benchmarks/                   # Feature extraction benchmarks
-├── models/                       # Trained models + scalers + training_results.json (tracked)
-└── unicorn-data/                 # EEG recordings (tracked)
+├── models/                       # Local trained models + scalers + training_results.json (gitignored)
+└── unicorn-data/                 # Local participant recordings (gitignored)
 ```
 
 ## Installation
@@ -55,7 +55,7 @@ git checkout P3P5
 uv sync
 ```
 
-Recordings live in `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv` and are committed. Trained models and `models/training_results.json` are also committed so a clone can load them without re-running the pipeline.
+Place authorized recordings under `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`. This directory is gitignored and is not included in a fresh clone. The pipeline writes trained models, scalers and `models/training_results.json` to the gitignored `models/` directory, and the simulator writes `simulation_results.csv`, which is also gitignored. Tests that read real recordings are skipped when `unicorn-data/` is absent.
 
 ## Usage
 
