@@ -56,7 +56,7 @@ FBCSP_BAND_CANDIDATES: dict[str, list[tuple[float, float]]] = {
 }
 
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25, 30)
-ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble", "stacking")
+ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 
 
 def _make_riemann_pipeline():
@@ -385,25 +385,6 @@ def _evaluate_subject_all_models(
             preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
             fold_scores["ensemble"].append(float(np.mean(preds == y_test)))
 
-            # Stacking: reuse the inner_splits already generated above for k
-            # tuning to also build OOF meta features from LDA/Riemann/SVM, then
-            # refit bases on full outer-train for outer-test probabilities.
-            if inner_splits:
-                stacking_acc = _stacking_score(
-                    X_feat_train,
-                    X_feat_test,
-                    y_train,
-                    y_test,
-                    X_mc_train,
-                    X_mc_test,
-                    sfreq,
-                    k_best,
-                    inner_splits=inner_splits,
-                    prefiltered_train=train_band_cache,
-                    prefiltered_test=test_band_cache,
-                )
-                fold_scores["stacking"].append(stacking_acc)
-
         return {
             name: float(np.mean(fold_scores[name])) if fold_scores[name] else 0.5
             for name in ALL_CLASSIFIERS
@@ -589,10 +570,7 @@ def _evaluate_classifiers_batch(
     'ensemble') so nested inner loops can evaluate all candidates without
     recomputing identical transforms.
     """
-    # Stacking is handled outside this per-fold batch because it needs the full
-    # inner CV to generate OOF meta features. Silently drop it here so callers
-    # can pass ALL_CLASSIFIERS without extra bookkeeping.
-    requested = set(names) - {"stacking"}
+    requested = set(names)
     unknown = requested.difference(ALL_CLASSIFIERS)
     if unknown:
         unknown_txt = ", ".join(sorted(unknown))
@@ -688,160 +666,6 @@ def _evaluate_classifiers_batch(
         scores["ensemble"] = float(np.mean(preds == y_test))
 
     return scores
-
-
-def _fit_base_classifiers_and_proba(
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    X_mc_train: np.ndarray,
-    X_mc_test: np.ndarray,
-    sfreq: float,
-    k_best: int,
-    prefiltered_train: BandCache | None = None,
-    prefiltered_test: BandCache | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Fit LDA/Riemann/SVM on a train split and return positive-class probs on the test split.
-
-    Stacking uses probability of class 1 from each base classifier so the meta
-    feature matrix is (n_trials, 3). Storing only the positive-class column keeps
-    the downstream logistic-regression minimal and avoids redundant columns that
-    sum to 1.
-    """
-    riemann_pipe = _make_riemann_pipeline()
-    riemann_pipe.fit(X_mc_train, y_train)
-
-    if prefiltered_train is not None and prefiltered_test is not None:
-        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
-            prefiltered_train,
-            prefiltered_test,
-            y_train,
-            n_train_trials=X_mc_train.shape[0],
-            n_test_trials=X_mc_test.shape[0],
-        )
-    else:
-        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-            X_mc_train, X_mc_test, y_train, sfreq
-        )
-    X_train_combined = np.hstack([fbcsp_train, X_train])
-    X_test_combined = np.hstack([fbcsp_test, X_test])
-
-    k_values = _safe_k_values(
-        n_features=X_train_combined.shape[1],
-        n_train_trials=len(y_train),
-        k_best=k_best,
-        k_candidates=DEFAULT_K_CANDIDATES,
-    )
-    k = k_values[-1] if k_values else min(k_best, X_train_combined.shape[1])
-    selector = SelectKBest(f_classif, k=k)
-    X_train_sel = selector.fit_transform(X_train_combined, y_train)
-    X_test_sel = selector.transform(X_test_combined)
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_sel)
-    X_test_scaled = scaler.transform(X_test_sel)
-
-    _, counts = np.unique(y_train, return_counts=True)
-    priors = counts / counts.sum()
-
-    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
-    lda.fit(X_train_scaled, y_train)
-    svm = SVC(kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42)
-    svm.fit(X_train_scaled, y_train)
-
-    def _pos_proba(model, X, classes) -> np.ndarray:
-        proba = model.predict_proba(X)
-        # Column for class label 1. Falls back to last column when classes differ.
-        if 1 in classes:
-            col = int(np.where(classes == 1)[0][0])
-        else:
-            col = proba.shape[1] - 1
-        return proba[:, col]
-
-    # Columns: [lda, riemann, svm] — fixed ordering so the meta-learner sees a
-    # consistent feature layout across folds.
-    lda_test = _pos_proba(lda, X_test_scaled, lda.classes_)
-    svm_test = _pos_proba(svm, X_test_scaled, svm.classes_)
-    riemann_test = _pos_proba(riemann_pipe, X_mc_test, riemann_pipe.classes_)
-    return np.vstack([lda_test, riemann_test, svm_test]).T, np.array([])
-
-
-def _stacking_score(
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    y_test: np.ndarray,
-    X_mc_train: np.ndarray,
-    X_mc_test: np.ndarray,
-    sfreq: float,
-    k_best: int,
-    inner_splits: list[tuple[np.ndarray, np.ndarray]],
-    prefiltered_train: BandCache | None = None,
-    prefiltered_test: BandCache | None = None,
-) -> float:
-    """Compute stacking accuracy on (outer) test using leak-free OOF meta-training.
-
-    Pipeline (no leakage):
-      1. For each inner fold split of the outer-train set:
-         - Fit LDA/Riemann/SVM on inner-train.
-         - Record their positive-class probabilities on inner-val as OOF features.
-      2. Train LogisticRegression meta-learner on the OOF matrix + y_train[covered].
-      3. Refit LDA/Riemann/SVM on the FULL outer-train, predict probabilities on
-         outer-test → X_meta_test. Meta-learner predicts on X_meta_test.
-
-    The meta-learner NEVER sees outer-test predictions during its fitting. The
-    base classifiers used at test time are trained on full outer-train, matching
-    standard stacking.
-    """
-    n_train = len(y_train)
-    # Columns are [lda, riemann, svm] positive-class probability.
-    X_meta_oof = np.full((n_train, 3), np.nan, dtype=float)
-
-    for inner_train_idx, inner_val_idx in inner_splits:
-        if len(inner_train_idx) < 2 or len(inner_val_idx) < 1:
-            continue
-        # Inner-fold train/test share the outer-train tensors only; no outer-test
-        # data is visible inside the inner loop.
-        inner_prefilt_train: BandCache | None = None
-        inner_prefilt_val: BandCache | None = None
-        if prefiltered_train is not None:
-            inner_prefilt_train = subset_band_cache(prefiltered_train, inner_train_idx)
-            inner_prefilt_val = subset_band_cache(prefiltered_train, inner_val_idx)
-        proba_block, _ = _fit_base_classifiers_and_proba(
-            X_train[inner_train_idx],
-            X_train[inner_val_idx],
-            y_train[inner_train_idx],
-            X_mc_train[inner_train_idx],
-            X_mc_train[inner_val_idx],
-            sfreq,
-            k_best,
-            prefiltered_train=inner_prefilt_train,
-            prefiltered_test=inner_prefilt_val,
-        )
-        X_meta_oof[inner_val_idx] = proba_block
-
-    # Some trials may miss from every inner-val split (rare but possible with
-    # grouped folds). Drop rows the meta-learner has no coverage for.
-    covered = ~np.isnan(X_meta_oof).any(axis=1)
-    if covered.sum() < 2 or len(np.unique(y_train[covered])) < 2:
-        return 0.5
-
-    meta = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
-    meta.fit(X_meta_oof[covered], y_train[covered])
-
-    # Refit bases on full outer-train and transform outer-test.
-    X_meta_test, _ = _fit_base_classifiers_and_proba(
-        X_train,
-        X_test,
-        y_train,
-        X_mc_train,
-        X_mc_test,
-        sfreq,
-        k_best,
-        prefiltered_train=prefiltered_train,
-        prefiltered_test=prefiltered_test,
-    )
-    preds = meta.predict(X_meta_test)
-    return float(np.mean(preds == y_test))
 
 
 def _evaluate_classifier(
@@ -955,15 +779,12 @@ def _evaluate_subject_nested_model_selection(
     evaluated only once per inner split.  Tie-break: prefer ``"standard"``
     band config when inner-CV scores are equal.
 
-    Returns (selected_best_score, best_method, best_band_config, stacking_score).
-    Stacking is an independent per-fold evaluation.
+    Returns (selected_best_score, best_method, best_band_config).
     """
     effective_candidates = (
         band_candidates if band_candidates is not None else {"standard": FBCSP_BANDS}
     )
-    fbcsp_classifier_names = [
-        n for n in ALL_CLASSIFIERS if n not in ("riemann", "stacking")
-    ]
+    fbcsp_classifier_names = [n for n in ALL_CLASSIFIERS if n != "riemann"]
     use_session_ea = (
         session_level_ea
         and session_ids is not None
@@ -993,7 +814,6 @@ def _evaluate_subject_nested_model_selection(
         fold_scores: list[float] = []
         fold_clf_winners: list[str] = []
         fold_band_winners: list[str] = []
-        stacking_fold_scores: list[float] = []
 
         for outer_train_idx, outer_test_idx in outer_splits:
             outer_train_idx, outer_test_idx = _reject_in_fold(
@@ -1179,21 +999,6 @@ def _evaluate_subject_nested_model_selection(
             fold_clf_winners.append(best_clf)
             fold_band_winners.append(best_band_cfg_name)
 
-            stacking_outer = _stacking_score(
-                X_feat_otrain,
-                X_feat_otest,
-                y_otrain,
-                y_otest,
-                X_mc_otrain,
-                X_mc_otest,
-                sfreq,
-                k_best,
-                inner_splits=inner_splits,
-                prefiltered_train=outer_train_cache,
-                prefiltered_test=outer_test_cache,
-            )
-            stacking_fold_scores.append(stacking_outer)
-
         score = float(np.mean(fold_scores)) if fold_scores else 0.5
         clf_counts = Counter(fold_clf_winners)
         best_method = clf_counts.most_common(1)[0][0] if clf_counts else "lda"
@@ -1201,10 +1006,7 @@ def _evaluate_subject_nested_model_selection(
         best_band_config = (
             band_counts.most_common(1)[0][0] if band_counts else "standard"
         )
-        stacking_score = (
-            float(np.mean(stacking_fold_scores)) if stacking_fold_scores else 0.5
-        )
-        return score, best_method, best_band_config, stacking_score
+        return score, best_method, best_band_config
 
 
 def train_nested_model_selection_cv(
@@ -1226,7 +1028,7 @@ def train_nested_model_selection_cv(
     composite_csp_lam: float = 0.3,
     session_level_ea: bool = False,
     trial_session_ids_by_subject: list[np.ndarray] | None = None,
-) -> tuple[list[float], float, float, list[str], list[str], list[float]]:
+) -> tuple[list[float], float, float, list[str], list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
     Outer loop: StratifiedKFold(n_outer_folds) per subject.
@@ -1234,12 +1036,9 @@ def train_nested_model_selection_cv(
     configs when *band_candidates* is provided) via inner CV on the outer-train
     split, pick the best, retrain on full outer-train, and evaluate on outer-test.
 
-    Stacking is reported as an additional, independent per-subject metric and
-    does not participate in inner-CV selection.
-
     Returns:
         Tuple of (per_subject_scores, mean, std, per_subject_best_methods,
-        per_subject_best_band_configs, per_subject_stacking_scores).
+        per_subject_best_band_configs).
     """
     source_covs_by_subject: list[
         dict[tuple[float, float], dict[int, np.ndarray]] | None
@@ -1297,11 +1096,10 @@ def train_nested_model_selection_cv(
     scores = [result[0] for result in per_subject_results]
     best_methods = [result[1] for result in per_subject_results]
     best_band_configs = [result[2] for result in per_subject_results]
-    stacking_scores = [result[3] for result in per_subject_results]
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc, best_methods, best_band_configs, stacking_scores
+    return scores, mean_acc, std_acc, best_methods, best_band_configs
 
 
 def train_final_model_svm(

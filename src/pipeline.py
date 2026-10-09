@@ -43,7 +43,6 @@ _NESTED_TO_DISPLAY = {
     "riemann": "Riemann",
     "svm": "SVM",
     "ensemble": "Ensemble",
-    "stacking": "Stacking",
     "ccsp": "CCSP",
 }
 
@@ -387,7 +386,6 @@ def run_pipeline(
         nested_std,
         nested_methods,
         nested_band_configs,
-        stacking_scores,
     ) = train_nested_model_selection_cv(
         X_by_subject,
         y_by_subject,
@@ -422,11 +420,6 @@ def run_pipeline(
         print(
             f"\nNested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})"
         )
-        stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
-        stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
-        print(
-            f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
-        )
     else:
         print(
             f"\n{'Subject':<14} {'FBCSP+LDA':>10} {'Riemann':>10} {'SVM':>10} "
@@ -458,11 +451,6 @@ def run_pipeline(
         print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
         print(
             f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})"
-        )
-        stacking_mean = float(np.mean(stacking_scores)) if stacking_scores else 0.5
-        stacking_std = float(np.std(stacking_scores)) if stacking_scores else 0.0
-        print(
-            f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
         )
 
     # Step 3b: EA-gated augmented nested CV (leakage-free donor pooling)
@@ -689,9 +677,6 @@ def run_pipeline(
     if best_mean is not None:
         print(f"Best-of mean (optimistic):     {best_mean:.1%} (+/- {best_std:.1%})")
     print(f"Nested selection mean (unbiased): {nested_mean:.1%} (+/- {nested_std:.1%})")
-    print(
-        f"Stacking mean (LR meta on OOF):    {stacking_mean:.1%} (+/- {stacking_std:.1%})"
-    )
     if holdout_results:
         ho_mean = float(np.mean(list(holdout_results.values())))
         print(f"Held-out mean:                 {ho_mean:.1%}")
@@ -747,11 +732,6 @@ def run_pipeline(
         "best_std_accuracy": None if best_std is None else float(best_std),
         "nested_mean_accuracy": float(nested_mean),
         "nested_std_accuracy": float(nested_std),
-        "stacking_scores": {
-            sid: float(s) for sid, s in zip(subject_ids, stacking_scores)
-        },
-        "stacking_mean_accuracy": float(stacking_mean),
-        "stacking_std_accuracy": float(stacking_std),
         "subjects_with_signal": above_chance,
         "subjects_at_chance": at_chance,
         "model_paths": model_paths,

@@ -40,14 +40,12 @@ class TestCVIntegration:
     def test_nested_cv_still_works(self):
         """train_nested_model_selection_cv produces valid results."""
         X_feat, X_mc, y = _make_subject_data()
-        scores, mean, std, methods, _band_configs, _stacking = (
-            train_nested_model_selection_cv(
-                [(X_feat, X_mc)],
-                [y],
-                sfreq=SFREQ,
-                n_outer_folds=3,
-                n_inner_folds=2,
-            )
+        scores, mean, std, methods, _band_configs = train_nested_model_selection_cv(
+            [(X_feat, X_mc)],
+            [y],
+            sfreq=SFREQ,
+            n_outer_folds=3,
+            n_inner_folds=2,
         )
         assert len(scores) == 1
         assert 0.0 <= mean <= 1.0

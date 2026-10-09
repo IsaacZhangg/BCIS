@@ -416,7 +416,7 @@ def gated_ea_augmented_nested_cv(
     )
     from src.validation import adaptive_fold_count, make_cv_splits
 
-    classifier_names = [n for n in ALL_CLASSIFIERS if n != "stacking"]
+    classifier_names = list(ALL_CLASSIFIERS)
     n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
     outer_splits = make_cv_splits(
         y,
