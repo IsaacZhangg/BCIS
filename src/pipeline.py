@@ -47,6 +47,14 @@ _NESTED_TO_DISPLAY = {
     "ccsp": "CCSP",
 }
 
+_MODEL_FILE_SUFFIX = {
+    "FBCSP": "fbcsp_lda",
+    "Riemann": "riemann",
+    "SVM": "svm",
+    "Ensemble": "ensemble_lda",
+    "CCSP": "ccsp_lda",
+}
+
 _LINE_WIDTH = 68
 
 
@@ -150,7 +158,7 @@ def run_pipeline(
 
     # Step 1: Find recordings across both data directories (content-hash dedup)
     step_start = time.perf_counter()
-    _print_step(1, 5, "Finding recordings")
+    _print_step(1, 4, "Finding recordings")
     min_trials = cfg.min_evaluation_trials
     data_dirs = [data_dir]
     if MI_DATA_NEW_DIR.exists() and MI_DATA_NEW_DIR.resolve() != data_dir.resolve():
@@ -179,7 +187,7 @@ def run_pipeline(
 
     # Step 2: Load and preprocess data for each subject
     step_start = time.perf_counter()
-    _print_step(2, 5, "Loading and preprocessing data")
+    _print_step(2, 4, "Loading and preprocessing data")
     X_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_by_subject: list[np.ndarray] = []
     subject_ids: list[str] = []
@@ -323,7 +331,7 @@ def run_pipeline(
 
     # Step 3: Cross-validation (four classifiers + nested model selection)
     step_start = time.perf_counter()
-    _print_step(3, 5, "Running cross-validation")
+    _print_step(3, 4, "Running cross-validation")
     n_subj = len(subject_ids)
 
     if skip_all_models_cv:
@@ -460,7 +468,7 @@ def run_pipeline(
     aug_nested_mean = None
     step_start_aug = time.perf_counter()
     if cfg.ea_donor_augmentation and len(subject_ids) >= 2 and not skip_aug:
-        print("\n[3b/5] EA-gated augmented nested CV (combined datasets, no leakage)")
+        print("\n[3b/4] EA-gated augmented nested CV (combined datasets, no leakage)")
         from pyriemann.estimation import Covariances as _Cov
         from pyriemann.utils.mean import mean_covariance as _mean_cov
 
@@ -535,7 +543,7 @@ def run_pipeline(
 
     holdout_results: dict[str, float] = {}
     if holdout_fraction > 0 and X_holdout_by_subject:
-        print("\n[3b/5] Evaluating held-out test sets")
+        print("\n[3c/4] Evaluating held-out test sets")
         from src.train import _evaluate_classifier
 
         for i, (sid, (X_feat, X_mc), y_tr) in enumerate(
@@ -568,9 +576,9 @@ def run_pipeline(
             ho_mean = float(np.mean(list(holdout_results.values())))
             print(f"\n  Held-out mean: {ho_mean:.1%}")
 
-    # Step 5: Train & save per-subject models (nested CV method)
+    # Step 4: Train & save per-subject models (nested CV method)
     step_start = time.perf_counter()
-    _print_step(5, 5, "Training and saving per-subject models")
+    _print_step(4, 4, "Training and saving per-subject models")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model_paths = {}
@@ -605,31 +613,10 @@ def run_pipeline(
                     k_best=cfg.k_best,
                     bands=selected_bands,
                 )
-                model_path = output_dir / f"{sid}_svm.joblib"
             elif method == "Riemann":
                 model = train_final_model_riemann(X_multichannel, y, sfreq=sfreq)
-                model_path = output_dir / f"{sid}_riemann.joblib"
-            elif method == "Ensemble":
-                model = train_final_model(
-                    X_features,
-                    X_multichannel,
-                    y,
-                    sfreq=sfreq,
-                    k_best=cfg.k_best,
-                    bands=selected_bands,
-                )
-                model_path = output_dir / f"{sid}_ensemble_lda.joblib"
-            elif method == "CCSP":
-                model = train_final_model(
-                    X_features,
-                    X_multichannel,
-                    y,
-                    sfreq=sfreq,
-                    k_best=cfg.k_best,
-                    bands=selected_bands,
-                )
-                model_path = output_dir / f"{sid}_ccsp_lda.joblib"
             else:
+                # FBCSP, Ensemble and CCSP all deploy a plain FBCSP+LDA model.
                 model = train_final_model(
                     X_features,
                     X_multichannel,
@@ -638,7 +625,7 @@ def run_pipeline(
                     k_best=cfg.k_best,
                     bands=selected_bands,
                 )
-                model_path = output_dir / f"{sid}_fbcsp_lda.joblib"
+            model_path = output_dir / f"{sid}_{_MODEL_FILE_SUFFIX[method]}.joblib"
             joblib.dump(model, model_path)
             model_paths[sid] = str(model_path)
             print(f"  Saved {model_path} ({method})")
