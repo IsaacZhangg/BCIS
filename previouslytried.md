@@ -19,15 +19,15 @@ The 10-subject 62.0%/64.6% numbers in Rounds 1–4 are historical. Current defau
 | N_CSP_COMPONENTS                   | 3                                                              | train.py, band_cache.py      |
 | CSP reg                            | "oas"                                                          | train.py                     |
 | DEFAULT_K_CANDIDATES               | (3, 5, 8, 10, 15, 20, 25, 30)                                  | train.py, config.py          |
-| Riemannian covariance              | "lwf" (broadband; `riemannian_band=None`)                      | train.py                     |
+| Riemannian covariance              | "lwf" (broadband)                                              | train.py                     |
 | SVM C                              | 20.0                                                           | train.py                     |
 | SVM kernel                         | "rbf"                                                          | train.py                     |
 | SVM gamma                          | "scale"                                                        | train.py                     |
 | Riemannian LR C                    | 0.1                                                            | train.py                     |
 | LDA shrinkage                      | "auto"                                                         | train.py                     |
 | LDA solver                         | "lsqr"                                                         | train.py                     |
-| n_mad (in-fold artifact rejection) | 3.5                                                            | rejection.py, train.py       |
-| flat_uv                            | 1.0                                                            | rejection.py                 |
+| n_mad (in-fold artifact rejection) | 3.5                                                            | train.py                     |
+| flat_uv                            | 1.0                                                            | train.py                     |
 | task_duration                      | 3.0                                                            | pipeline.py                  |
 | baseline_duration                  | 1.0                                                            | pipeline.py                  |
 | skip_duration                      | 0.25                                                           | pipeline.py                  |
@@ -43,7 +43,6 @@ The 10-subject 62.0%/64.6% numbers in Rounds 1–4 are historical. Current defau
 | use_composite_csp                  | True                                                           | config.py                    |
 | composite_csp_lam                  | 0.3                                                            | config.py                    |
 | session_level_ea                   | True                                                           | config.py                    |
-| temporal_augmentation              | False                                                          | config.py                    |
 | LDA inner k-selection folds        | 3                                                              | train.py                     |
 | Handcrafted features               | 45                                                             | features.py                  |
 | Preprocessing bandpass             | 1-40 Hz                                                        | preprocess.py                |
@@ -589,7 +588,7 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 - **What:** Enabled `temporal_augmentation` (2.5s windows, 0.25s stride on train; 2.5s center crop at test). As implemented, the augmented nested path skips Composite CSP, session EA, and band-config search.
 - **Result:** Nested **58.6%** (was 59.3%). Original 10 nested 61.0% (was 60.5%).
 - **Why it hurts / is confounded:** Test windows shrink from 3.0 to 2.5 seconds, and this code path omits Composite CSP, session EA, and band selection. This comparison changes several methods at once.
-- **Reverted** (flag remains off).
+- **Reverted.** The code path was later deleted.
 
 ### Experiment 2: Composite CSP λ=0.1
 
@@ -636,6 +635,6 @@ Unified loading of `data/unicorn-data/` and `data/MI_DATA_NEW/` with content-has
 
 ## Things Still Not Tried
 
-1. **Deep learning (EEGNet/ShallowConvNet)** — `src/eegnet.py` exists but torch is not a default dependency; ~100 trials per subject is below typical EEGNet sample needs
+1. **Deep learning (EEGNet/ShallowConvNet)** — an unused `src/eegnet.py` prototype was deleted; ~100 trials per subject is below typical EEGNet sample needs
 2. **Re-extracting handcrafted features after session EA** — those features need baseline epochs, which are not in the nested multichannel tensor
 3. **Wiring session EA into the all-models CV table** — nested already uses it; would not change the nested metric

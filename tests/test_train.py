@@ -2,13 +2,12 @@
 
 import numpy as np
 
+from src.band_cache import precompute_bandpassed
 from src.epochs import compute_trial_max_ptp
 from src.train import (
     FBCSP_BAND_CANDIDATES,
     _evaluate_classifiers_batch,
-    _precompute_bandpassed,
     _reject_in_fold,
-    cross_session_evaluate,
     predict,
     predict_riemann,
     train_final_model,
@@ -16,7 +15,6 @@ from src.train import (
     train_final_model_svm,
     train_nested_model_selection_cv,
     train_within_subject_cv_all_models,
-    train_within_subject_cv_riemann,
 )
 
 N_EPOCHS = 40
@@ -100,46 +98,6 @@ def test_predict_with_saved_model():
 
 
 # ---------- Riemannian classifier tests ----------
-
-
-def test_riemann_cv_returns_scores():
-    """Riemannian CV returns per-subject scores with correct shape and range."""
-    n_subjects = 3
-    rng = np.random.default_rng(42)
-    X_by_subject = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
-    ]
-    y_by_subject = [LABELS for _ in range(n_subjects)]
-
-    scores, mean_acc, std_acc = train_within_subject_cv_riemann(
-        X_by_subject, y_by_subject, n_folds=5
-    )
-
-    assert len(scores) == n_subjects
-    assert 0 <= mean_acc <= 1
-    assert std_acc >= 0
-    for s in scores:
-        assert 0 <= s <= 1
-
-
-def test_riemann_no_leakage_on_random_data():
-    """On pure random data, Riemannian accuracy should be near chance (~50%)."""
-    n_subjects = 2
-    rng = np.random.default_rng(123)
-    X_by_subject = [
-        rng.standard_normal((N_EPOCHS, N_CHANNELS, N_SAMPLES))
-        for _ in range(n_subjects)
-    ]
-    y_by_subject = [LABELS for _ in range(n_subjects)]
-
-    _, mean_acc, _ = train_within_subject_cv_riemann(
-        X_by_subject, y_by_subject, n_folds=5
-    )
-
-    assert mean_acc < 0.70, (
-        f"Random data accuracy {mean_acc:.1%} is suspiciously high — possible data leakage"
-    )
 
 
 def test_riemann_final_model_and_predict():
@@ -246,16 +204,16 @@ def test_batched_classifier_eval_prefiltered_matches_uncached():
         X_multichannel[test_idx],
         sfreq=250.0,
         k_best=10,
-        prefiltered_train=_precompute_bandpassed(X_multichannel[train_idx], 250.0),
-        prefiltered_test=_precompute_bandpassed(X_multichannel[test_idx], 250.0),
+        prefiltered_train=precompute_bandpassed(X_multichannel[train_idx], 250.0),
+        prefiltered_test=precompute_bandpassed(X_multichannel[test_idx], 250.0),
     )
 
     for name in ("lda", "riemann", "svm", "ensemble"):
         np.testing.assert_allclose(uncached_scores[name], prefiltered_scores[name])
 
 
-def test_all_models_cached_parallel_path_keeps_statistical_parity():
-    """Cached+parallel all-model CV should stay statistically aligned."""
+def test_all_models_parallel_path_matches_sequential():
+    """Subject-level parallelism must not change all-model CV scores."""
     n_subjects = 2
     X_by_subject = [
         _make_subject_data(np.random.default_rng(100 + i)) for i in range(n_subjects)
@@ -272,15 +230,13 @@ def test_all_models_cached_parallel_path_keeps_statistical_parity():
     )
 
     baseline = train_within_subject_cv_all_models(
-        X_by_subject, y_by_subject, n_jobs=1, enable_band_cache=False, **shared_kwargs
+        X_by_subject, y_by_subject, n_jobs=1, **shared_kwargs
     )
     optimized = train_within_subject_cv_all_models(
         X_by_subject,
         y_by_subject,
         n_jobs=2,
-        parallel_backend="threading",
         max_blas_threads_per_worker=1,
-        enable_band_cache=True,
         **shared_kwargs,
     )
 
@@ -303,10 +259,8 @@ def test_nested_model_selection_cv_returns_scores():
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc, methods, band_configs, stacking_scores = (
-        train_nested_model_selection_cv(
-            X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
-        )
+    scores, mean_acc, std_acc, methods, band_configs = train_nested_model_selection_cv(
+        X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
     )
 
     assert len(scores) == n_subjects
@@ -320,9 +274,6 @@ def test_nested_model_selection_cv_returns_scores():
     assert len(band_configs) == n_subjects
     for bc in band_configs:
         assert bc == "standard"  # default band_candidates=None -> "standard" only
-    assert len(stacking_scores) == n_subjects
-    for s in stacking_scores:
-        assert 0 <= s <= 1
 
 
 def test_nested_model_selection_no_leakage():
@@ -332,7 +283,7 @@ def test_nested_model_selection_no_leakage():
     X_by_subject = [_make_subject_data(rng) for _ in range(n_subjects)]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    _, mean_acc, _, _, _, _ = train_nested_model_selection_cv(
+    _, mean_acc, _, _, _ = train_nested_model_selection_cv(
         X_by_subject, y_by_subject, n_outer_folds=5, n_inner_folds=3
     )
 
@@ -341,8 +292,8 @@ def test_nested_model_selection_no_leakage():
     )
 
 
-def test_nested_cached_parallel_path_keeps_statistical_parity():
-    """Nested cached+parallel path should stay statistically aligned."""
+def test_nested_parallel_path_matches_sequential():
+    """Subject-level parallelism must not change nested CV scores."""
     n_subjects = 2
     X_by_subject = [
         _make_subject_data(np.random.default_rng(200 + i)) for i in range(n_subjects)
@@ -359,17 +310,14 @@ def test_nested_cached_parallel_path_keeps_statistical_parity():
         random_state=17,
     )
 
-    b_scores, b_mean, b_std, _, _, _ = train_nested_model_selection_cv(
-        X_by_subject, y_by_subject, n_jobs=1, enable_band_cache=False, **shared_kwargs
+    b_scores, b_mean, b_std, _, _ = train_nested_model_selection_cv(
+        X_by_subject, y_by_subject, n_jobs=1, **shared_kwargs
     )
-    o_scores, o_mean, o_std, _, _, _ = train_nested_model_selection_cv(
+    o_scores, o_mean, o_std, _, _ = train_nested_model_selection_cv(
         X_by_subject,
         y_by_subject,
         n_jobs=2,
-        parallel_backend="threading",
         max_blas_threads_per_worker=1,
-        enable_band_cache=True,
-        cache_scope="subject",
         **shared_kwargs,
     )
 
@@ -379,37 +327,6 @@ def test_nested_cached_parallel_path_keeps_statistical_parity():
 
 
 # ---------- Cross-session evaluation tests ----------
-
-
-def test_cross_session_evaluate_returns_all_methods():
-    """cross_session_evaluate returns accuracy for all 4 classifiers."""
-    rng = np.random.default_rng(42)
-    X_feat_a, X_mc_a = _make_subject_data(rng)
-    X_feat_b, X_mc_b = _make_subject_data(rng)
-
-    results = cross_session_evaluate(
-        (X_feat_a, X_mc_a), LABELS, (X_feat_b, X_mc_b), LABELS
-    )
-
-    assert set(results.keys()) == {"lda", "riemann", "svm", "ensemble"}
-    for acc in results.values():
-        assert 0 <= acc <= 1
-
-
-def test_cross_session_no_leakage():
-    """On random data, cross-session accuracy should stay near chance."""
-    rng = np.random.default_rng(123)
-    X_feat_a, X_mc_a = _make_subject_data(rng)
-    X_feat_b, X_mc_b = _make_subject_data(rng)
-
-    results = cross_session_evaluate(
-        (X_feat_a, X_mc_a), LABELS, (X_feat_b, X_mc_b), LABELS
-    )
-
-    for method, acc in results.items():
-        assert acc < 0.70, (
-            f"Cross-session {method} accuracy {acc:.1%} is suspiciously high"
-        )
 
 
 # ---------- Per-fold artifact rejection tests ----------
@@ -536,14 +453,12 @@ def test_nested_cv_returns_band_config():
     ]
     y_by_subject = [LABELS for _ in range(n_subjects)]
 
-    scores, mean_acc, std_acc, methods, band_configs, _ = (
-        train_nested_model_selection_cv(
-            X_by_subject,
-            y_by_subject,
-            n_outer_folds=3,
-            n_inner_folds=3,
-            band_candidates=FBCSP_BAND_CANDIDATES,
-        )
+    scores, mean_acc, std_acc, methods, band_configs = train_nested_model_selection_cv(
+        X_by_subject,
+        y_by_subject,
+        n_outer_folds=3,
+        n_inner_folds=3,
+        band_candidates=FBCSP_BAND_CANDIDATES,
     )
 
     assert len(band_configs) == n_subjects

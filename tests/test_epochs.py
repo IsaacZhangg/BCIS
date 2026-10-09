@@ -3,63 +3,9 @@
 import numpy as np
 
 from src.epochs import (
-    extract_epochs,
-    extract_labeled_epochs,
     extract_left_right_epochs,
     reject_bad_epochs,
 )
-
-
-def test_extract_epochs_correct_shape():
-    """Test that epochs have correct shape."""
-    # Simulated preprocessed signal (2 seconds * 250 Hz * 10 = 5000 samples)
-    sfreq = 250.0
-    signal = np.random.randn(5000)
-
-    # Events at sample 500 and 1500
-    events = [(500, 3, 1), (1500, 5, 1)]
-
-    epochs = extract_epochs(signal, events, sfreq, duration=2.0)
-
-    # Should get 2 epochs, each 500 samples (2 sec * 250 Hz)
-    assert len(epochs) == 2
-    assert all(e.shape == (500,) for e in epochs)
-
-
-def test_extract_epochs_skips_truncated():
-    """Test that epochs near end of signal are skipped."""
-    sfreq = 250.0
-    signal = np.random.randn(1000)  # Only 4 seconds of data
-
-    # Event at sample 900 - not enough room for 2 sec epoch
-    events = [(100, 3, 1), (900, 3, 1)]
-
-    epochs = extract_epochs(signal, events, sfreq, duration=2.0)
-
-    # Should only get 1 epoch (second one would be truncated)
-    assert len(epochs) == 1
-
-
-def test_extract_labeled_epochs_separates_classes():
-    """Test that labeled epochs correctly separate focused vs not-focused."""
-    sfreq = 250.0
-    signal = np.random.randn(10000)
-
-    # Phase 3 = focused, Phase 5 = not focused
-    events = [
-        (100, 3, 1),  # focused
-        (1000, 5, 1),  # not focused
-        (2000, 3, 2),  # focused
-        (3000, 5, 2),  # not focused
-        (4000, 1, 1),  # other phase - should be ignored
-    ]
-
-    focused, not_focused = extract_labeled_epochs(
-        signal, events, sfreq, baseline_phase=5
-    )
-
-    assert len(focused) == 2
-    assert len(not_focused) == 2
 
 
 def test_extract_left_right_epochs_separates_by_movement():
@@ -239,47 +185,6 @@ def test_reject_bad_epochs_adaptive_drops_outlier():
     assert len(cleaned_l["C3"]) == 9
 
 
-def test_reject_drops_high_gradient():
-    """Trials with a large sample-to-sample jump are rejected by gradient criterion."""
-    channels = ("C3", "C4")
-    left = _make_pairs(10, amplitude=10.0, channels=channels)
-    right = _make_pairs(10, amplitude=10.0, channels=channels)
-
-    # Inject a massive jump into left trial 0 — far beyond any adaptive threshold
-    task = left["C3"][0][1].copy()
-    task[100] = task[99] + 5000.0
-    left["C3"][0] = (left["C3"][0][0], task)
-
-    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
-        left, right, sfreq=250.0, gradient_n_mad=3.0
-    )
-
-    assert rej_l >= 1
-    assert len(cleaned_l["C3"]) <= 9
-
-
-def test_reject_drops_high_freq_power():
-    """Trials with injected 35 Hz sinusoid are rejected by HF power criterion."""
-    channels = ("C3", "C4")
-    left = _make_pairs(10, amplitude=5.0, channels=channels)
-    right = _make_pairs(10, amplitude=5.0, channels=channels)
-
-    # Inject a strong 35 Hz sinusoid into left trial 0 on both channels
-    sfreq = 250.0
-    t = np.arange(375) / sfreq
-    hf_sinusoid = np.sin(2 * np.pi * 35 * t) * 200.0
-
-    for ch in channels:
-        left[ch][0] = (left[ch][0][0], left[ch][0][1] + hf_sinusoid)
-
-    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
-        left, right, sfreq=sfreq, hf_power_n_mad=3.0
-    )
-
-    # The HF-injected trial should be rejected
-    assert rej_l >= 1
-
-
 def test_reject_tighter_n_mad():
     """An outlier that passes n_mad=4 but fails n_mad=3 is correctly rejected."""
     channels = ("C3", "C4")
@@ -304,30 +209,9 @@ def test_reject_tighter_n_mad():
     left["C3"][0] = (left["C3"][0][0], bad_task)
 
     # With n_mad=4 (old default), should pass
-    _, _, rej_l_loose, _ = reject_bad_epochs(
-        left, right, n_mad=4.0, gradient_n_mad=None, hf_power_n_mad=None
-    )
+    _, _, rej_l_loose, _ = reject_bad_epochs(left, right, n_mad=4.0)
 
     # With n_mad=3 (new default), should be rejected
-    _, _, rej_l_tight, _ = reject_bad_epochs(
-        left, right, n_mad=3.0, gradient_n_mad=None, hf_power_n_mad=None
-    )
+    _, _, rej_l_tight, _ = reject_bad_epochs(left, right, n_mad=3.0)
 
     assert rej_l_tight > rej_l_loose
-
-
-def test_reject_all_criteria_disabled():
-    """Regression: with gradient and HF disabled, behaves like old ptp-only rejection."""
-    channels = ("C3", "C4")
-    left = _make_pairs(5, amplitude=10.0, channels=channels)
-    right = _make_pairs(5, amplitude=10.0, channels=channels)
-
-    cleaned_l, cleaned_r, rej_l, rej_r = reject_bad_epochs(
-        left, right, n_mad=4.0, gradient_n_mad=None, hf_power_n_mad=None
-    )
-
-    # All clean data should pass
-    assert rej_l == 0
-    assert rej_r == 0
-    assert len(cleaned_l["C3"]) == 5
-    assert len(cleaned_r["C3"]) == 5

@@ -61,8 +61,8 @@ AGENTS.md
 # Local privacy-cleanup backups and rewritten history
 /.privacy-cleanup/
 
-# Pipeline stage cache (regenerated from recordings + TrainingConfig hash)
+# Old pipeline stage cache (the cache code was removed; keep local leftovers out of git)
 cache/
 
-# Local experiment JSON dumps from src/experiments.py
+# Local experiment JSON dumps from scripts/run_nested_experiment.py
 experiments/

@@ -94,7 +94,7 @@ def test_nested_composite_csp_stays_near_chance_on_random_data():
         X_by_subject.append((X_feat, X_mc))
         y_by_subject.append(y)
 
-    scores, mean_acc, _, methods, _, _ = train_nested_model_selection_cv(
+    scores, mean_acc, _, methods, _ = train_nested_model_selection_cv(
         X_by_subject,
         y_by_subject,
         sfreq=SFREQ,

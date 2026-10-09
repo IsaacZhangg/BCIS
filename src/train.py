@@ -1,8 +1,6 @@
 """Training pipeline: FBCSP + LDA, FBCSP + SVM, and Riemannian classifiers for left/right MI."""
 
-import logging
 from collections import Counter
-from dataclasses import dataclass
 
 import mne
 import numpy as np
@@ -18,18 +16,17 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 
-from sklearn.base import BaseEstimator, TransformerMixin
-
-from src.config import (
-    CacheScope,
-    ParallelBackend,
-    RiemannianClassifier,
-    SplitStrategy,
-)
-from src.eegnet import TORCH_AVAILABLE as EEGNET_TORCH_AVAILABLE
-from src.epochs import adaptive_threshold
 from src.alignment import apply_session_ea_train_only
+from src.band_cache import (
+    FBCSP_BANDS,
+    N_CSP_COMPONENTS,
+    BandCache,
+    precompute_bandpassed,
+    subset_band_cache,
+)
 from src.composite_csp import extract_composite_fbcsp, pool_source_class_covariances
+from src.config import SplitStrategy
+from src.epochs import adaptive_threshold
 from src.validation import (
     adaptive_fold_count,
     build_classwise_trial_groups,
@@ -37,74 +34,8 @@ from src.validation import (
 )
 
 
-@dataclass(frozen=True)
-class AugmentationContext:
-    """Training-time temporal augmentation data for a single subject.
-
-    Each field indexed by ``origins`` refers back to the original (unaugmented)
-    trial index.  ``X_features_canonical`` / ``X_multichannel_canonical`` are
-    the centered-crop, one-row-per-trial tensors used at validation/test time
-    so inference stays deterministic and matches the trained window length.
-
-    Attributes:
-        X_features_pool: Features computed from every augmented window across
-            all original trials, shape ``(n_trials * n_windows, n_features)``.
-        X_multichannel_pool: Augmented multichannel windows, shape
-            ``(n_trials * n_windows, n_channels, window_samples)``.
-        origins: Source trial index for each pool row, shape
-            ``(n_trials * n_windows,)``.
-        X_features_canonical: One row per original trial (centered crop).
-        X_multichannel_canonical: One windowed trial per original trial
-            (centered crop), shape ``(n_trials, n_channels, window_samples)``.
-    """
-
-    X_features_pool: np.ndarray
-    X_multichannel_pool: np.ndarray
-    origins: np.ndarray
-    X_features_canonical: np.ndarray
-    X_multichannel_canonical: np.ndarray
-
-    def expand_train(
-        self, train_idx: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return augmented ``(X_feat, X_mc, origin_idx)`` for training trials."""
-        train_set = set(int(i) for i in train_idx)
-        mask = np.fromiter(
-            (int(o) in train_set for o in self.origins),
-            dtype=bool,
-            count=len(self.origins),
-        )
-        return (
-            self.X_features_pool[mask],
-            self.X_multichannel_pool[mask],
-            self.origins[mask],
-        )
-
-
-logger = logging.getLogger(__name__)
-
-FBCSP_BANDS = [
-    (8, 10),
-    (10, 12),
-    (12, 14),
-    (14, 16),
-    (16, 18),
-    (18, 20),
-    (20, 24),
-    (24, 30),
-]
-
 FBCSP_BAND_CANDIDATES: dict[str, list[tuple[float, float]]] = {
-    "standard": [
-        (8, 10),
-        (10, 12),
-        (12, 14),
-        (14, 16),
-        (16, 18),
-        (18, 20),
-        (20, 24),
-        (24, 30),
-    ],
+    "standard": FBCSP_BANDS,
     "high_mu": [
         (9, 11),
         (11, 13),
@@ -124,116 +55,17 @@ FBCSP_BAND_CANDIDATES: dict[str, list[tuple[float, float]]] = {
     ],
 }
 
-N_CSP_COMPONENTS = 3
 DEFAULT_K_CANDIDATES = (3, 5, 8, 10, 15, 20, 25, 30)
-ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble", "stacking")
-OPTIONAL_CLASSIFIERS = ("eegnet",)
+ALL_CLASSIFIERS = ("lda", "riemann", "svm", "ensemble")
 
 
-def available_classifiers() -> tuple[str, ...]:
-    """Return the classifiers that are usable in the current environment.
-
-    Optional classifiers (e.g. ``eegnet``) are included only when their
-    backing libraries are importable; otherwise they are skipped with a log
-    warning so pipeline runs degrade gracefully instead of crashing.
-    """
-    classifiers = list(ALL_CLASSIFIERS)
-    if EEGNET_TORCH_AVAILABLE:
-        classifiers.append("eegnet")
-    else:
-        logger.warning(
-            "eegnet classifier unavailable: torch is not installed — skipping."
-        )
-    return tuple(classifiers)
-
-
-BandCache = dict[tuple[float, float], np.ndarray]
-
-
-class _BandpassTrials(BaseEstimator, TransformerMixin):
-    """Sklearn transformer that bandpasses each trial along time.
-
-    Used only when ``riemannian_band`` is set so the Riemannian covariance input
-    can be narrowband (e.g. 8-30 Hz) while other classifiers keep broadband.
-    """
-
-    def __init__(self, low: float, high: float, sfreq: float):
-        self.low = low
-        self.high = high
-        self.sfreq = sfreq
-
-    def fit(self, X, y=None):  # noqa: D401 - sklearn signature
-        return self
-
-    def transform(self, X):
-        return mne.filter.filter_data(
-            X.astype(np.float64, copy=False),
-            self.sfreq,
-            self.low,
-            self.high,
-            verbose=False,
-        )
-
-
-def _make_riemann_pipeline(
-    sfreq: float = 250.0,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
-):
-    """Create a fresh Riemannian classification pipeline.
-
-    Defaults reproduce the baseline (lwf → TangentSpace → LR, broadband input).
-    Optional knobs:
-
-    - ``riemannian_band``: if set, prepend a per-trial bandpass so the
-      covariance input is narrowband; leaves the broadband input used elsewhere
-      (FBCSP/LDA/SVM) untouched.
-    - ``riemannian_classifier``: ``"mdm"`` swaps TangentSpace+LR for
-      ``pyriemann.classification.MDM(metric="riemann")``.
-    """
-    if riemannian_classifier == "mdm":
-        from pyriemann.classification import MDM
-
-        classifier_steps: tuple = (Covariances(estimator="lwf"), MDM(metric="riemann"))
-    else:
-        classifier_steps = (
-            Covariances(estimator="lwf"),
-            TangentSpace(metric="riemann"),
-            LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
-        )
-
-    if riemannian_band is not None:
-        low, high = riemannian_band
-        return make_pipeline(
-            _BandpassTrials(low=low, high=high, sfreq=sfreq), *classifier_steps
-        )
-    return make_pipeline(*classifier_steps)
-
-
-def _precompute_bandpassed(
-    X: np.ndarray,
-    sfreq: float,
-    bands: list[tuple[float, float]] = FBCSP_BANDS,
-) -> BandCache:
-    """Bandpass every trial for each FBCSP band once.
-
-    Filtering is trial-wise along the time axis, so cached per-band tensors can be
-    safely indexed for CV train/test splits without changing leakage boundaries.
-    """
-    filtered_by_band: BandCache = {}
-    for low, high in bands:
-        try:
-            filtered_by_band[(low, high)] = mne.filter.filter_data(
-                X, sfreq, low, high, verbose=False
-            )
-        except (ValueError, np.linalg.LinAlgError):
-            continue
-    return filtered_by_band
-
-
-def _subset_band_cache(cache: BandCache, indices: np.ndarray) -> BandCache:
-    """Slice a precomputed band cache by trial indices."""
-    return {band: X_band[indices] for band, X_band in cache.items()}
+def _make_riemann_pipeline():
+    """Create a fresh broadband LWF → TangentSpace → LogisticRegression pipeline."""
+    return make_pipeline(
+        Covariances(estimator="lwf"),
+        TangentSpace(metric="riemann"),
+        LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000),
+    )
 
 
 def _extract_fbcsp_features_prefiltered(
@@ -297,7 +129,7 @@ def _extract_fbcsp_features(
     """
     # Final-model training passes the same tensor as train/test; avoid filtering it twice.
     if X_train is X_test:
-        shared_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
+        shared_filtered = precompute_bandpassed(X_train, sfreq, bands=bands)
         return _extract_fbcsp_features_prefiltered(
             shared_filtered,
             shared_filtered,
@@ -308,8 +140,8 @@ def _extract_fbcsp_features(
             n_test_trials=X_test.shape[0],
         )
 
-    train_filtered = _precompute_bandpassed(X_train, sfreq, bands=bands)
-    test_filtered = _precompute_bandpassed(X_test, sfreq, bands=bands)
+    train_filtered = precompute_bandpassed(X_train, sfreq, bands=bands)
+    test_filtered = precompute_bandpassed(X_test, sfreq, bands=bands)
     return _extract_fbcsp_features_prefiltered(
         train_filtered,
         test_filtered,
@@ -421,11 +253,7 @@ def _evaluate_subject_all_models(
     groups: np.ndarray | None,
     random_state: int,
     k_candidates: tuple[int, ...],
-    enable_band_cache: bool,
     max_blas_threads_per_worker: int,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
-    augmentation: AugmentationContext | None = None,
 ) -> dict[str, float]:
     """Evaluate all classifiers for a single subject."""
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
@@ -438,59 +266,32 @@ def _evaluate_subject_all_models(
             random_state=random_state,
         )
         fold_scores: dict[str, list[float]] = {name: [] for name in ALL_CLASSIFIERS}
-        # Band cache is keyed by original trial index — skip it when augmentation
-        # changes the per-trial sample layout, since per-band slicing by train/test
-        # indices would no longer match the augmented tensors.
-        subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq)
-            if enable_band_cache and augmentation is None
-            else None
-        )
+        subject_band_cache = precompute_bandpassed(X_multichannel, sfreq)
 
         for train_idx, test_idx in splits:
             train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
             if len(train_idx) < 2 or len(test_idx) < 1:
                 continue
 
-            if augmentation is not None:
-                X_feat_train, X_mc_train, train_origins = augmentation.expand_train(
-                    train_idx
-                )
-                y_train = y[train_origins]
-                X_feat_test = augmentation.X_features_canonical[test_idx]
-                X_mc_test = augmentation.X_multichannel_canonical[test_idx]
-                y_test = y[test_idx]
-            else:
-                X_feat_train = X_features[train_idx]
-                X_feat_test = X_features[test_idx]
-                X_mc_train = X_multichannel[train_idx]
-                X_mc_test = X_multichannel[test_idx]
-                y_train, y_test = y[train_idx], y[test_idx]
+            X_feat_train = X_features[train_idx]
+            X_feat_test = X_features[test_idx]
+            X_mc_train = X_multichannel[train_idx]
+            X_mc_test = X_multichannel[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
 
-            riemann_pipe = _make_riemann_pipeline(
-                sfreq=sfreq,
-                riemannian_band=riemannian_band,
-                riemannian_classifier=riemannian_classifier,
-            )
+            riemann_pipe = _make_riemann_pipeline()
             riemann_pipe.fit(X_mc_train, y_train)
             fold_scores["riemann"].append(float(riemann_pipe.score(X_mc_test, y_test)))
 
-            train_band_cache: BandCache | None = None
-            test_band_cache: BandCache | None = None
-            if subject_band_cache is not None:
-                train_band_cache = _subset_band_cache(subject_band_cache, train_idx)
-                test_band_cache = _subset_band_cache(subject_band_cache, test_idx)
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
-                    train_band_cache,
-                    test_band_cache,
-                    y_train,
-                    n_train_trials=len(train_idx),
-                    n_test_trials=len(test_idx),
-                )
-            else:
-                fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-                    X_mc_train, X_mc_test, y_train, sfreq
-                )
+            train_band_cache = subset_band_cache(subject_band_cache, train_idx)
+            test_band_cache = subset_band_cache(subject_band_cache, test_idx)
+            fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
+                train_band_cache,
+                test_band_cache,
+                y_train,
+                n_train_trials=len(train_idx),
+                n_test_trials=len(test_idx),
+            )
 
             X_train_combined = np.hstack([fbcsp_train, X_feat_train])
             X_test_combined = np.hstack([fbcsp_test, X_feat_test])
@@ -509,19 +310,11 @@ def _evaluate_subject_all_models(
 
             best_k = k_values[0]
             best_inner_score = -1.0
-            if augmentation is not None:
-                # Keep all windows from the same original trial in the same
-                # inner-CV fold by grouping on source-trial index.
-                inner_groups = train_origins
-                inner_strategy: SplitStrategy = "stratified_group"
-            else:
-                inner_groups = groups[train_idx] if groups is not None else None
-                inner_strategy = split_strategy
             inner_splits = make_cv_splits(
                 y_train,
                 n_splits=3,
-                strategy=inner_strategy,
-                groups=inner_groups,
+                strategy=split_strategy,
+                groups=groups[train_idx] if groups is not None else None,
                 random_state=random_state,
             )
             if inner_splits:
@@ -592,29 +385,6 @@ def _evaluate_subject_all_models(
             preds = lda_ens.classes_[np.argmax(avg_proba, axis=1)]
             fold_scores["ensemble"].append(float(np.mean(preds == y_test)))
 
-            # Stacking: reuse the inner_splits already generated above for k
-            # tuning to also build OOF meta features from LDA/Riemann/SVM, then
-            # refit bases on full outer-train for outer-test probabilities.
-            # Skipped under augmentation (inner_splits index augmented rows,
-            # not the canonical-crop tensors used at outer test).
-            if augmentation is None and inner_splits:
-                stacking_acc = _stacking_score(
-                    X_feat_train,
-                    X_feat_test,
-                    y_train,
-                    y_test,
-                    X_mc_train,
-                    X_mc_test,
-                    sfreq,
-                    k_best,
-                    inner_splits=inner_splits,
-                    prefiltered_train=train_band_cache,
-                    prefiltered_test=test_band_cache,
-                    riemannian_band=riemannian_band,
-                    riemannian_classifier=riemannian_classifier,
-                )
-                fold_scores["stacking"].append(stacking_acc)
-
         return {
             name: float(np.mean(fold_scores[name])) if fold_scores[name] else 0.5
             for name in ALL_CLASSIFIERS
@@ -634,12 +404,7 @@ def train_within_subject_cv_all_models(
     random_state: int = 42,
     k_candidates: tuple[int, ...] = DEFAULT_K_CANDIDATES,
     n_jobs: int = 1,
-    parallel_backend: ParallelBackend = "loky",
     max_blas_threads_per_worker: int = 1,
-    enable_band_cache: bool = True,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
-    augmentation_by_subject: list[AugmentationContext | None] | None = None,
 ) -> dict[str, tuple[list[float], float, float]]:
     """Within-subject CV for all four classifiers in a single shared pass.
 
@@ -653,82 +418,33 @@ def train_within_subject_cv_all_models(
 
     Extra controls:
         n_jobs: Subject-level parallel jobs (1 disables parallelism).
-        parallel_backend: joblib backend for subject-level parallelism.
         max_blas_threads_per_worker: BLAS/OpenMP thread cap per worker.
-        enable_band_cache: Reuse precomputed per-band filtered trials.
     """
-    payloads: list[
-        tuple[
-            np.ndarray,
-            np.ndarray,
-            np.ndarray,
-            np.ndarray | None,
-            np.ndarray | None,
-            AugmentationContext | None,
-        ]
-    ] = []
-    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
-        zip(X_by_subject, y_by_subject)
-    ):
-        groups = _resolve_subject_groups(
+    per_subject_results = Parallel(n_jobs=n_jobs)(
+        delayed(_evaluate_subject_all_models)(
+            X_features,
+            X_multichannel,
             y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
+            sfreq=sfreq,
+            n_folds=n_folds,
+            k_best=k_best,
+            trial_ptps=trial_ptps_by_subject[i] if trial_ptps_by_subject else None,
             split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
-        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        aug = (
-            augmentation_by_subject[subj_idx]
-            if augmentation_by_subject is not None
-            else None
-        )
-        payloads.append((X_features, X_multichannel, y, groups, trial_ptps, aug))
-
-    if n_jobs == 1:
-        per_subject_results = [
-            _evaluate_subject_all_models(
-                X_features,
-                X_multichannel,
+            groups=_resolve_subject_groups(
                 y,
-                sfreq=sfreq,
-                n_folds=n_folds,
-                k_best=k_best,
-                trial_ptps=trial_ptps,
+                provided_groups=trial_groups_by_subject,
+                subject_index=i,
                 split_strategy=split_strategy,
-                groups=groups,
-                random_state=random_state,
-                k_candidates=k_candidates,
-                enable_band_cache=enable_band_cache,
-                max_blas_threads_per_worker=max_blas_threads_per_worker,
-                riemannian_band=riemannian_band,
-                riemannian_classifier=riemannian_classifier,
-                augmentation=aug,
-            )
-            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
-        ]
-    else:
-        per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
-            delayed(_evaluate_subject_all_models)(
-                X_features,
-                X_multichannel,
-                y,
-                sfreq=sfreq,
-                n_folds=n_folds,
-                k_best=k_best,
-                trial_ptps=trial_ptps,
-                split_strategy=split_strategy,
-                groups=groups,
-                random_state=random_state,
-                k_candidates=k_candidates,
-                enable_band_cache=enable_band_cache,
-                max_blas_threads_per_worker=max_blas_threads_per_worker,
-                riemannian_band=riemannian_band,
-                riemannian_classifier=riemannian_classifier,
-                augmentation=aug,
-            )
-            for X_features, X_multichannel, y, groups, trial_ptps, aug in payloads
+                trial_group_size=trial_group_size,
+            ),
+            random_state=random_state,
+            k_candidates=k_candidates,
+            max_blas_threads_per_worker=max_blas_threads_per_worker,
         )
+        for i, ((X_features, X_multichannel), y) in enumerate(
+            zip(X_by_subject, y_by_subject)
+        )
+    )
 
     scores_by_model: dict[str, list[float]] = {
         name: [subject_scores[name] for subject_scores in per_subject_results]
@@ -814,100 +530,17 @@ def predict(
 # ---------------------------------------------------------------------------
 
 
-def train_within_subject_cv_riemann(
-    X_by_subject: list[np.ndarray],
-    y_by_subject: list[np.ndarray],
-    sfreq: float = 250.0,
-    n_folds: int = 10,
-    trial_ptps_by_subject: list[np.ndarray] | None = None,
-    split_strategy: SplitStrategy = "stratified_group",
-    trial_groups_by_subject: list[np.ndarray] | None = None,
-    trial_group_size: int = 5,
-    random_state: int = 42,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
-) -> tuple[list[float], float, float]:
-    """Within-subject CV using Riemannian tangent-space classifier.
-
-    Per fold:
-    1. Broadband input (1–40 Hz preprocess; optional `riemannian_band` is off by default)
-    2. Covariances(estimator='lwf') — Ledoit-Wolf shrinkage
-    3. TangentSpace(metric='riemann') — project SPD matrices to tangent space
-    4. LogisticRegression(C=0.1, solver='lbfgs') — classify
-
-    Args:
-        X_by_subject: List of multichannel EEG arrays (n_trials, n_channels, n_samples).
-        y_by_subject: List of label arrays per subject.
-        sfreq: Sampling frequency in Hz.
-        n_folds: Requested number of CV folds.
-        trial_ptps_by_subject: Per-trial max PTP amplitudes per subject for
-            in-fold artifact rejection.  ``None`` disables per-fold rejection.
-        split_strategy: ``'stratified'`` or ``'stratified_group'``.
-        trial_groups_by_subject: Optional explicit CV groups per subject.
-        trial_group_size: Group size when groups are auto-generated.
-        random_state: Random seed for deterministic splits.
-
-    Returns:
-        Tuple of (per_subject_scores, mean_accuracy, std_accuracy).
-    """
-    scores = []
-
-    for subj_idx, (X_multichannel, y) in enumerate(zip(X_by_subject, y_by_subject)):
-        groups = _resolve_subject_groups(
-            y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
-            split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
-        splits = make_cv_splits(
-            y,
-            n_splits=n_folds,
-            strategy=split_strategy,
-            groups=groups,
-            random_state=random_state,
-        )
-        fold_scores = []
-
-        for train_idx, test_idx in splits:
-            trial_ptps = (
-                trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-            )
-            train_idx, test_idx = _reject_in_fold(trial_ptps, train_idx, test_idx)
-            if len(train_idx) < 2 or len(test_idx) < 1:
-                continue
-            pipe = _make_riemann_pipeline(
-                sfreq=sfreq,
-                riemannian_band=riemannian_band,
-                riemannian_classifier=riemannian_classifier,
-            )
-            pipe.fit(X_multichannel[train_idx], y[train_idx])
-            fold_scores.append(pipe.score(X_multichannel[test_idx], y[test_idx]))
-
-        scores.append(float(np.mean(fold_scores)) if fold_scores else 0.5)
-
-    mean_acc = float(np.mean(scores))
-    std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc
-
-
 def train_final_model_riemann(
     X_multichannel: np.ndarray,
     y: np.ndarray,
     sfreq: float = 250.0,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> dict:
     """Train a deployable Riemannian model on all data for a single subject.
 
     Returns:
         Dict with keys 'pipeline', 'sfreq'.
     """
-    pipe = _make_riemann_pipeline(
-        sfreq=sfreq,
-        riemannian_band=riemannian_band,
-        riemannian_classifier=riemannian_classifier,
-    )
+    pipe = _make_riemann_pipeline()
     pipe.fit(X_multichannel, y)
     return {"pipeline": pipe, "sfreq": sfreq}
 
@@ -930,8 +563,6 @@ def _evaluate_classifiers_batch(
     prefiltered_train: BandCache | None = None,
     prefiltered_test: BandCache | None = None,
     bands: list[tuple[float, float]] | None = None,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
 ) -> dict[str, float]:
     """Train and score one or more classifiers on a fixed split.
 
@@ -939,10 +570,7 @@ def _evaluate_classifiers_batch(
     'ensemble') so nested inner loops can evaluate all candidates without
     recomputing identical transforms.
     """
-    # Stacking is handled outside this per-fold batch because it needs the full
-    # inner CV to generate OOF meta features. Silently drop it here so callers
-    # can pass ALL_CLASSIFIERS without extra bookkeeping.
-    requested = set(names) - {"stacking"}
+    requested = set(names)
     unknown = requested.difference(ALL_CLASSIFIERS)
     if unknown:
         unknown_txt = ", ".join(sorted(unknown))
@@ -951,11 +579,7 @@ def _evaluate_classifiers_batch(
     scores: dict[str, float] = {}
 
     if "riemann" in requested:
-        pipe = _make_riemann_pipeline(
-            sfreq=sfreq,
-            riemannian_band=riemannian_band,
-            riemannian_classifier=riemannian_classifier,
-        )
+        pipe = _make_riemann_pipeline()
         pipe.fit(X_mc_train, y_train)
         scores["riemann"] = float(pipe.score(X_mc_test, y_test))
 
@@ -1042,172 +666,6 @@ def _evaluate_classifiers_batch(
         scores["ensemble"] = float(np.mean(preds == y_test))
 
     return scores
-
-
-def _fit_base_classifiers_and_proba(
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    X_mc_train: np.ndarray,
-    X_mc_test: np.ndarray,
-    sfreq: float,
-    k_best: int,
-    prefiltered_train: BandCache | None = None,
-    prefiltered_test: BandCache | None = None,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
-) -> tuple[np.ndarray, np.ndarray]:
-    """Fit LDA/Riemann/SVM on a train split and return positive-class probs on the test split.
-
-    Stacking uses probability of class 1 from each base classifier so the meta
-    feature matrix is (n_trials, 3). Storing only the positive-class column keeps
-    the downstream logistic-regression minimal and avoids redundant columns that
-    sum to 1.
-    """
-    riemann_pipe = _make_riemann_pipeline(
-        sfreq=sfreq,
-        riemannian_band=riemannian_band,
-        riemannian_classifier=riemannian_classifier,
-    )
-    riemann_pipe.fit(X_mc_train, y_train)
-
-    if prefiltered_train is not None and prefiltered_test is not None:
-        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features_prefiltered(
-            prefiltered_train,
-            prefiltered_test,
-            y_train,
-            n_train_trials=X_mc_train.shape[0],
-            n_test_trials=X_mc_test.shape[0],
-        )
-    else:
-        fbcsp_train, fbcsp_test, _ = _extract_fbcsp_features(
-            X_mc_train, X_mc_test, y_train, sfreq
-        )
-    X_train_combined = np.hstack([fbcsp_train, X_train])
-    X_test_combined = np.hstack([fbcsp_test, X_test])
-
-    k_values = _safe_k_values(
-        n_features=X_train_combined.shape[1],
-        n_train_trials=len(y_train),
-        k_best=k_best,
-        k_candidates=DEFAULT_K_CANDIDATES,
-    )
-    k = k_values[-1] if k_values else min(k_best, X_train_combined.shape[1])
-    selector = SelectKBest(f_classif, k=k)
-    X_train_sel = selector.fit_transform(X_train_combined, y_train)
-    X_test_sel = selector.transform(X_test_combined)
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_sel)
-    X_test_scaled = scaler.transform(X_test_sel)
-
-    _, counts = np.unique(y_train, return_counts=True)
-    priors = counts / counts.sum()
-
-    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=priors)
-    lda.fit(X_train_scaled, y_train)
-    svm = SVC(kernel="rbf", C=20.0, gamma="scale", probability=True, random_state=42)
-    svm.fit(X_train_scaled, y_train)
-
-    def _pos_proba(model, X, classes) -> np.ndarray:
-        proba = model.predict_proba(X)
-        # Column for class label 1. Falls back to last column when classes differ.
-        if 1 in classes:
-            col = int(np.where(classes == 1)[0][0])
-        else:
-            col = proba.shape[1] - 1
-        return proba[:, col]
-
-    # Columns: [lda, riemann, svm] — fixed ordering so the meta-learner sees a
-    # consistent feature layout across folds.
-    lda_test = _pos_proba(lda, X_test_scaled, lda.classes_)
-    svm_test = _pos_proba(svm, X_test_scaled, svm.classes_)
-    riemann_test = _pos_proba(riemann_pipe, X_mc_test, riemann_pipe.classes_)
-    return np.vstack([lda_test, riemann_test, svm_test]).T, np.array([])
-
-
-def _stacking_score(
-    X_train: np.ndarray,
-    X_test: np.ndarray,
-    y_train: np.ndarray,
-    y_test: np.ndarray,
-    X_mc_train: np.ndarray,
-    X_mc_test: np.ndarray,
-    sfreq: float,
-    k_best: int,
-    inner_splits: list[tuple[np.ndarray, np.ndarray]],
-    prefiltered_train: BandCache | None = None,
-    prefiltered_test: BandCache | None = None,
-    riemannian_band: tuple[float, float] | None = None,
-    riemannian_classifier: RiemannianClassifier = "tangent_lr",
-) -> float:
-    """Compute stacking accuracy on (outer) test using leak-free OOF meta-training.
-
-    Pipeline (no leakage):
-      1. For each inner fold split of the outer-train set:
-         - Fit LDA/Riemann/SVM on inner-train.
-         - Record their positive-class probabilities on inner-val as OOF features.
-      2. Train LogisticRegression meta-learner on the OOF matrix + y_train[covered].
-      3. Refit LDA/Riemann/SVM on the FULL outer-train, predict probabilities on
-         outer-test → X_meta_test. Meta-learner predicts on X_meta_test.
-
-    The meta-learner NEVER sees outer-test predictions during its fitting. The
-    base classifiers used at test time are trained on full outer-train, matching
-    standard stacking.
-    """
-    n_train = len(y_train)
-    # Columns are [lda, riemann, svm] positive-class probability.
-    X_meta_oof = np.full((n_train, 3), np.nan, dtype=float)
-
-    for inner_train_idx, inner_val_idx in inner_splits:
-        if len(inner_train_idx) < 2 or len(inner_val_idx) < 1:
-            continue
-        # Inner-fold train/test share the outer-train tensors only; no outer-test
-        # data is visible inside the inner loop.
-        inner_prefilt_train: BandCache | None = None
-        inner_prefilt_val: BandCache | None = None
-        if prefiltered_train is not None:
-            inner_prefilt_train = _subset_band_cache(prefiltered_train, inner_train_idx)
-            inner_prefilt_val = _subset_band_cache(prefiltered_train, inner_val_idx)
-        proba_block, _ = _fit_base_classifiers_and_proba(
-            X_train[inner_train_idx],
-            X_train[inner_val_idx],
-            y_train[inner_train_idx],
-            X_mc_train[inner_train_idx],
-            X_mc_train[inner_val_idx],
-            sfreq,
-            k_best,
-            prefiltered_train=inner_prefilt_train,
-            prefiltered_test=inner_prefilt_val,
-            riemannian_band=riemannian_band,
-            riemannian_classifier=riemannian_classifier,
-        )
-        X_meta_oof[inner_val_idx] = proba_block
-
-    # Some trials may miss from every inner-val split (rare but possible with
-    # grouped folds). Drop rows the meta-learner has no coverage for.
-    covered = ~np.isnan(X_meta_oof).any(axis=1)
-    if covered.sum() < 2 or len(np.unique(y_train[covered])) < 2:
-        return 0.5
-
-    meta = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
-    meta.fit(X_meta_oof[covered], y_train[covered])
-
-    # Refit bases on full outer-train and transform outer-test.
-    X_meta_test, _ = _fit_base_classifiers_and_proba(
-        X_train,
-        X_test,
-        y_train,
-        X_mc_train,
-        X_mc_test,
-        sfreq,
-        k_best,
-        prefiltered_train=prefiltered_train,
-        prefiltered_test=prefiltered_test,
-        riemannian_band=riemannian_band,
-        riemannian_classifier=riemannian_classifier,
-    )
-    preds = meta.predict(X_meta_test)
-    return float(np.mean(preds == y_test))
 
 
 def _evaluate_classifier(
@@ -1307,11 +765,8 @@ def _evaluate_subject_nested_model_selection(
     split_strategy: SplitStrategy,
     groups: np.ndarray | None,
     random_state: int,
-    enable_band_cache: bool,
-    cache_scope: CacheScope,
     max_blas_threads_per_worker: int,
     band_candidates: dict[str, list[tuple[float, float]]] | None = None,
-    augmentation: AugmentationContext | None = None,
     source_covs_by_band: dict[tuple[float, float], dict[int, np.ndarray]] | None = None,
     composite_csp_lam: float = 0.3,
     session_ids: np.ndarray | None = None,
@@ -1324,22 +779,15 @@ def _evaluate_subject_nested_model_selection(
     evaluated only once per inner split.  Tie-break: prefer ``"standard"``
     band config when inner-CV scores are equal.
 
-    Returns (selected_best_score, best_method, best_band_config, stacking_score).
-    Stacking is an independent per-fold evaluation and is skipped when
-    temporal augmentation is enabled.
+    Returns (selected_best_score, best_method, best_band_config).
     """
     effective_candidates = (
         band_candidates if band_candidates is not None else {"standard": FBCSP_BANDS}
     )
-    fbcsp_classifier_names = [
-        n for n in ALL_CLASSIFIERS if n not in ("riemann", "stacking")
-    ]
-    classifier_names = [c for c in ALL_CLASSIFIERS if c != "stacking"]
-    aug_enabled = augmentation is not None
+    fbcsp_classifier_names = [n for n in ALL_CLASSIFIERS if n != "riemann"]
     use_session_ea = (
         session_level_ea
         and session_ids is not None
-        and not aug_enabled
         and len(np.unique(session_ids)) >= 2
     )
 
@@ -1349,13 +797,12 @@ def _evaluate_subject_nested_model_selection(
 
     with threadpool_limits(limits=max_blas_threads_per_worker or None):
         n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
+        # Session EA changes the trials per outer fold, so the subject-wide
+        # band cache is only valid without it.
         subject_band_cache = (
-            _precompute_bandpassed(X_multichannel, sfreq, bands=all_bands)
-            if enable_band_cache
-            and cache_scope == "subject"
-            and not aug_enabled
-            and not use_session_ea
-            else None
+            None
+            if use_session_ea
+            else precompute_bandpassed(X_multichannel, sfreq, bands=all_bands)
         )
         outer_splits = make_cv_splits(
             y,
@@ -1367,7 +814,6 @@ def _evaluate_subject_nested_model_selection(
         fold_scores: list[float] = []
         fold_clf_winners: list[str] = []
         fold_band_winners: list[str] = []
-        stacking_fold_scores: list[float] = []
 
         for outer_train_idx, outer_test_idx in outer_splits:
             outer_train_idx, outer_test_idx = _reject_in_fold(
@@ -1376,103 +822,148 @@ def _evaluate_subject_nested_model_selection(
             if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
                 continue
 
-            if aug_enabled:
-                assert augmentation is not None
-                X_feat_otrain, X_mc_otrain, otrain_origins = augmentation.expand_train(
-                    outer_train_idx
+            X_feat_otrain = X_features[outer_train_idx]
+            X_feat_otest = X_features[outer_test_idx]
+            X_mc_otrain = X_multichannel[outer_train_idx]
+            X_mc_otest = X_multichannel[outer_test_idx]
+            y_otrain = y[outer_train_idx]
+            y_otest = y[outer_test_idx]
+            if use_session_ea:
+                assert session_ids is not None
+                X_mc_otrain, X_mc_otest = apply_session_ea_train_only(
+                    X_multichannel,
+                    session_ids,
+                    outer_train_idx,
+                    outer_test_idx,
                 )
-                y_otrain = y[otrain_origins]
-                X_feat_otest = augmentation.X_features_canonical[outer_test_idx]
-                X_mc_otest = augmentation.X_multichannel_canonical[outer_test_idx]
-                y_otest = y[outer_test_idx]
-            else:
-                X_feat_otrain = X_features[outer_train_idx]
-                X_feat_otest = X_features[outer_test_idx]
-                X_mc_otrain = X_multichannel[outer_train_idx]
-                X_mc_otest = X_multichannel[outer_test_idx]
-                y_otrain = y[outer_train_idx]
-                y_otest = y[outer_test_idx]
-                if use_session_ea:
-                    assert session_ids is not None
-                    X_mc_otrain, X_mc_otest = apply_session_ea_train_only(
-                        X_multichannel,
-                        session_ids,
-                        outer_train_idx,
-                        outer_test_idx,
-                    )
 
-            outer_train_cache: BandCache | None = None
-            outer_test_cache: BandCache | None = None
-            if not aug_enabled and enable_band_cache and subject_band_cache is not None:
-                outer_train_cache = _subset_band_cache(
+            if subject_band_cache is not None:
+                outer_train_cache = subset_band_cache(
                     subject_band_cache, outer_train_idx
                 )
-                outer_test_cache = _subset_band_cache(
-                    subject_band_cache, outer_test_idx
-                )
-            elif not aug_enabled and enable_band_cache:
-                outer_train_cache = _precompute_bandpassed(
+                outer_test_cache = subset_band_cache(subject_band_cache, outer_test_idx)
+            else:
+                outer_train_cache = precompute_bandpassed(
                     X_mc_otrain, sfreq, bands=all_bands
                 )
-                outer_test_cache = _precompute_bandpassed(
+                outer_test_cache = precompute_bandpassed(
                     X_mc_otest, sfreq, bands=all_bands
                 )
 
             n_inner_folds_actual = adaptive_fold_count(
                 len(outer_train_idx), n_inner_folds
             )
-            if aug_enabled:
-                inner_splits_orig = make_cv_splits(
-                    y[outer_train_idx],
-                    n_splits=n_inner_folds_actual,
-                    strategy=split_strategy,
-                    groups=(groups[outer_train_idx] if groups is not None else None),
-                    random_state=random_state,
+            inner_groups = groups[outer_train_idx] if groups is not None else None
+            inner_splits = make_cv_splits(
+                y_otrain,
+                n_splits=n_inner_folds_actual,
+                strategy=split_strategy,
+                groups=inner_groups,
+                random_state=random_state,
+            )
+
+            _RIEMANN_BAND_KEY = "__riemann__"
+            inner_scores: dict[tuple[str, str], list[float]] = {}
+            for band_cfg_name in effective_candidates:
+                for clf_name in fbcsp_classifier_names:
+                    inner_scores[(clf_name, band_cfg_name)] = []
+            inner_scores[("riemann", _RIEMANN_BAND_KEY)] = []
+            if source_covs_by_band:
+                inner_scores[("ccsp", "standard")] = []
+
+            for inner_train_idx, inner_val_idx in inner_splits:
+                inner_train_cache = subset_band_cache(
+                    outer_train_cache, inner_train_idx
                 )
-                inner_splits = []
-                for it_orig, iv_orig in inner_splits_orig:
-                    it_global = outer_train_idx[it_orig]
-                    iv_global = outer_train_idx[iv_orig]
-                    inner_splits.append((it_global, iv_global))
-            else:
-                inner_groups = groups[outer_train_idx] if groups is not None else None
-                inner_splits = make_cv_splits(
-                    y_otrain,
-                    n_splits=n_inner_folds_actual,
-                    strategy=split_strategy,
-                    groups=inner_groups,
-                    random_state=random_state,
+                inner_val_cache = subset_band_cache(outer_train_cache, inner_val_idx)
+
+                riemann_score = _evaluate_classifiers_batch(
+                    ["riemann"],
+                    X_feat_otrain[inner_train_idx],
+                    X_feat_otrain[inner_val_idx],
+                    y_otrain[inner_train_idx],
+                    y_otrain[inner_val_idx],
+                    X_mc_otrain[inner_train_idx],
+                    X_mc_otrain[inner_val_idx],
+                    sfreq,
+                    k_best,
+                )
+                inner_scores[("riemann", _RIEMANN_BAND_KEY)].append(
+                    riemann_score["riemann"]
                 )
 
-            if aug_enabled:
-                inner_scores_by_clf = {name: [] for name in classifier_names}
-                for inner_train_idx, inner_val_idx in inner_splits:
-                    assert augmentation is not None
-                    inner_feat_train, inner_mc_train, inner_train_origins = (
-                        augmentation.expand_train(inner_train_idx)
-                    )
-                    inner_y_train = y[inner_train_origins]
-                    inner_feat_val = augmentation.X_features_canonical[inner_val_idx]
-                    inner_mc_val = augmentation.X_multichannel_canonical[inner_val_idx]
-                    inner_y_val = y[inner_val_idx]
-                    split_scores = _evaluate_classifiers_batch(
-                        classifier_names,
-                        inner_feat_train,
-                        inner_feat_val,
-                        inner_y_train,
-                        inner_y_val,
-                        inner_mc_train,
-                        inner_mc_val,
+                for band_cfg_name, bands in effective_candidates.items():
+                    fbcsp_scores = _evaluate_classifiers_batch(
+                        fbcsp_classifier_names,
+                        X_feat_otrain[inner_train_idx],
+                        X_feat_otrain[inner_val_idx],
+                        y_otrain[inner_train_idx],
+                        y_otrain[inner_val_idx],
+                        X_mc_otrain[inner_train_idx],
+                        X_mc_otrain[inner_val_idx],
                         sfreq,
                         k_best,
+                        prefiltered_train=inner_train_cache,
+                        prefiltered_test=inner_val_cache,
+                        bands=bands,
                     )
-                    for clf_name, score in split_scores.items():
-                        inner_scores_by_clf[clf_name].append(score)
-                inner_means_clf = {
-                    name: float(np.mean(scores)) if scores else 0.5
-                    for name, scores in inner_scores_by_clf.items()
-                }
-                best_clf = max(inner_means_clf, key=inner_means_clf.get)
+                    for clf_name, sc in fbcsp_scores.items():
+                        inner_scores[(clf_name, band_cfg_name)].append(sc)
+
+                if source_covs_by_band:
+                    inner_scores[("ccsp", "standard")].append(
+                        _evaluate_ccsp_lda(
+                            X_feat_otrain[inner_train_idx],
+                            X_feat_otrain[inner_val_idx],
+                            y_otrain[inner_train_idx],
+                            y_otrain[inner_val_idx],
+                            X_mc_otrain[inner_train_idx],
+                            X_mc_otrain[inner_val_idx],
+                            source_covs_by_band,
+                            sfreq,
+                            k_best,
+                            composite_csp_lam,
+                            FBCSP_BANDS,
+                            inner_train_cache,
+                            inner_val_cache,
+                        )
+                    )
+
+            inner_means = {
+                key: float(np.mean(scores)) if scores else 0.5
+                for key, scores in inner_scores.items()
+            }
+
+            def _sort_key(
+                item: tuple[tuple[str, str], float],
+            ) -> tuple[float, int, int]:
+                (clf_name, band_name), mean_score = item
+                prefer_standard = 0 if band_name == "standard" else 1
+                prefer_existing = 0 if clf_name != "ccsp" else 1
+                return (mean_score, -prefer_standard, -prefer_existing)
+
+            best_key = max(inner_means.items(), key=_sort_key)[0]
+            best_clf, best_band_key = best_key
+
+            if best_clf == "ccsp":
+                best_band_cfg_name = "standard"
+                assert source_covs_by_band is not None
+                outer_score = _evaluate_ccsp_lda(
+                    X_feat_otrain,
+                    X_feat_otest,
+                    y_otrain,
+                    y_otest,
+                    X_mc_otrain,
+                    X_mc_otest,
+                    source_covs_by_band,
+                    sfreq,
+                    k_best,
+                    composite_csp_lam,
+                    FBCSP_BANDS,
+                    outer_train_cache,
+                    outer_test_cache,
+                )
+            elif best_clf == "riemann":
                 best_band_cfg_name = "standard"
                 outer_score = _evaluate_classifier(
                     best_clf,
@@ -1488,150 +979,9 @@ def _evaluate_subject_nested_model_selection(
                     prefiltered_test=outer_test_cache,
                 )
             else:
-                _RIEMANN_BAND_KEY = "__riemann__"
-                inner_scores: dict[tuple[str, str], list[float]] = {}
-                for band_cfg_name in effective_candidates:
-                    for clf_name in fbcsp_classifier_names:
-                        inner_scores[(clf_name, band_cfg_name)] = []
-                inner_scores[("riemann", _RIEMANN_BAND_KEY)] = []
-                if source_covs_by_band:
-                    inner_scores[("ccsp", "standard")] = []
-
-                for inner_train_idx, inner_val_idx in inner_splits:
-                    inner_train_cache: BandCache | None = None
-                    inner_val_cache: BandCache | None = None
-                    if outer_train_cache is not None:
-                        inner_train_cache = _subset_band_cache(
-                            outer_train_cache, inner_train_idx
-                        )
-                        inner_val_cache = _subset_band_cache(
-                            outer_train_cache, inner_val_idx
-                        )
-
-                    riemann_score = _evaluate_classifiers_batch(
-                        ["riemann"],
-                        X_feat_otrain[inner_train_idx],
-                        X_feat_otrain[inner_val_idx],
-                        y_otrain[inner_train_idx],
-                        y_otrain[inner_val_idx],
-                        X_mc_otrain[inner_train_idx],
-                        X_mc_otrain[inner_val_idx],
-                        sfreq,
-                        k_best,
-                    )
-                    inner_scores[("riemann", _RIEMANN_BAND_KEY)].append(
-                        riemann_score["riemann"]
-                    )
-
-                    for band_cfg_name, bands in effective_candidates.items():
-                        fbcsp_scores = _evaluate_classifiers_batch(
-                            fbcsp_classifier_names,
-                            X_feat_otrain[inner_train_idx],
-                            X_feat_otrain[inner_val_idx],
-                            y_otrain[inner_train_idx],
-                            y_otrain[inner_val_idx],
-                            X_mc_otrain[inner_train_idx],
-                            X_mc_otrain[inner_val_idx],
-                            sfreq,
-                            k_best,
-                            prefiltered_train=inner_train_cache,
-                            prefiltered_test=inner_val_cache,
-                            bands=bands,
-                        )
-                        for clf_name, sc in fbcsp_scores.items():
-                            inner_scores[(clf_name, band_cfg_name)].append(sc)
-
-                    if source_covs_by_band:
-                        inner_scores[("ccsp", "standard")].append(
-                            _evaluate_ccsp_lda(
-                                X_feat_otrain[inner_train_idx],
-                                X_feat_otrain[inner_val_idx],
-                                y_otrain[inner_train_idx],
-                                y_otrain[inner_val_idx],
-                                X_mc_otrain[inner_train_idx],
-                                X_mc_otrain[inner_val_idx],
-                                source_covs_by_band,
-                                sfreq,
-                                k_best,
-                                composite_csp_lam,
-                                FBCSP_BANDS,
-                                inner_train_cache,
-                                inner_val_cache,
-                            )
-                        )
-
-                inner_means = {
-                    key: float(np.mean(scores)) if scores else 0.5
-                    for key, scores in inner_scores.items()
-                }
-
-                def _sort_key(
-                    item: tuple[tuple[str, str], float],
-                ) -> tuple[float, int, int]:
-                    (clf_name, band_name), mean_score = item
-                    prefer_standard = 0 if band_name == "standard" else 1
-                    prefer_existing = 0 if clf_name != "ccsp" else 1
-                    return (mean_score, -prefer_standard, -prefer_existing)
-
-                best_key = max(inner_means.items(), key=_sort_key)[0]
-                best_clf, best_band_key = best_key
-
-                if best_clf == "ccsp":
-                    best_band_cfg_name = "standard"
-                    assert source_covs_by_band is not None
-                    outer_score = _evaluate_ccsp_lda(
-                        X_feat_otrain,
-                        X_feat_otest,
-                        y_otrain,
-                        y_otest,
-                        X_mc_otrain,
-                        X_mc_otest,
-                        source_covs_by_band,
-                        sfreq,
-                        k_best,
-                        composite_csp_lam,
-                        FBCSP_BANDS,
-                        outer_train_cache,
-                        outer_test_cache,
-                    )
-                elif best_clf == "riemann":
-                    best_band_cfg_name = "standard"
-                    outer_score = _evaluate_classifier(
-                        best_clf,
-                        X_feat_otrain,
-                        X_feat_otest,
-                        y_otrain,
-                        y_otest,
-                        X_mc_otrain,
-                        X_mc_otest,
-                        sfreq,
-                        k_best,
-                        prefiltered_train=outer_train_cache,
-                        prefiltered_test=outer_test_cache,
-                    )
-                else:
-                    best_band_cfg_name = best_band_key
-                    outer_score = _evaluate_classifier(
-                        best_clf,
-                        X_feat_otrain,
-                        X_feat_otest,
-                        y_otrain,
-                        y_otest,
-                        X_mc_otrain,
-                        X_mc_otest,
-                        sfreq,
-                        k_best,
-                        prefiltered_train=outer_train_cache,
-                        prefiltered_test=outer_test_cache,
-                        bands=effective_candidates[best_band_cfg_name],
-                    )
-
-            fold_scores.append(outer_score)
-            fold_clf_winners.append(best_clf)
-            fold_band_winners.append(best_band_cfg_name)
-
-            if not aug_enabled:
-                stacking_outer = _stacking_score(
+                best_band_cfg_name = best_band_key
+                outer_score = _evaluate_classifier(
+                    best_clf,
                     X_feat_otrain,
                     X_feat_otest,
                     y_otrain,
@@ -1640,11 +990,14 @@ def _evaluate_subject_nested_model_selection(
                     X_mc_otest,
                     sfreq,
                     k_best,
-                    inner_splits=inner_splits,
                     prefiltered_train=outer_train_cache,
                     prefiltered_test=outer_test_cache,
+                    bands=effective_candidates[best_band_cfg_name],
                 )
-                stacking_fold_scores.append(stacking_outer)
+
+            fold_scores.append(outer_score)
+            fold_clf_winners.append(best_clf)
+            fold_band_winners.append(best_band_cfg_name)
 
         score = float(np.mean(fold_scores)) if fold_scores else 0.5
         clf_counts = Counter(fold_clf_winners)
@@ -1653,10 +1006,7 @@ def _evaluate_subject_nested_model_selection(
         best_band_config = (
             band_counts.most_common(1)[0][0] if band_counts else "standard"
         )
-        stacking_score = (
-            float(np.mean(stacking_fold_scores)) if stacking_fold_scores else 0.5
-        )
-        return score, best_method, best_band_config, stacking_score
+        return score, best_method, best_band_config
 
 
 def train_nested_model_selection_cv(
@@ -1672,17 +1022,13 @@ def train_nested_model_selection_cv(
     trial_group_size: int = 5,
     random_state: int = 42,
     n_jobs: int = 1,
-    parallel_backend: ParallelBackend = "loky",
     max_blas_threads_per_worker: int = 1,
-    enable_band_cache: bool = True,
-    cache_scope: CacheScope = "subject",
     band_candidates: dict[str, list[tuple[float, float]]] | None = None,
-    augmentation_by_subject: list[AugmentationContext | None] | None = None,
     use_composite_csp: bool = False,
     composite_csp_lam: float = 0.3,
     session_level_ea: bool = False,
     trial_session_ids_by_subject: list[np.ndarray] | None = None,
-) -> tuple[list[float], float, float, list[str], list[str], list[float]]:
+) -> tuple[list[float], float, float, list[str], list[str]]:
     """Nested model-selection CV that picks the best classifier per outer fold.
 
     Outer loop: StratifiedKFold(n_outer_folds) per subject.
@@ -1690,55 +1036,16 @@ def train_nested_model_selection_cv(
     configs when *band_candidates* is provided) via inner CV on the outer-train
     split, pick the best, retrain on full outer-train, and evaluate on outer-test.
 
-    Stacking is reported as an additional, independent per-subject metric and
-    does not participate in inner-CV selection.
-
     Returns:
         Tuple of (per_subject_scores, mean, std, per_subject_best_methods,
-        per_subject_best_band_configs, per_subject_stacking_scores).
+        per_subject_best_band_configs).
     """
-    payloads: list[
-        tuple[
-            np.ndarray,
-            np.ndarray,
-            np.ndarray,
-            np.ndarray | None,
-            np.ndarray | None,
-            AugmentationContext | None,
-            np.ndarray | None,
-        ]
-    ] = []
-    for subj_idx, ((X_features, X_multichannel), y) in enumerate(
-        zip(X_by_subject, y_by_subject)
-    ):
-        groups = _resolve_subject_groups(
-            y,
-            provided_groups=trial_groups_by_subject,
-            subject_index=subj_idx,
-            split_strategy=split_strategy,
-            trial_group_size=trial_group_size,
-        )
-        trial_ptps = trial_ptps_by_subject[subj_idx] if trial_ptps_by_subject else None
-        aug = (
-            augmentation_by_subject[subj_idx]
-            if augmentation_by_subject is not None
-            else None
-        )
-        session_ids = (
-            trial_session_ids_by_subject[subj_idx]
-            if trial_session_ids_by_subject is not None
-            else None
-        )
-        payloads.append(
-            (X_features, X_multichannel, y, groups, trial_ptps, aug, session_ids)
-        )
-
     source_covs_by_subject: list[
         dict[tuple[float, float], dict[int, np.ndarray]] | None
-    ] = [None] * len(payloads)
+    ] = [None] * len(X_by_subject)
     if use_composite_csp and len(X_by_subject) >= 2:
         source_caches = [
-            _precompute_bandpassed(X_mc, sfreq, bands=FBCSP_BANDS)
+            precompute_bandpassed(X_mc, sfreq, bands=FBCSP_BANDS)
             for _, X_mc in X_by_subject
         ]
         for i in range(len(X_by_subject)):
@@ -1751,118 +1058,48 @@ def train_nested_model_selection_cv(
                 sources, FBCSP_BANDS
             )
 
-    eval_kwargs = dict(
-        sfreq=sfreq,
-        n_outer_folds=n_outer_folds,
-        n_inner_folds=n_inner_folds,
-        k_best=k_best,
-        split_strategy=split_strategy,
-        random_state=random_state,
-        enable_band_cache=enable_band_cache,
-        cache_scope=cache_scope,
-        max_blas_threads_per_worker=max_blas_threads_per_worker,
-        band_candidates=band_candidates,
-        composite_csp_lam=composite_csp_lam,
-        session_level_ea=session_level_ea,
-    )
-
-    if n_jobs == 1:
-        per_subject_results = [
-            _evaluate_subject_nested_model_selection(
-                X_features,
-                X_multichannel,
+    per_subject_results = Parallel(n_jobs=n_jobs)(
+        delayed(_evaluate_subject_nested_model_selection)(
+            X_features,
+            X_multichannel,
+            y,
+            sfreq=sfreq,
+            n_outer_folds=n_outer_folds,
+            n_inner_folds=n_inner_folds,
+            k_best=k_best,
+            trial_ptps=trial_ptps_by_subject[i] if trial_ptps_by_subject else None,
+            split_strategy=split_strategy,
+            groups=_resolve_subject_groups(
                 y,
-                trial_ptps=trial_ptps,
-                groups=groups,
-                augmentation=aug,
-                source_covs_by_band=source_covs,
-                session_ids=session_ids,
-                **eval_kwargs,
-            )
-            for (
-                X_features,
-                X_multichannel,
-                y,
-                groups,
-                trial_ptps,
-                aug,
-                session_ids,
-            ), source_covs in zip(payloads, source_covs_by_subject)
-        ]
-    else:
-        per_subject_results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
-            delayed(_evaluate_subject_nested_model_selection)(
-                X_features,
-                X_multichannel,
-                y,
-                trial_ptps=trial_ptps,
-                groups=groups,
-                augmentation=aug,
-                source_covs_by_band=source_covs,
-                session_ids=session_ids,
-                **eval_kwargs,
-            )
-            for (
-                X_features,
-                X_multichannel,
-                y,
-                groups,
-                trial_ptps,
-                aug,
-                session_ids,
-            ), source_covs in zip(payloads, source_covs_by_subject)
+                provided_groups=trial_groups_by_subject,
+                subject_index=i,
+                split_strategy=split_strategy,
+                trial_group_size=trial_group_size,
+            ),
+            random_state=random_state,
+            max_blas_threads_per_worker=max_blas_threads_per_worker,
+            band_candidates=band_candidates,
+            source_covs_by_band=source_covs_by_subject[i],
+            composite_csp_lam=composite_csp_lam,
+            session_ids=(
+                trial_session_ids_by_subject[i]
+                if trial_session_ids_by_subject is not None
+                else None
+            ),
+            session_level_ea=session_level_ea,
         )
+        for i, ((X_features, X_multichannel), y) in enumerate(
+            zip(X_by_subject, y_by_subject)
+        )
+    )
 
     scores = [result[0] for result in per_subject_results]
     best_methods = [result[1] for result in per_subject_results]
     best_band_configs = [result[2] for result in per_subject_results]
-    stacking_scores = [result[3] for result in per_subject_results]
 
     mean_acc = float(np.mean(scores))
     std_acc = float(np.std(scores))
-    return scores, mean_acc, std_acc, best_methods, best_band_configs, stacking_scores
-
-
-# ---------------------------------------------------------------------------
-# Cross-session evaluation
-# ---------------------------------------------------------------------------
-
-
-def cross_session_evaluate(
-    train_data: tuple[np.ndarray, np.ndarray],
-    train_labels: np.ndarray,
-    test_data: tuple[np.ndarray, np.ndarray],
-    test_labels: np.ndarray,
-    sfreq: float = 250.0,
-    k_best: int = 10,
-) -> dict[str, float]:
-    """Train on one session, evaluate on another (no CV — independent test set).
-
-    Args:
-        train_data: (handcrafted_features, multichannel_eeg) from session A.
-        train_labels: Labels from session A.
-        test_data: (handcrafted_features, multichannel_eeg) from session B.
-        test_labels: Labels from session B.
-        sfreq: Sampling frequency in Hz.
-        k_best: Number of features for FBCSP-based classifiers.
-
-    Returns:
-        Dict mapping classifier name to accuracy on session B.
-    """
-    X_feat_train, X_mc_train = train_data
-    X_feat_test, X_mc_test = test_data
-
-    return _evaluate_classifiers_batch(
-        list(ALL_CLASSIFIERS),
-        X_feat_train,
-        X_feat_test,
-        train_labels,
-        test_labels,
-        X_mc_train,
-        X_mc_test,
-        sfreq,
-        k_best,
-    )
+    return scores, mean_acc, std_acc, best_methods, best_band_configs
 
 
 def train_final_model_svm(

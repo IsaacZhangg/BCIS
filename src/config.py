@@ -13,17 +13,15 @@ DEFAULT_SUBJECT_MERGE: dict[str, str] = {
 }
 
 SplitStrategy = Literal["stratified", "stratified_group"]
-ParallelBackend = Literal["loky", "threading"]
-CacheScope = Literal["subject", "outer_fold"]
-RiemannianClassifier = Literal["tangent_lr", "mdm"]
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     """Global training/evaluation settings.
 
-    The defaults are conservative for leakage control: grouped stratified CV keeps
-    nearby trials together while preserving class balance.
+    ``stratified_group`` CV keeps each block of ``trial_group_size`` consecutive
+    same-class trials in one fold; with the default size of 1 every trial is its
+    own group, so nothing is held together.
     """
 
     sfreq: float = 250.0
@@ -36,22 +34,10 @@ class TrainingConfig:
     trial_group_size: int = 1
     random_state: int = 42
     n_jobs: int = -1
-    parallel_backend: ParallelBackend = "loky"
     max_blas_threads_per_worker: int = 1
-    enable_band_cache: bool = True
-    cache_scope: CacheScope = "subject"
     augmentation_weakness_threshold: float = 0.52
     ea_donor_augmentation: bool = True
-    fbcsp_band_candidates: tuple[str, ...] = ("standard", "high_mu", "wide_mu")
     min_evaluation_trials: int = 30
-    # Riemannian knobs (defaults: broadband LWF + TangentSpace + LR).
-    riemannian_band: tuple[float, float] | None = None
-    riemannian_classifier: RiemannianClassifier = "tangent_lr"
-    use_pyriemann_transfer: bool = False
-    # Temporal augmentation (sliding window applied to training data only).
-    temporal_augmentation: bool = False
-    aug_window_sec: float = 2.5
-    aug_stride_sec: float = 0.25
     use_composite_csp: bool = True
     composite_csp_lam: float = 0.3
     session_level_ea: bool = True
@@ -59,11 +45,3 @@ class TrainingConfig:
     def to_dict(self) -> dict:
         """Return a JSON-serializable representation."""
         return asdict(self)
-
-    def config_hash(self) -> str:
-        """Return a 16-char hex hash for cache invalidation."""
-        import hashlib
-        import json
-
-        payload = json.dumps(self.to_dict(), sort_keys=True)
-        return hashlib.sha256(payload.encode()).hexdigest()[:16]
