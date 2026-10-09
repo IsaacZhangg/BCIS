@@ -26,7 +26,7 @@ from src.epochs import (
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
-from src.transfer import gated_ea_augmented_nested_cv, run_transfer_evaluation
+from src.transfer import gated_ea_augmented_nested_cv
 from src.train import (
     FBCSP_BAND_CANDIDATES,
     FBCSP_BANDS,
@@ -134,7 +134,6 @@ def run_pipeline(
     quiet_output: bool = True,
     skip_all_models_cv: bool = False,
     skip_aug: bool = False,
-    skip_transfer: bool = False,
     skip_save: bool = False,
     results_path: Path | None = None,
 ) -> dict:
@@ -566,29 +565,6 @@ def run_pipeline(
             ho_mean = float(np.mean(list(holdout_results.values())))
             print(f"\n  Held-out mean: {ho_mean:.1%}")
 
-    # Step 4b: Cross-subject transfer evaluation
-    step_start = time.perf_counter()
-    transfer_results: dict | None = None
-    if skip_transfer:
-        print("\n[4b/5] Skipping cross-subject transfer evaluation")
-    else:
-        print("\n[4b/5] Cross-subject transfer evaluation (Euclidean Alignment + LOSO)")
-        try:
-            transfer_data_dirs = [data_dir]
-            if MI_DATA_NEW_DIR.exists():
-                transfer_data_dirs.append(MI_DATA_NEW_DIR)
-            within_scores = {
-                sid: float(s) for sid, s in zip(subject_ids, nested_scores)
-            }
-            transfer_results = run_transfer_evaluation(
-                data_dirs=transfer_data_dirs,
-                sfreq=sfreq,
-                within_subject_scores=within_scores,
-            )
-        except Exception as e:
-            print(f"  Transfer evaluation failed: {e}")
-    runtime_seconds["transfer_eval"] = time.perf_counter() - step_start
-
     # Step 5: Train & save per-subject models (nested CV method)
     step_start = time.perf_counter()
     _print_step(5, 5, "Training and saving per-subject models")
@@ -741,9 +717,6 @@ def run_pipeline(
     if holdout_fraction > 0:
         results["holdout_fraction"] = holdout_fraction
         results["holdout_scores"] = holdout_results
-
-    if transfer_results is not None:
-        results["transfer_results"] = transfer_results
 
     if aug_nested_scores is not None:
         results["augmented_nested_scores"] = {
