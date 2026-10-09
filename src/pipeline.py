@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import time
 import warnings
 from pathlib import Path
@@ -65,6 +66,8 @@ def _configure_console_output(quiet: bool) -> None:
     """Silence MNE info logs and short-epoch filter warnings unless verbose."""
     if quiet:
         mne.set_log_level("ERROR")
+        # joblib workers are fresh processes; they read MNE's level from here.
+        os.environ["MNE_LOGGING_LEVEL"] = "ERROR"
         warnings.filterwarnings(
             "ignore",
             message=r"filter_length .* is longer than the signal.*",
