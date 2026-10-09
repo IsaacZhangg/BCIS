@@ -8,7 +8,6 @@ from src.train import (
     FBCSP_BAND_CANDIDATES,
     _evaluate_classifiers_batch,
     _reject_in_fold,
-    cross_session_evaluate,
     predict,
     predict_riemann,
     train_final_model,
@@ -333,37 +332,6 @@ def test_nested_parallel_path_matches_sequential():
 
 
 # ---------- Cross-session evaluation tests ----------
-
-
-def test_cross_session_evaluate_returns_all_methods():
-    """cross_session_evaluate returns accuracy for all 4 classifiers."""
-    rng = np.random.default_rng(42)
-    X_feat_a, X_mc_a = _make_subject_data(rng)
-    X_feat_b, X_mc_b = _make_subject_data(rng)
-
-    results = cross_session_evaluate(
-        (X_feat_a, X_mc_a), LABELS, (X_feat_b, X_mc_b), LABELS
-    )
-
-    assert set(results.keys()) == {"lda", "riemann", "svm", "ensemble"}
-    for acc in results.values():
-        assert 0 <= acc <= 1
-
-
-def test_cross_session_no_leakage():
-    """On random data, cross-session accuracy should stay near chance."""
-    rng = np.random.default_rng(123)
-    X_feat_a, X_mc_a = _make_subject_data(rng)
-    X_feat_b, X_mc_b = _make_subject_data(rng)
-
-    results = cross_session_evaluate(
-        (X_feat_a, X_mc_a), LABELS, (X_feat_b, X_mc_b), LABELS
-    )
-
-    for method, acc in results.items():
-        assert acc < 0.70, (
-            f"Cross-session {method} accuracy {acc:.1%} is suspiciously high"
-        )
 
 
 # ---------- Per-fold artifact rejection tests ----------

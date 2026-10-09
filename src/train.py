@@ -1304,48 +1304,6 @@ def train_nested_model_selection_cv(
     return scores, mean_acc, std_acc, best_methods, best_band_configs, stacking_scores
 
 
-# ---------------------------------------------------------------------------
-# Cross-session evaluation
-# ---------------------------------------------------------------------------
-
-
-def cross_session_evaluate(
-    train_data: tuple[np.ndarray, np.ndarray],
-    train_labels: np.ndarray,
-    test_data: tuple[np.ndarray, np.ndarray],
-    test_labels: np.ndarray,
-    sfreq: float = 250.0,
-    k_best: int = 10,
-) -> dict[str, float]:
-    """Train on one session, evaluate on another (no CV — independent test set).
-
-    Args:
-        train_data: (handcrafted_features, multichannel_eeg) from session A.
-        train_labels: Labels from session A.
-        test_data: (handcrafted_features, multichannel_eeg) from session B.
-        test_labels: Labels from session B.
-        sfreq: Sampling frequency in Hz.
-        k_best: Number of features for FBCSP-based classifiers.
-
-    Returns:
-        Dict mapping classifier name to accuracy on session B.
-    """
-    X_feat_train, X_mc_train = train_data
-    X_feat_test, X_mc_test = test_data
-
-    return _evaluate_classifiers_batch(
-        list(ALL_CLASSIFIERS),
-        X_feat_train,
-        X_feat_test,
-        train_labels,
-        test_labels,
-        X_mc_train,
-        X_mc_test,
-        sfreq,
-        k_best,
-    )
-
-
 def train_final_model_svm(
     X_features: np.ndarray,
     X_multichannel: np.ndarray,

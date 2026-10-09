@@ -41,7 +41,6 @@ def main() -> None:
         skip_all_models_cv=True,
         skip_aug=True,
         skip_transfer=True,
-        skip_cross_session=True,
         skip_save=True,
         results_path=results_path,
         quiet_output=True,

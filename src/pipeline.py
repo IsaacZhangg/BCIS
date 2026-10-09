@@ -14,7 +14,6 @@ from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR, TrainingConfig
 from src.data_loader import (
     CHANNELS,
     discover_recordings,
-    get_recordings_by_subject,
     load_recording,
 )
 from src.epochs import (
@@ -31,7 +30,6 @@ from src.transfer import gated_ea_augmented_nested_cv, run_transfer_evaluation
 from src.train import (
     FBCSP_BAND_CANDIDATES,
     FBCSP_BANDS,
-    cross_session_evaluate,
     train_final_model,
     train_final_model_riemann,
     train_final_model_svm,
@@ -75,55 +73,6 @@ def _configure_console_output(quiet: bool) -> None:
         )
     else:
         mne.set_log_level("INFO")
-
-
-def _process_recording(
-    rec_path: Path,
-    sfreq: float,
-    threshold_uv: float | None = None,
-) -> tuple | None:
-    """Load, preprocess, epoch, and artifact-reject a single recording."""
-    data, events, _ = load_recording(rec_path)
-    preprocessed = preprocess_multichannel_eeg(data, sfreq)
-
-    left_pairs_by_channel: dict = {}
-    right_pairs_by_channel: dict = {}
-    for ch_idx, ch_name in enumerate(CHANNELS):
-        signal = preprocessed[ch_idx]
-        left, right = extract_left_right_epochs(
-            signal,
-            events,
-            sfreq,
-            task_duration=3.0,
-            baseline_duration=1.0,
-            skip_duration=0.25,
-        )
-        left_pairs_by_channel[ch_name] = left
-        right_pairs_by_channel[ch_name] = right
-
-    n_left_raw = len(left_pairs_by_channel[CHANNELS[0]])
-    n_right_raw = len(right_pairs_by_channel[CHANNELS[0]])
-
-    left_pairs_by_channel, right_pairs_by_channel, rej_l, rej_r = reject_bad_epochs(
-        left_pairs_by_channel,
-        right_pairs_by_channel,
-        threshold_uv=threshold_uv,
-    )
-
-    n_left = len(left_pairs_by_channel[CHANNELS[0]])
-    n_right = len(right_pairs_by_channel[CHANNELS[0]])
-
-    if n_left == 0 or n_right == 0:
-        return None
-
-    return (
-        left_pairs_by_channel,
-        right_pairs_by_channel,
-        n_left_raw,
-        n_right_raw,
-        rej_l,
-        rej_r,
-    )
 
 
 def _split_epoch_pairs(
@@ -187,7 +136,6 @@ def run_pipeline(
     skip_all_models_cv: bool = False,
     skip_aug: bool = False,
     skip_transfer: bool = False,
-    skip_cross_session: bool = False,
     skip_save: bool = False,
     results_path: Path | None = None,
 ) -> dict:
@@ -630,42 +578,6 @@ def run_pipeline(
             ho_mean = float(np.mean(list(holdout_results.values())))
             print(f"\n  Held-out mean: {ho_mean:.1%}")
 
-    # Step 4: Cross-session evaluation
-    step_start = time.perf_counter()
-    _print_step(4, 5, "Cross-session evaluation")
-    recordings_by_subject = get_recordings_by_subject(data_dir)
-    multi_session_subjects = {
-        sid: paths for sid, paths in recordings_by_subject.items() if len(paths) > 1
-    }
-
-    cross_session_results: dict[str, dict[str, float]] = {}
-    if skip_cross_session:
-        print("  Skipping cross-session evaluation")
-    elif multi_session_subjects:
-        for sid, paths in multi_session_subjects.items():
-            print(f"  {sid}: {len(paths)} sessions, evaluating cross-session...")
-            result_a = _process_recording(paths[0], sfreq)
-            result_b = _process_recording(paths[1], sfreq)
-            if result_a is None or result_b is None:
-                print(f"    Skipping {sid} — insufficient epochs in one session")
-                continue
-            left_a, right_a, *_ = result_a
-            left_b, right_b, *_ = result_b
-            X_feat_a, X_mc_a, y_a = _pairs_to_features(left_a, right_a, sfreq)
-            X_feat_b, X_mc_b, y_b = _pairs_to_features(left_b, right_b, sfreq)
-            cs_results = cross_session_evaluate(
-                (X_feat_a, X_mc_a), y_a, (X_feat_b, X_mc_b), y_b, sfreq=sfreq
-            )
-            cross_session_results[sid] = cs_results
-            for method, acc in cs_results.items():
-                print(f"    {method}: {acc:.1%}")
-    else:
-        print(
-            "  WARNING: All subjects have a single recording. "
-            "Cross-session evaluation requires >=2 recordings per subject."
-        )
-    runtime_seconds["cross_session_eval"] = time.perf_counter() - step_start
-
     # Step 4b: Cross-subject transfer evaluation
     step_start = time.perf_counter()
     transfer_results: dict | None = None
@@ -849,9 +761,6 @@ def run_pipeline(
     if holdout_fraction > 0:
         results["holdout_fraction"] = holdout_fraction
         results["holdout_scores"] = holdout_results
-
-    if cross_session_results:
-        results["cross_session_results"] = cross_session_results
 
     if transfer_results is not None:
         results["transfer_results"] = transfer_results
