@@ -67,7 +67,7 @@ The pipeline uses a "best-of-many" approach, evaluating multiple methods per fol
 │   ├── features.py       # Feature extraction (ERD, Hjorth, envelope)
 │   ├── train.py          # Training with cross-validation
 │   └── pipeline.py       # Main pipeline orchestration
-├── models/               # Trained model + scaler + training_results.json (tracked)
+├── models/               # Local trained model + scaler + training_results.json (gitignored)
 ├── tests/
 │   ├── test_data_loader.py
 │   ├── test_epochs.py
@@ -76,7 +76,7 @@ The pipeline uses a "best-of-many" approach, evaluating multiple methods per fol
 │   └── test_train.py
 ├── docs/
 │   └── plans/            # Design and implementation docs
-├── unicorn-data/         # EEG recordings (tracked)
+├── unicorn-data/         # Local participant recordings (gitignored)
 └── pyproject.toml
 ```
 
@@ -91,7 +91,7 @@ git checkout P3P4
 uv sync
 ```
 
-Recordings live in `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv` and are committed. Trained models and `models/training_results.json` are also committed so a clone can load them without re-running the pipeline.
+Place authorized recordings under `unicorn-data/subject{NNNN}/session{NNN}/recording_*.csv`. This directory is gitignored and is not included in a fresh clone. The pipeline writes the trained model, scaler and `models/training_results.json` to the gitignored `models/` directory, so they are not included in a clone either. Tests that read real recordings are skipped when `unicorn-data/` is absent.
 
 ```bash
 # Run the training pipeline
