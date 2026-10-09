@@ -2,14 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 from scipy.signal import coherence, welch
-from scipy.stats import kurtosis, skew
-
-if TYPE_CHECKING:
-    from mne.decoding import CSP
 
 
 def _welch_nperseg(epoch: np.ndarray, sfreq: float) -> int:
@@ -28,16 +22,6 @@ def compute_band_power(
     freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low_freq) & (freqs <= high_freq)
     return float(np.mean(psd[mask]))
-
-
-def compute_theta_power(
-    epoch: np.ndarray,
-    sfreq: float,
-    theta_low: float = 4.0,
-    theta_high: float = 8.0,
-) -> float:
-    """Compute theta band power (backward compatible)."""
-    return compute_band_power(epoch, sfreq, theta_low, theta_high)
 
 
 def compute_hjorth_parameters(epoch: np.ndarray) -> tuple[float, float, float]:
@@ -79,21 +63,6 @@ def compute_spectral_entropy(
     return float(entropy / (max_entropy + 1e-10))
 
 
-def compute_peak_frequency(
-    epoch: np.ndarray,
-    sfreq: float,
-    low: float,
-    high: float,
-) -> float:
-    """Return the peak frequency in [low, high] Hz."""
-    nperseg = _welch_nperseg(epoch, sfreq)
-    freqs, psd = welch(epoch, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
-    mask = (freqs >= low) & (freqs <= high)
-    freqs_band = freqs[mask]
-    psd_band = psd[mask]
-    return float(freqs_band[np.argmax(psd_band)])
-
-
 def compute_c3c4_coherence(
     c3: np.ndarray,
     c4: np.ndarray,
@@ -106,43 +75,6 @@ def compute_c3c4_coherence(
     freqs, coh = coherence(c3, c4, sfreq, nperseg=nperseg, noverlap=nperseg // 2)
     mask = (freqs >= low) & (freqs <= high)
     return float(np.mean(coh[mask]))
-
-
-def compute_statistical_features(epoch: np.ndarray) -> tuple[float, float, float]:
-    """Return (skewness, kurtosis, zero-crossing rate) for *epoch*."""
-    sk = float(skew(epoch))
-    ku = float(kurtosis(epoch))  # Fisher definition (normal → 0)
-    zcr = float(np.sum(np.diff(np.sign(epoch)) != 0)) / (len(epoch) - 1)
-    return sk, ku, zcr
-
-
-def extract_features(
-    epochs: list[np.ndarray],
-    sfreq: float,
-    log_transform: bool = True,
-) -> np.ndarray:
-    """Extract theta power features from a list of epochs (backward compatible)."""
-    powers = [compute_theta_power(epoch, sfreq) for epoch in epochs]
-    if log_transform:
-        powers = [np.log(p + 1e-10) for p in powers]
-    return np.array(powers).reshape(-1, 1)
-
-
-def compute_lateralization_index(
-    c3_signal: np.ndarray,
-    c4_signal: np.ndarray,
-    sfreq: float,
-    low_freq: float,
-    high_freq: float,
-) -> float:
-    """Compute C3-C4 lateralization index: (C4-C3)/(C4+C3) power in band.
-
-    Positive = left hand imagery (C3 desync), negative = right hand imagery (C4 desync).
-    """
-    c3_power = compute_band_power(c3_signal, sfreq, low_freq, high_freq)
-    c4_power = compute_band_power(c4_signal, sfreq, low_freq, high_freq)
-
-    return (c4_power - c3_power) / (c4_power + c3_power + 1e-10)
 
 
 def extract_lateralization_features(
@@ -263,102 +195,3 @@ def extract_lateralization_features(
         all_features.append(epoch_features)
 
     return np.array(all_features)
-
-
-def _window_pairs_by_channel(
-    epoch_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    offsets: list[int],
-    window_samples: int,
-) -> tuple[dict[str, list[tuple[np.ndarray, np.ndarray]]], np.ndarray]:
-    """Build a new pairs dict where each task epoch is sliced at *offsets*.
-
-    Baselines are left untouched (they are already 1.0s and lie outside the
-    task window).  Each original trial contributes ``len(offsets)`` entries.
-    Returns the expanded dict plus a 1D array of source trial indices.
-    """
-    channels = list(epoch_pairs_by_channel.keys())
-    n_trials = len(epoch_pairs_by_channel[channels[0]])
-
-    new_pairs: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
-        ch: [] for ch in channels
-    }
-    origins: list[int] = []
-    for trial_idx in range(n_trials):
-        for start in offsets:
-            for ch in channels:
-                baseline, task = epoch_pairs_by_channel[ch][trial_idx]
-                windowed = task[start : start + window_samples]
-                new_pairs[ch].append((baseline, windowed))
-            origins.append(trial_idx)
-    return new_pairs, np.asarray(origins, dtype=int)
-
-
-def extract_lateralization_features_windowed(
-    epoch_pairs_by_channel: dict[str, list[tuple[np.ndarray, np.ndarray]]],
-    sfreq: float,
-    offsets: list[int],
-    window_samples: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute lateralization features over one or more task-window offsets.
-
-    Each original epoch contributes ``len(offsets)`` output rows.  Returns a
-    ``(n_trials * n_windows, n_features)`` feature array and a companion
-    ``(n_trials * n_windows,)`` array mapping each row to its source trial.
-    """
-    windowed_pairs, origins = _window_pairs_by_channel(
-        epoch_pairs_by_channel, offsets, window_samples
-    )
-    feats = extract_lateralization_features(windowed_pairs, sfreq)
-    return feats, origins
-
-
-def extract_csp_features(
-    X: np.ndarray,
-    y: np.ndarray,
-    sfreq: float,
-    n_components: int = 4,
-    freq_band: tuple[float, float] = (8, 30),
-) -> tuple[np.ndarray, CSP]:
-    """Extract CSP features: bandpass to freq_band, then fit-transform CSP.
-
-    Returns (features of shape (n_epochs, n_components), fitted CSP model).
-    """
-    import mne
-    from mne.decoding import CSP
-
-    X_filtered = mne.filter.filter_data(
-        X, sfreq, l_freq=freq_band[0], h_freq=freq_band[1], verbose=False
-    )
-
-    csp = CSP(
-        n_components=n_components,
-        reg="oas",
-        log=True,
-        norm_trace=True,
-    )
-    features = csp.fit_transform(X_filtered, y)
-
-    return features, csp
-
-
-def pairs_to_features(
-    left_pairs: dict,
-    right_pairs: dict,
-    sfreq: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert cleaned epoch pairs to feature arrays and labels."""
-    from src.data_loader import CHANNELS
-    from src.epochs import task_epochs
-
-    n_left = len(left_pairs[CHANNELS[0]])
-    n_right = len(right_pairs[CHANNELS[0]])
-
-    left_features = extract_lateralization_features(left_pairs, sfreq)
-    right_features = extract_lateralization_features(right_pairs, sfreq)
-
-    X_multichannel = np.vstack(
-        [task_epochs(left_pairs, CHANNELS), task_epochs(right_pairs, CHANNELS)]
-    )
-    X_features = np.vstack([left_features, right_features])
-    y = np.array([0] * n_left + [1] * n_right)
-    return X_features, X_multichannel, y

@@ -2,37 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import numpy as np
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
-from pyriemann.utils.geodesic import geodesic_riemann
 from pyriemann.utils.mean import mean_covariance
 from sklearn.linear_model import LogisticRegression
 
-from src.alignment import apply_ea_transform, compute_ea_transform, euclidean_align
-
-# pyriemann.transfer availability probe (pyriemann 0.10 on 2026-04-17):
-# TLCenter and TLScale are available; TLStretch was renamed to TLScale in
-# recent releases. We import defensively so a future removal/rename logs a
-# warning and falls back to the manual EA path below.
-try:
-    from pyriemann.transfer import (  # type: ignore[attr-defined]
-        TLCenter,
-        TLScale,
-        encode_domains,
-    )
-
-    _PYRIEMANN_TRANSFER_AVAILABLE = True
-    _PYRIEMANN_TRANSFER_ERROR: str | None = None
-except ImportError as _exc:  # pragma: no cover
-    TLCenter = None  # type: ignore[assignment]
-    TLScale = None  # type: ignore[assignment]
-    encode_domains = None  # type: ignore[assignment]
-    _PYRIEMANN_TRANSFER_AVAILABLE = False
-    _PYRIEMANN_TRANSFER_ERROR = str(_exc)
+from src.alignment import euclidean_align
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR
 from src.data_loader import CHANNELS, discover_recordings, load_recording
 from src.epochs import (
@@ -43,8 +21,6 @@ from src.epochs import (
 )
 from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
-
-logger = logging.getLogger(__name__)
 
 
 def load_all_subjects(
@@ -127,256 +103,6 @@ def load_all_subjects(
         subjects[sid] = (X_features, X_mc, y)
 
     return subjects
-
-
-def _pyriemann_transfer_align_per_subject(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    cov_estimator: Covariances,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Align per-subject covariances with pyriemann.transfer.{TLCenter, TLScale}.
-
-    TLCenter re-centers each subject's covariances to the identity (analogous to
-    manual EA) while TLScale additionally normalizes dispersion. Domains are
-    keyed by subject ID via ``encode_domains``-style (sample_idx, domain) pairs
-    supplied to fit/transform.
-
-    Callers must verify availability via ``_PYRIEMANN_TRANSFER_AVAILABLE``
-    before invoking.
-    """
-    assert TLCenter is not None and TLScale is not None and encode_domains is not None
-    aligned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    for sid in sorted(subjects.keys()):
-        _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        domains = np.array([sid] * len(covs))
-        # TLCenter/TLScale consume composite 'domain/label' strings produced by
-        # encode_domains; fitting per-subject with that subject as the target
-        # domain re-centers its covariances to identity.
-        _, y_enc = encode_domains(covs, y, domains)
-        center = TLCenter(target_domain=sid, metric="riemann")
-        scale = TLScale(target_domain=sid, metric="riemann")
-        covs_c = center.fit_transform(covs, y_enc)
-        covs_cs = scale.fit_transform(covs_c, y_enc)
-        aligned[sid] = (covs_cs, y)
-    return aligned
-
-
-def align_subjects(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    sfreq: float = 250.0,
-    use_pyriemann_transfer: bool = False,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Compute covariance matrices and apply Euclidean Alignment across subjects.
-
-    EA re-centers each subject's covariance distribution to the identity matrix,
-    removing inter-subject variability from electrode impedance and placement.
-
-    Args:
-        subjects: Dict mapping subject_id to (X_multichannel, y).
-        sfreq: Sampling frequency (unused, kept for API consistency).
-        use_pyriemann_transfer: If True and ``pyriemann.transfer`` is importable,
-            use ``TLCenter`` + ``TLScale`` per subject instead of manual EA.
-            Falls back to manual EA with a warning if the import probe failed.
-
-    Returns:
-        Tuple of:
-        - aligned_covs: (total_trials, n_channels, n_channels) aligned SPD matrices
-        - labels: (total_trials,) class labels
-        - subject_ids: list of subject_id per trial (for LOSO indexing)
-    """
-    cov_estimator = Covariances(estimator="lwf")
-
-    if use_pyriemann_transfer and not _PYRIEMANN_TRANSFER_AVAILABLE:
-        logger.warning(
-            "use_pyriemann_transfer=True but pyriemann.transfer import failed "
-            "(%s); falling back to manual Euclidean Alignment.",
-            _PYRIEMANN_TRANSFER_ERROR,
-        )
-        use_pyriemann_transfer = False
-
-    if use_pyriemann_transfer:
-        aligned_map = _pyriemann_transfer_align_per_subject(subjects, cov_estimator)
-        all_covs = []
-        all_labels = []
-        all_subject_ids: list[str] = []
-        for sid in sorted(subjects.keys()):
-            covs_aligned, y = aligned_map[sid]
-            all_covs.append(covs_aligned)
-            all_labels.append(y)
-            all_subject_ids.extend([sid] * len(y))
-        return np.vstack(all_covs), np.concatenate(all_labels), all_subject_ids
-
-    all_covs = []
-    all_labels = []
-    all_subject_ids = []
-
-    for sid in sorted(subjects.keys()):
-        _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        covs_aligned, _ = euclidean_align(covs)
-
-        all_covs.append(covs_aligned)
-        all_labels.append(y)
-        all_subject_ids.extend([sid] * len(y))
-
-    return np.vstack(all_covs), np.concatenate(all_labels), all_subject_ids
-
-
-def shrink_covariances(
-    covs: np.ndarray,
-    target: np.ndarray,
-    alpha: float,
-) -> np.ndarray:
-    """Shrink covariance matrices toward a target along the Riemannian geodesic.
-
-    Uses affine-invariant Riemannian geodesic interpolation:
-    C_shrunk = geodesic(C, target, alpha)
-
-    Args:
-        covs: (n_trials, n, n) SPD matrices.
-        target: (n, n) SPD matrix to shrink toward (e.g., group Riemannian mean).
-        alpha: Shrinkage strength in [0, 1]. 0 = no shrinkage, 1 = full shrinkage.
-
-    Returns:
-        (n_trials, n, n) shrunk SPD matrices.
-    """
-    if alpha <= 0.0:
-        return covs.copy()
-    if alpha >= 1.0:
-        return np.broadcast_to(target, covs.shape).copy()
-    # geodesic_riemann(A, B, alpha): moves from A toward B by alpha
-    return geodesic_riemann(covs, np.broadcast_to(target, covs.shape), alpha)
-
-
-def regularized_within_subject_cv(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    sfreq: float = 250.0,
-    shrinkage_k: float = 20.0,
-    n_folds: int = 10,
-    random_state: int = 42,
-) -> dict[str, float]:
-    """Within-subject CV with covariance shrinkage toward cross-subject group mean.
-
-    For each subject:
-    1. Estimate covariances with LWF, align via EA
-    2. Shrink toward group Riemannian mean (alpha = k / (k + n_trials))
-    3. Run stratified K-fold CV: TangentSpace + LogisticRegression
-
-    Args:
-        subjects: Dict mapping subject_id to (X_multichannel, y).
-        sfreq: Sampling frequency.
-        shrinkage_k: Controls shrinkage strength. Higher = more shrinkage.
-            alpha = shrinkage_k / (shrinkage_k + n_trials).
-        n_folds: Number of CV folds.
-        random_state: Random seed.
-
-    Returns:
-        Dict mapping subject_id to regularized within-subject accuracy.
-    """
-    from sklearn.model_selection import StratifiedKFold
-
-    cov_estimator = Covariances(estimator="lwf")
-
-    aligned_per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    all_aligned_covs = []
-    for sid in sorted(subjects.keys()):
-        _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        covs_aligned, _ = euclidean_align(covs)
-        aligned_per_subject[sid] = (covs_aligned, y)
-        all_aligned_covs.append(covs_aligned)
-
-    all_covs = np.vstack(all_aligned_covs)
-    group_mean = mean_covariance(all_covs, metric="riemann")
-
-    scores: dict[str, float] = {}
-    for sid in sorted(subjects.keys()):
-        covs, y = aligned_per_subject[sid]
-        n_trials = len(y)
-        alpha = shrinkage_k / (shrinkage_k + n_trials)
-
-        # Shrink toward group mean
-        covs_shrunk = shrink_covariances(covs, group_mean, alpha)
-
-        # Stratified K-fold CV
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-        fold_scores = []
-        for train_idx, test_idx in skf.split(covs_shrunk, y):
-            ts = TangentSpace(metric="riemann")
-            X_train = ts.fit_transform(covs_shrunk[train_idx])
-            X_test = ts.transform(covs_shrunk[test_idx])
-
-            clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
-            clf.fit(X_train, y[train_idx])
-            fold_scores.append(float(clf.score(X_test, y[test_idx])))
-
-        scores[sid] = float(np.mean(fold_scores))
-
-    return scores
-
-
-def leakfree_group_shrink_cv(
-    subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    shrinkage_k: float = 20.0,
-    n_folds: int = 10,
-    random_state: int = 42,
-    split_strategy: str = "stratified_group",
-    groups_by_subject: dict[str, np.ndarray] | None = None,
-) -> dict[str, float]:
-    """Within-subject Riemann CV with group-mean shrinkage that never sees test trials.
-
-    Group mean is the Riemannian mean of *other* subjects' EA-aligned covariances.
-    Target EA is fit on the training fold only, then train and test covariances
-    are shrunk toward that source-only mean.
-    """
-    from src.validation import make_cv_splits
-
-    cov_estimator = Covariances(estimator="lwf")
-    raw_covs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    aligned_full: dict[str, np.ndarray] = {}
-    for sid in sorted(subjects.keys()):
-        _, X_mc, y = subjects[sid]
-        covs = cov_estimator.fit_transform(X_mc)
-        raw_covs[sid] = (covs, y)
-        aligned, _ = euclidean_align(covs)
-        aligned_full[sid] = aligned
-
-    scores: dict[str, float] = {}
-    sids = sorted(subjects.keys())
-    for sid in sids:
-        covs, y = raw_covs[sid]
-        others = [aligned_full[o] for o in sids if o != sid]
-        if not others:
-            scores[sid] = 0.5
-            continue
-        group_mean = mean_covariance(np.vstack(others), metric="riemann")
-        groups = None if groups_by_subject is None else groups_by_subject.get(sid)
-        splits = make_cv_splits(
-            y,
-            n_splits=n_folds,
-            strategy=split_strategy,  # type: ignore[arg-type]
-            groups=groups,
-            random_state=random_state,
-        )
-        n_train_typical = max(len(y) - max(1, len(y) // n_folds), 1)
-        alpha = shrinkage_k / (shrinkage_k + n_train_typical)
-        fold_scores = []
-        for train_idx, test_idx in splits:
-            if len(train_idx) < 2 or len(test_idx) < 1:
-                continue
-            ref_inv = compute_ea_transform(covs[train_idx])
-            train_aln = apply_ea_transform(covs[train_idx], ref_inv)
-            test_aln = apply_ea_transform(covs[test_idx], ref_inv)
-            train_shrunk = shrink_covariances(train_aln, group_mean, alpha)
-            test_shrunk = shrink_covariances(test_aln, group_mean, alpha)
-            ts = TangentSpace(metric="riemann")
-            X_train = ts.fit_transform(train_shrunk)
-            X_test = ts.transform(test_shrunk)
-            clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
-            clf.fit(X_train, y[train_idx])
-            fold_scores.append(float(clf.score(X_test, y[test_idx])))
-        scores[sid] = float(np.mean(fold_scores)) if fold_scores else 0.5
-    return scores
 
 
 def adaptive_augmented_cv(
@@ -490,8 +216,6 @@ def adaptive_augmented_cv(
 
 def loso_cv(
     subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    sfreq: float = 250.0,
-    fine_tune: bool = False,
 ) -> dict[str, float]:
     """Leave-one-subject-out CV with Euclidean Alignment.
 
@@ -499,13 +223,9 @@ def loso_cv(
     1. Align all subjects independently (EA per subject)
     2. Train TangentSpace + LR on aligned data from all other subjects
     3. Test on held-out subject's aligned data
-    4. (If fine_tune) Re-center tangent space reference on held-out subject's mean
 
     Args:
-        subjects: Dict mapping subject_id to (X_multichannel, y).
-        sfreq: Sampling frequency.
-        fine_tune: If True, re-center the tangent space reference point
-            to the held-out subject's Riemannian mean before testing.
+        subjects: Dict mapping subject_id to (X_features, X_multichannel, y).
 
     Returns:
         Dict mapping subject_id to LOSO accuracy.
@@ -537,21 +257,9 @@ def loso_cv(
 
         X_test, y_test = aligned_per_subject[held_out]
 
-        if fine_tune:
-            # Re-center tangent space on held-out subject's mean
-            test_ref = mean_covariance(X_test, metric="riemann")
-            # Train projection uses pooled training data reference
-            train_ts = TangentSpace(metric="riemann")
-            X_train_ts = train_ts.fit_transform(X_train)
-            # Test projection uses held-out subject's own reference
-            test_ts = TangentSpace(metric="riemann")
-            test_ts.fit(X_train)  # fit to get consistent dimensionality
-            test_ts.reference_ = test_ref  # override reference point
-            X_test_ts = test_ts.transform(X_test)
-        else:
-            pipe_ts = TangentSpace(metric="riemann")
-            X_train_ts = pipe_ts.fit_transform(X_train)
-            X_test_ts = pipe_ts.transform(X_test)
+        pipe_ts = TangentSpace(metric="riemann")
+        X_train_ts = pipe_ts.fit_transform(X_train)
+        X_test_ts = pipe_ts.transform(X_test)
 
         clf = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
         clf.fit(X_train_ts, y_train)
@@ -576,7 +284,7 @@ def run_transfer_evaluation(
             for comparison table.
 
     Returns:
-        Results dict with LOSO and LOSO+FT scores.
+        Results dict with adaptive FBCSP and LOSO scores.
     """
     if data_dirs is None:
         data_dirs = [Path("data/unicorn-data"), MI_DATA_NEW_DIR]
@@ -602,7 +310,7 @@ def run_transfer_evaluation(
     fbcsp_adp_mean = float(np.mean(list(fbcsp_adaptive.values())))
 
     print("Running LOSO CV...")
-    loso_scores = loso_cv(subjects, sfreq=sfreq, fine_tune=False)
+    loso_scores = loso_cv(subjects)
     loso_mean = float(np.mean(list(loso_scores.values())))
 
     # Print comparison table
@@ -881,46 +589,6 @@ def gated_ea_augmented_nested_cv(
     strategy_counts = Counter(fold_strategies)
     most_common = strategy_counts.most_common(1)[0][0] if strategy_counts else "none"
     return accuracy, most_common, accuracy
-
-
-def select_nearest_donor(
-    target_id: str,
-    target_mc: np.ndarray,
-    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-) -> tuple[str, float]:
-    """Select the nearest donor by Riemannian distance between covariance means.
-
-    Args:
-        target_id: Subject ID to exclude from donors.
-        target_mc: Target multichannel EEG (n_trials, n_channels, n_samples).
-        donor_subjects: Dict mapping subject_id -> (features, multichannel, labels).
-
-    Returns:
-        (best_donor_id, distance).
-    """
-    from pyriemann.estimation import Covariances
-    from pyriemann.utils.distance import distance_riemann
-    from pyriemann.utils.mean import mean_covariance
-
-    cov_est = Covariances(estimator="lwf")
-    target_mean = mean_covariance(cov_est.fit_transform(target_mc), metric="riemann")
-
-    best_donor = None
-    best_dist = float("inf")
-
-    for sid, (_, mc, _) in donor_subjects.items():
-        if sid == target_id:
-            continue
-        donor_mean = mean_covariance(cov_est.fit_transform(mc), metric="riemann")
-        dist = float(distance_riemann(target_mean, donor_mean))
-        if dist < best_dist:
-            best_dist = dist
-            best_donor = sid
-
-    if best_donor is None:
-        raise ValueError("No donors available (all excluded)")
-
-    return best_donor, best_dist
 
 
 if __name__ == "__main__":

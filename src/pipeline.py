@@ -1,10 +1,13 @@
 """Main pipeline: load data, preprocess, extract features, train left/right classifier."""
 
+import argparse
 import json
 import time
+import warnings
 from pathlib import Path
 
 import joblib
+import mne
 import numpy as np
 
 from src.config import DEFAULT_SUBJECT_MERGE, MI_DATA_NEW_DIR, TrainingConfig
@@ -16,24 +19,16 @@ from src.data_loader import (
 )
 from src.epochs import (
     adaptive_threshold,
-    center_crop_offset,
     compute_rejection_threshold,
     compute_trial_max_ptp,
     extract_left_right_epochs,
-    expand_trial_windows,
     reject_bad_epochs,
-    sliding_window_offsets,
     task_epochs,
 )
-from src.features import (
-    extract_lateralization_features,
-    extract_lateralization_features_windowed,
-)
+from src.features import extract_lateralization_features
 from src.preprocess import preprocess_multichannel_eeg
-from src.runtime_output import configure_console_output
 from src.transfer import gated_ea_augmented_nested_cv, run_transfer_evaluation
 from src.train import (
-    AugmentationContext,
     FBCSP_BAND_CANDIDATES,
     FBCSP_BANDS,
     cross_session_evaluate,
@@ -67,6 +62,19 @@ def _print_header(title: str) -> None:
 def _print_step(step_idx: int, total_steps: int, title: str) -> None:
     """Print a clean step marker."""
     print(f"\n[{step_idx}/{total_steps}] {title}")
+
+
+def _configure_console_output(quiet: bool) -> None:
+    """Silence MNE info logs and short-epoch filter warnings unless verbose."""
+    if quiet:
+        mne.set_log_level("ERROR")
+        warnings.filterwarnings(
+            "ignore",
+            message=r"filter_length .* is longer than the signal.*",
+            category=RuntimeWarning,
+        )
+    else:
+        mne.set_log_level("INFO")
 
 
 def _process_recording(
@@ -170,230 +178,6 @@ def _pairs_to_features(
     return X_features, X_multichannel, y
 
 
-def _build_augmentation_context(
-    left_pairs: dict,
-    right_pairs: dict,
-    sfreq: float,
-    aug_window_sec: float,
-    aug_stride_sec: float,
-) -> AugmentationContext:
-    """Pre-compute per-subject sliding-window augmentation pool and canonical tensors.
-
-    The pool stacks windows for every original trial in the class order
-    ``left then right`` that :func:`_pairs_to_features` uses, so outer trial
-    indices map cleanly between the original (one row per trial) tensors and
-    the augmented pool via the ``origins`` array.
-    """
-    window_samples = int(aug_window_sec * sfreq)
-    stride_samples = max(1, int(aug_stride_sec * sfreq))
-
-    # Infer task length from the first baseline/task pair of the first channel.
-    _, task_signal = left_pairs[CHANNELS[0]][0]
-    task_samples = len(task_signal)
-    offsets = sliding_window_offsets(task_samples, window_samples, stride_samples)
-
-    # Build augmented features per class, concatenate left then right.
-    left_feats_pool, left_origins_local = extract_lateralization_features_windowed(
-        left_pairs, sfreq, offsets, window_samples
-    )
-    right_feats_pool, right_origins_local = extract_lateralization_features_windowed(
-        right_pairs, sfreq, offsets, window_samples
-    )
-    n_left = len(left_pairs[CHANNELS[0]])
-    # Right-class origins are offset by n_left so they match the global index
-    # space used by `_pairs_to_features` (which stacks left first, then right).
-    right_origins_global = right_origins_local + n_left
-    feats_pool = np.vstack([left_feats_pool, right_feats_pool])
-    origins_pool = np.concatenate([left_origins_local, right_origins_global])
-
-    # Build augmented multichannel pool from the same window offsets.
-    left_task = task_epochs(left_pairs, CHANNELS)  # (n_left, n_ch, n_samples)
-    right_task = task_epochs(right_pairs, CHANNELS)
-    left_mc_pool, _ = expand_trial_windows(left_task, window_samples, stride_samples)
-    right_mc_pool, _ = expand_trial_windows(right_task, window_samples, stride_samples)
-    mc_pool = np.vstack([left_mc_pool, right_mc_pool])
-
-    # Canonical center-crop tensors (one row per original trial) used at test.
-    center_off = center_crop_offset(task_samples, window_samples)
-    center_slice = slice(center_off, center_off + window_samples)
-
-    def _center_pairs(pairs: dict) -> dict:
-        return {
-            ch: [(baseline, task[center_slice]) for baseline, task in pairs[ch]]
-            for ch in pairs
-        }
-
-    left_center_pairs = _center_pairs(left_pairs)
-    right_center_pairs = _center_pairs(right_pairs)
-    left_feat_canon = extract_lateralization_features(left_center_pairs, sfreq)
-    right_feat_canon = extract_lateralization_features(right_center_pairs, sfreq)
-    feat_canon = np.vstack([left_feat_canon, right_feat_canon])
-    mc_canon = np.vstack(
-        [
-            left_task[:, :, center_slice],
-            right_task[:, :, center_slice],
-        ]
-    )
-
-    return AugmentationContext(
-        X_features_pool=feats_pool,
-        X_multichannel_pool=mc_pool,
-        origins=origins_pool,
-        X_features_canonical=feat_canon,
-        X_multichannel_canonical=mc_canon,
-    )
-
-
-def _augmented_nested_cv_with_donor_selection(
-    X_features: np.ndarray,
-    X_multichannel: np.ndarray,
-    y: np.ndarray,
-    donor_subjects: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    donor_means: dict[str, np.ndarray],
-    target_sid: str,
-    sfreq: float,
-    n_outer_folds: int,
-    n_inner_folds: int,
-    k_best: int,
-    trial_ptps: np.ndarray | None,
-    split_strategy: str,
-    groups: np.ndarray | None,
-    random_state: int,
-    cov_estimator,
-) -> tuple[float, str, float]:
-    """Augmented nested CV with per-fold donor selection (leakage-free).
-
-    Selects the closest donor using only training-fold covariance mean,
-    so donor selection never sees test-fold data.
-
-    Returns:
-        Tuple of (accuracy, most_frequent_donor_id, mean_distance).
-    """
-    from collections import Counter
-
-    from pyriemann.utils.distance import distance_riemann
-    from pyriemann.utils.mean import mean_covariance
-
-    from src.train import (
-        ALL_CLASSIFIERS,
-        _evaluate_classifier,
-        _evaluate_classifiers_batch,
-        _reject_in_fold,
-    )
-    from src.validation import adaptive_fold_count, make_cv_splits
-
-    n_outer_folds = adaptive_fold_count(len(y), n_outer_folds)
-    outer_splits = make_cv_splits(
-        y,
-        n_splits=n_outer_folds,
-        strategy=split_strategy,
-        groups=groups,
-        random_state=random_state,
-    )
-
-    classifier_names = list(ALL_CLASSIFIERS)
-    fold_scores: list[float] = []
-    fold_donors: list[str] = []
-    fold_dists: list[float] = []
-
-    for outer_train_idx, outer_test_idx in outer_splits:
-        outer_train_idx, outer_test_idx = _reject_in_fold(
-            trial_ptps, outer_train_idx, outer_test_idx
-        )
-        if len(outer_train_idx) < 2 or len(outer_test_idx) < 1:
-            continue
-
-        # Donor selection using TRAINING-FOLD covariance mean only
-        train_covs = cov_estimator.fit_transform(X_multichannel[outer_train_idx])
-        train_mean = mean_covariance(train_covs, metric="riemann")
-
-        dists = {
-            dsid: float(distance_riemann(train_mean, donor_means[dsid]))
-            for dsid in donor_subjects
-            if dsid != target_sid
-        }
-        best_donor = min(dists, key=dists.get)
-        fold_donors.append(best_donor)
-        fold_dists.append(dists[best_donor])
-
-        donor_feat, donor_mc, donor_y = donor_subjects[best_donor]
-
-        # Test fold: TARGET data only
-        X_feat_otest = X_features[outer_test_idx]
-        X_mc_otest = X_multichannel[outer_test_idx]
-        y_otest = y[outer_test_idx]
-
-        # Training fold: TARGET train + donor
-        X_feat_otrain = np.vstack([X_features[outer_train_idx], donor_feat])
-        X_mc_otrain = np.vstack([X_multichannel[outer_train_idx], donor_mc])
-        y_otrain = np.concatenate([y[outer_train_idx], donor_y])
-
-        # Inner CV for model selection
-        n_inner_actual = adaptive_fold_count(len(outer_train_idx), n_inner_folds)
-        inner_groups = groups[outer_train_idx] if groups is not None else None
-        inner_splits = make_cv_splits(
-            y[outer_train_idx],
-            n_splits=n_inner_actual,
-            strategy=split_strategy,
-            groups=inner_groups,
-            random_state=random_state,
-        )
-
-        inner_scores_by_clf: dict[str, list[float]] = {n: [] for n in classifier_names}
-        for inner_train_idx, inner_val_idx in inner_splits:
-            inner_feat_train = np.vstack(
-                [X_features[outer_train_idx[inner_train_idx]], donor_feat]
-            )
-            inner_mc_train = np.vstack(
-                [X_multichannel[outer_train_idx[inner_train_idx]], donor_mc]
-            )
-            inner_y_train = np.concatenate(
-                [y[outer_train_idx[inner_train_idx]], donor_y]
-            )
-            inner_feat_val = X_features[outer_train_idx[inner_val_idx]]
-            inner_mc_val = X_multichannel[outer_train_idx[inner_val_idx]]
-            inner_y_val = y[outer_train_idx[inner_val_idx]]
-
-            split_scores = _evaluate_classifiers_batch(
-                classifier_names,
-                inner_feat_train,
-                inner_feat_val,
-                inner_y_train,
-                inner_y_val,
-                inner_mc_train,
-                inner_mc_val,
-                sfreq,
-                k_best,
-            )
-            for clf_name, score in split_scores.items():
-                inner_scores_by_clf[clf_name].append(score)
-
-        inner_means = {
-            name: float(np.mean(scores)) if scores else 0.5
-            for name, scores in inner_scores_by_clf.items()
-        }
-        best_clf = max(inner_means, key=inner_means.get)
-
-        outer_score = _evaluate_classifier(
-            best_clf,
-            X_feat_otrain,
-            X_feat_otest,
-            y_otrain,
-            y_otest,
-            X_mc_otrain,
-            X_mc_otest,
-            sfreq,
-            k_best,
-        )
-        fold_scores.append(outer_score)
-
-    accuracy = float(np.mean(fold_scores)) if fold_scores else 0.5
-    donor_counts = Counter(fold_donors)
-    most_common_donor = donor_counts.most_common(1)[0][0] if donor_counts else "none"
-    mean_dist = float(np.mean(fold_dists)) if fold_dists else 0.0
-    return accuracy, most_common_donor, mean_dist
-
-
 def run_pipeline(
     data_dir: Path,
     output_dir: Path,
@@ -408,7 +192,7 @@ def run_pipeline(
     results_path: Path | None = None,
 ) -> dict:
     """Run the full training pipeline for left/right motor imagery classification."""
-    configure_console_output(quiet_output)
+    _configure_console_output(quiet_output)
     _print_header("Left/Right Motor Imagery Classifier - Training Pipeline")
     cfg = training_config or TrainingConfig()
     sfreq = cfg.sfreq
@@ -439,10 +223,9 @@ def run_pipeline(
         f"  CV split strategy: {cfg.split_strategy} (group_size={cfg.trial_group_size})"
     )
     print(
-        f"  Parallelism: n_jobs={cfg.n_jobs}, backend={cfg.parallel_backend}, "
+        f"  Parallelism: n_jobs={cfg.n_jobs}, "
         f"blas_threads/worker={cfg.max_blas_threads_per_worker}"
     )
-    print(f"  Bandpass cache: {'on' if cfg.enable_band_cache else 'off'}")
     runtime_seconds["find_recordings"] = time.perf_counter() - step_start
 
     # Step 2: Load and preprocess data for each subject
@@ -454,7 +237,6 @@ def run_pipeline(
     trial_ptps_by_subject: list[np.ndarray] = []
     trial_groups_by_subject: list[np.ndarray] = []
     trial_session_ids_by_subject: list[np.ndarray] = []
-    augmentation_by_subject: list[AugmentationContext | None] = []
 
     X_holdout_by_subject: list[tuple[np.ndarray, np.ndarray]] = []
     y_holdout_by_subject: list[np.ndarray] = []
@@ -543,17 +325,6 @@ def run_pipeline(
                 build_classwise_trial_groups(y, group_size=cfg.trial_group_size)
             )
             trial_session_ids_by_subject.append(np.zeros(len(y), dtype=int))
-            augmentation_by_subject.append(
-                _build_augmentation_context(
-                    train_left,
-                    train_right,
-                    sfreq,
-                    cfg.aug_window_sec,
-                    cfg.aug_stride_sec,
-                )
-                if cfg.temporal_augmentation
-                else None
-            )
 
             if n_test_l > 0 and n_test_r > 0:
                 X_feat_ho, X_mc_ho, y_ho = _pairs_to_features(
@@ -596,17 +367,6 @@ def run_pipeline(
             trial_session_ids_by_subject.append(
                 np.asarray(left_session_ids + right_session_ids, dtype=int)
             )
-            augmentation_by_subject.append(
-                _build_augmentation_context(
-                    left_pairs_by_channel,
-                    right_pairs_by_channel,
-                    sfreq,
-                    cfg.aug_window_sec,
-                    cfg.aug_stride_sec,
-                )
-                if cfg.temporal_augmentation
-                else None
-            )
 
     if not X_by_subject:
         raise ValueError("No valid subjects found")
@@ -616,7 +376,6 @@ def run_pipeline(
     step_start = time.perf_counter()
     _print_step(3, 5, "Running cross-validation")
     n_subj = len(subject_ids)
-    aug_payload = augmentation_by_subject if cfg.temporal_augmentation else None
 
     if skip_all_models_cv:
         print("  Skipping all-models CV (nested-only experiment)")
@@ -648,10 +407,7 @@ def run_pipeline(
             k_best=cfg.k_best,
             k_candidates=cfg.k_candidates,
             n_jobs=cfg.n_jobs,
-            parallel_backend=cfg.parallel_backend,
             max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
-            enable_band_cache=cfg.enable_band_cache,
-            augmentation_by_subject=aug_payload,
         )
         fbcsp_scores, fbcsp_mean, fbcsp_std = cv_results["lda"]
         riemann_scores, riemann_mean, riemann_std = cv_results["riemann"]
@@ -697,12 +453,8 @@ def run_pipeline(
         trial_group_size=cfg.trial_group_size,
         random_state=cfg.random_state,
         n_jobs=cfg.n_jobs,
-        parallel_backend=cfg.parallel_backend,
         max_blas_threads_per_worker=cfg.max_blas_threads_per_worker,
-        enable_band_cache=cfg.enable_band_cache,
-        cache_scope=cfg.cache_scope,
         band_candidates=FBCSP_BAND_CANDIDATES,
-        augmentation_by_subject=aug_payload,
         use_composite_csp=cfg.use_composite_csp,
         composite_csp_lam=cfg.composite_csp_lam,
         session_level_ea=cfg.session_level_ea,
@@ -1161,12 +913,34 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    from src.cli import parse_args
-
-    run_config = parse_args()
-    results = run_pipeline(
-        run_config.data_dir,
-        run_config.output_dir,
-        holdout_fraction=run_config.holdout_fraction,
-        quiet_output=run_config.quiet,
+    parser = argparse.ArgumentParser(description="BCI Motor Imagery Training Pipeline")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data/unicorn-data"),
+        help="Directory with subject/session recordings (default: data/unicorn-data)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("models"),
+        help="Directory to save models and training_results.json",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of trials held out per subject (0.0 disables)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose third-party logs (MNE, warnings)",
+    )
+    args = parser.parse_args()
+    run_pipeline(
+        args.data_dir,
+        args.output_dir,
+        holdout_fraction=args.holdout_fraction,
+        quiet_output=not args.verbose,
     )

@@ -5,7 +5,6 @@ description = "Left/right motor-imagery EEG classifier for 8-channel Unicorn rec
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "asrpy>=0.0.8",
     "joblib>=1.5.3",
     "mne>=1.11.0",
     "numpy>=2.4.2",

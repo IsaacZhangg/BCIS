@@ -20,7 +20,6 @@ def main() -> None:
     )
     parser.add_argument("--composite-csp", action="store_true")
     parser.add_argument("--session-ea", action="store_true")
-    parser.add_argument("--temporal-aug", action="store_true")
     parser.add_argument("--lam", type=float, default=0.3)
     args = parser.parse_args()
 
@@ -29,7 +28,6 @@ def main() -> None:
         use_composite_csp=args.composite_csp,
         composite_csp_lam=args.lam,
         session_level_ea=args.session_ea,
-        temporal_augmentation=args.temporal_aug,
         ea_donor_augmentation=False,
     )
     out_dir = Path("experiments")
