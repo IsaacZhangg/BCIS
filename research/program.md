@@ -13,7 +13,6 @@ Maximize **augmented nested CV** accuracy for left/right motor imagery classific
 | Nested CV | **59.3%** |
 | Augmented nested CV | **61.3%** |
 | Original 10-subject nested | **60.5%** |
-| LOSO transfer | **51.3%** |
 | Subjects reaching ≥60% | 6 of 15 |
 
 Historical 10-subject parameter-tuning ceiling (before MI_DATA_NEW + Composite CSP + session EA): nested 62.0% / augmented 64.6% at seed=42, true mean 58.9% ± 1.4% across 10 seeds. That 10-subject 62.0% is **not** the current headline number.
@@ -40,8 +39,8 @@ Full per-subject scores are generated locally in the gitignored `models/training
 - `src/train.py` — classifiers, nested CV, model selection
 - `src/features.py` — handcrafted feature extraction
 - `src/config.py` — hyperparameters (`TrainingConfig`)
-- `src/epochs.py` / `src/rejection.py` — windowing and in-fold rejection
-- `src/preprocess.py` — filtering (ASR exists, not default)
+- `src/epochs.py` — windowing and peak-to-peak rejection
+- `src/preprocess.py` — filtering
 - `src/composite_csp.py` / `src/alignment.py` / `src/transfer.py` — CCSP, EA, donor pooling
 - `src/pipeline.py` — orchestration
 

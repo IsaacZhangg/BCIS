@@ -19,8 +19,9 @@ SplitStrategy = Literal["stratified", "stratified_group"]
 class TrainingConfig:
     """Global training/evaluation settings.
 
-    The defaults are conservative for leakage control: grouped stratified CV keeps
-    nearby trials together while preserving class balance.
+    ``stratified_group`` CV keeps each block of ``trial_group_size`` consecutive
+    same-class trials in one fold; with the default size of 1 every trial is its
+    own group, so nothing is held together.
     """
 
     sfreq: float = 250.0
